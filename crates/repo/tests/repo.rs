@@ -1,9 +1,10 @@
+use std::collections::BTreeSet;
 use std::fs;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 
 use camino::{Utf8Path, Utf8PathBuf};
-use repo::{BranchTip, Oid, Repo, RepoError, Snapshot};
+use repo::{BranchTip, Change, ChangedFile, LineRange, Oid, Repo, RepoError, Snapshot};
 use testkit::TempRepo;
 
 #[cfg(unix)]
@@ -394,4 +395,238 @@ fn repo_and_snapshot_can_be_shared_between_threads() {
     fn assert_sync<T: Send + Sync>() {}
     assert_sync::<Repo>();
     assert_sync::<Snapshot>();
+}
+
+const GLOBS: &[&str] = &["*.ts", "*.tsx", "*.mts", "*.cts"];
+
+fn changed(path: &str, change: Change, ranges: &[(u32, u32)]) -> ChangedFile {
+    ChangedFile {
+        path: path.into(),
+        change,
+        lines: ranges
+            .iter()
+            .map(|&(start, end)| LineRange { start, end })
+            .collect(),
+    }
+}
+
+fn base(repo: &Repo) -> Oid {
+    repo.resolve("main").unwrap().expect("main")
+}
+
+#[test]
+fn changes_of_the_worktree_take_commits_edits_and_untracked_files() {
+    let t = TempRepo::new();
+    t.write("src/keep.ts", "a\nb\nc\nd\ne\nf\n")
+        .write("src/gone.ts", "gone\n")
+        .write("src/dirty.ts", "old\n")
+        .write("src/dropped.ts", "dropped\n")
+        .write("notes.md", "old\n")
+        .commit("init");
+    t.branch("feat")
+        .write("src/keep.ts", "a\nB\nc\nD\ne\n")
+        .commit("edit");
+    t.write("src/new.ts", "1\n2\n3\n").commit("add");
+    fs::remove_file(t.path().join("src/gone.ts")).unwrap();
+    t.write("notes.md", "new\n").commit("remove");
+    t.write("src/dirty.ts", "new\n")
+        .write("src/staged.ts", "staged\n")
+        .write("src/loose.ts", "loose\n")
+        .write("x.js", "loose\n");
+    t.git(&["add", "src/staged.ts"]);
+    // `diff` calls it deleted, `ls-files --others` untracked; one entry stays.
+    t.git(&["rm", "-q", "--cached", "src/dropped.ts"]);
+    let repo = open(&t);
+
+    assert_eq!(
+        repo.worktree().changes(&base(&repo), GLOBS).unwrap(),
+        [
+            changed("src/dirty.ts", Change::Modified, &[(1, 1)]),
+            changed("src/dropped.ts", Change::Untracked, &[(1, u32::MAX)]),
+            changed("src/gone.ts", Change::Deleted, &[]),
+            changed("src/keep.ts", Change::Modified, &[(2, 2), (4, 4)]),
+            changed("src/loose.ts", Change::Untracked, &[(1, u32::MAX)]),
+            changed("src/new.ts", Change::Added, &[(1, 3)]),
+            changed("src/staged.ts", Change::Added, &[(1, 1)]),
+        ]
+    );
+}
+
+#[test]
+fn changes_list_the_files_of_merge_base_and_diff() {
+    let t = TempRepo::new();
+    t.write("a.ts", "a\n")
+        .write("b.ts", "b\n")
+        .write("main.ts", "main\n")
+        .commit("init");
+    t.branch("feat").write("a.ts", "feat\n").commit("feat");
+    t.checkout("main")
+        .write("main.ts", "ahead\n")
+        .commit("ahead");
+    t.checkout("feat")
+        .write("b.ts", "dirty\n")
+        .write("c.ts", "new\n");
+    let repo = open(&t);
+
+    let found: BTreeSet<Utf8PathBuf> = repo
+        .worktree()
+        .changes(&base(&repo), GLOBS)
+        .unwrap()
+        .into_iter()
+        .map(|file| file.path)
+        .collect();
+
+    let fork = t.git(&["merge-base", "main", "HEAD"]);
+    let mut diff = vec!["diff", "--name-only", &fork, "--"];
+    diff.extend(GLOBS);
+    let mut others = vec!["ls-files", "--others", "--exclude-standard", "--"];
+    others.extend(GLOBS);
+    let expected: BTreeSet<Utf8PathBuf> = [t.git(&diff), t.git(&others)]
+        .iter()
+        .flat_map(|out| out.lines().map(Utf8PathBuf::from))
+        .collect();
+    assert_eq!(found, expected);
+    assert_eq!(
+        found,
+        BTreeSet::from(["a.ts".into(), "b.ts".into(), "c.ts".into()])
+    );
+}
+
+#[test]
+fn changes_show_a_renamed_file_under_its_new_path_with_the_edit_only() {
+    let t = TempRepo::new();
+    t.write("src/old.ts", "1\n2\n3\n4\n5\n6\n7\n8\n")
+        .commit("init");
+    t.branch("feat");
+    t.git(&["mv", "src/old.ts", "src/new.ts"]);
+    t.write("src/new.ts", "1\n2\n3\nfour\n5\n6\n7\n8\n")
+        .commit("rename");
+    let repo = open(&t);
+
+    assert_eq!(
+        repo.worktree().changes(&base(&repo), GLOBS).unwrap(),
+        [changed("src/new.ts", Change::Modified, &[(4, 4)])]
+    );
+}
+
+#[test]
+fn changes_read_odd_names_and_bodies() {
+    let t = TempRepo::new();
+    t.write("src/body.ts", "a\n-- gone\nc\n").commit("init");
+    fs::write(t.path().join("src/bytes.ts"), b"a\nb\n").unwrap();
+    t.commit("bytes");
+    t.branch("feat")
+        .write("src/body.ts", "a\nc\n++ x\n")
+        .write("src/my file.ts", "x\n")
+        .write("src/файл ё.ts", "x\n")
+        .write("src/empty.ts", "");
+    fs::write(t.path().join("src/bytes.ts"), b"a\n\xff\n").unwrap();
+    t.commit("feat");
+    let repo = open(&t);
+
+    assert_eq!(
+        repo.worktree().changes(&base(&repo), GLOBS).unwrap(),
+        [
+            changed("src/body.ts", Change::Modified, &[(3, 3)]),
+            changed("src/bytes.ts", Change::Modified, &[(2, 2)]),
+            changed("src/empty.ts", Change::Added, &[]),
+            changed("src/my file.ts", Change::Added, &[(1, 1)]),
+            changed("src/файл ё.ts", Change::Added, &[(1, 1)]),
+        ]
+    );
+}
+
+#[test]
+fn changes_of_a_revision_skip_the_disk() {
+    let t = TempRepo::new();
+    t.write("a.ts", "a\n").write("b.ts", "b\n").commit("init");
+    t.branch("feat").write("a.ts", "feat\n").commit("feat");
+    t.write("b.ts", "dirty\n").write("c.ts", "untracked\n");
+    let repo = open(&t);
+
+    assert_eq!(
+        repo.at_rev("feat")
+            .unwrap()
+            .changes(&base(&repo), GLOBS)
+            .unwrap(),
+        [changed("a.ts", Change::Modified, &[(1, 1)])]
+    );
+}
+
+#[test]
+fn differs_from_leaves_out_files_that_match_the_base() {
+    let t = TempRepo::new();
+    t.write("a.ts", "1\n")
+        .write("b.ts", "1\n")
+        .write("c.ts", "1\n")
+        .commit("init");
+    t.branch("feat")
+        .write("a.ts", "2\n")
+        .write("b.ts", "2\n")
+        .commit("feat");
+    // As a squash merge of another branch leaves it: `main` got the same `b.ts`.
+    t.checkout("main").write("b.ts", "2\n").commit("squash");
+    t.checkout("feat")
+        .write("c.ts", "dirty\n")
+        .write("d.ts", "untracked\n");
+    let repo = open(&t);
+    let main = base(&repo);
+
+    assert_eq!(
+        repo.worktree().differs_from(&main, GLOBS).unwrap(),
+        BTreeSet::from(["a.ts".into(), "c.ts".into()])
+    );
+    assert_eq!(
+        repo.at_rev("feat")
+            .unwrap()
+            .differs_from(&main, GLOBS)
+            .unwrap(),
+        BTreeSet::from(["a.ts".into()])
+    );
+}
+
+#[test]
+fn the_users_diff_config_changes_nothing() {
+    let t = TempRepo::new();
+    t.write("src/a.ts", "1\n2\n3\n4\n5\n")
+        .write("src/old.ts", "1\n2\n3\n4\n5\n6\n7\n8\n")
+        .commit("init");
+    t.branch("feat")
+        .write("src/a.ts", "1\ntwo\n3\nfour\n5\n")
+        .write("src/e.ts", "enum E {}\n");
+    t.git(&["mv", "src/old.ts", "src/new.ts"]);
+    t.write("src/new.ts", "1\n2\n3\nfour\n5\n6\n7\n8\n")
+        .commit("feat");
+    let repo = open(&t);
+    let main = base(&repo);
+    let read = || {
+        let tree = repo.worktree();
+        (
+            tree.changes(&main, GLOBS).unwrap(),
+            tree.differs_from(&main, GLOBS).unwrap(),
+            tree.grep_word("enum").unwrap(),
+        )
+    };
+    let plain = read();
+    assert_eq!(
+        plain.0,
+        [
+            changed("src/a.ts", Change::Modified, &[(2, 2), (4, 4)]),
+            changed("src/e.ts", Change::Added, &[(1, 1)]),
+            changed("src/new.ts", Change::Modified, &[(4, 4)]),
+        ]
+    );
+
+    for (key, value) in [
+        ("diff.noprefix", "true"),
+        ("diff.mnemonicPrefix", "true"),
+        ("color.ui", "always"),
+        ("diff.interHunkContext", "5"),
+        ("diff.renames", "false"),
+        ("diff.external", "no-such-diff-tool"),
+    ] {
+        t.git(&["config", key, value]);
+    }
+
+    assert_eq!(read(), plain);
 }

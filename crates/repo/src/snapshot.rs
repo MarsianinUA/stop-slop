@@ -1,11 +1,14 @@
+use std::collections::BTreeSet;
 use std::fs;
 use std::io::{ErrorKind, Write as _};
+use std::panic::resume_unwind;
 use std::path::PathBuf;
+use std::thread;
 
 use camino::{Utf8Path, Utf8PathBuf};
 use tempfile::NamedTempFile;
 
-use crate::{Oid, RepoError, git};
+use crate::{Change, ChangedFile, LineRange, Oid, RepoError, diff, git};
 
 /// Files on disk or files of a commit, with paths relative to the repo root.
 #[derive(Debug)]
@@ -75,6 +78,80 @@ impl Snapshot {
         files.sort();
         files.dedup();
         Ok(files)
+    }
+
+    /// Files of `globs` changed since the merge base of `base` and this snapshot, with the
+    /// changed lines of their new side, sorted by path. Files and lines come from one
+    /// `diff -U0 --merge-base`; on `WorkTree` untracked files come from `ls-files --others`,
+    /// run in parallel. Two merge bases (criss-cross) or none is `Git`.
+    pub fn changes(&self, base: &Oid, globs: &[&str]) -> Result<Vec<ChangedFile>, RepoError> {
+        let mut args = vec!["diff"];
+        args.extend(diff::ARGS);
+        args.extend(["--merge-base", &base.0]);
+        let (root, others) = match self {
+            Snapshot::WorkTree(tree) => {
+                let mut others = vec!["ls-files", "-z", "--others", "--exclude-standard", "--"];
+                others.extend(globs);
+                (&tree.root, Some(others))
+            }
+            Snapshot::Rev(rev) => {
+                args.push(&rev.oid.0);
+                (&rev.root, None)
+            }
+        };
+        args.push("--");
+        args.extend(globs);
+        let (patch, untracked) = match others {
+            Some(others) => thread::scope(|scope| {
+                let untracked = scope.spawn(|| git::run(root, &others));
+                let patch = git::run(root, &args);
+                let untracked = untracked
+                    .join()
+                    .unwrap_or_else(|panic| resume_unwind(panic));
+                (patch, untracked)
+            }),
+            None => (git::run(root, &args), Ok(Vec::new())),
+        };
+        let (patch, untracked) = (patch?, untracked?);
+        let mut files = diff::parse(&patch)?;
+        files.extend(git::split(&untracked, 0).map(|path| ChangedFile {
+            path: path.into(),
+            change: Change::Untracked,
+            lines: vec![LineRange {
+                start: 1,
+                end: u32::MAX,
+            }],
+        }));
+        // A path comes twice when it is `Deleted` and is also on disk now: `git rm --cached`
+        // leaves it untracked, a symlink turned into a file is also `Added`. The other entry
+        // tells what the path holds now, so the `Deleted` one goes.
+        let deleted = |file: &ChangedFile| file.change == Change::Deleted;
+        files.sort_by(|a, b| a.path.cmp(&b.path).then(deleted(a).cmp(&deleted(b))));
+        files.dedup_by(|later, earlier| later.path == earlier.path);
+        Ok(files)
+    }
+
+    /// Files of `globs` whose content differs from `base` itself, not from the merge base:
+    /// a file a squash merge already brought into `base` is not here. Untracked files are
+    /// not here either.
+    pub fn differs_from(
+        &self,
+        base: &Oid,
+        globs: &[&str],
+    ) -> Result<BTreeSet<Utf8PathBuf>, RepoError> {
+        // `--no-renames` answers for every path on its own.
+        let mut args = vec!["diff", "--name-only", "-z", "--no-renames", &base.0];
+        let root = match self {
+            Snapshot::WorkTree(tree) => &tree.root,
+            Snapshot::Rev(rev) => {
+                args.push(&rev.oid.0);
+                &rev.root
+            }
+        };
+        args.push("--");
+        args.extend(globs);
+        let out = git::run(root, &args)?;
+        Ok(git::split(&out, 0).map(Into::into).collect())
     }
 
     /// Sorted files that contain `word` as a whole word, without binary files. On `WorkTree`

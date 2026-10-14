@@ -51,6 +51,8 @@ fn output(dir: &Path, args: &[&str], input: Option<&[u8]>) -> Result<Output, Rep
         .current_dir(dir)
         // English messages: `Repo::open` recognizes "not a git repository" in stderr.
         .env("LC_ALL", "C")
+        // It beats `-U0` and would turn context lines into changed ones.
+        .env_remove("GIT_DIFF_OPTS")
         .stdin(if input.is_some() {
             Stdio::piped()
         } else {

@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 
 use camino::Utf8PathBuf;
 
+mod diff;
 mod git;
 mod snapshot;
 
@@ -25,6 +26,31 @@ impl fmt::Display for Oid {
 pub struct BranchTip {
     pub name: String,
     pub oid: Oid,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Change {
+    Added,
+    /// Also a rename (under the new path, with the lines of the edit only), a mode change
+    /// and a binary file (no lines).
+    Modified,
+    Deleted,
+    Untracked,
+}
+
+/// `lines` of `Untracked` is `1..=u32::MAX`; `Deleted` has none.
+#[derive(Debug, PartialEq, Eq)]
+pub struct ChangedFile {
+    pub path: Utf8PathBuf,
+    pub change: Change,
+    pub lines: Vec<LineRange>,
+}
+
+/// From 1, inclusive.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LineRange {
+    pub start: u32,
+    pub end: u32,
 }
 
 #[derive(Debug, thiserror::Error)]
