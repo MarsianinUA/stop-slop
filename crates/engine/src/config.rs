@@ -36,14 +36,19 @@ impl Engine {
             .map(|def| !config.disabled.iter().any(|id| id == def.meta.id))
             .collect();
         let mut rules = Vec::new();
-        for (at, def) in set.rules.iter().enumerate() {
-            let options = options(&def.meta, config.options.get(def.meta.id))?;
-            if enabled[at]
-                && let Impl::Check { build, .. } = &def.imp
+        for (def, &enabled) in set.rules.iter().zip(&enabled) {
+            let overrides = config.options.get(def.meta.id);
+            let options = options(&def.meta, overrides)?;
+            // `[rules.<id>]` of a disabled rule is built too, so a bad value shows before the
+            // rule is turned back on, as an unknown key does.
+            if let Impl::Check { build, .. } = &def.imp
+                && (enabled || overrides.is_some())
             {
                 let rule =
                     build(&options).map_err(|error| bad_option(&def.meta, &options, &error))?;
-                rules.push((at, rule));
+                if enabled {
+                    rules.push((def, rule));
+                }
             }
         }
         Ok(Engine {
@@ -62,7 +67,7 @@ impl Engine {
         let mut needed: Vec<Fact> = self
             .rules
             .iter()
-            .filter(|(at, _)| mode.runs(&self.set.rules[*at].meta))
+            .filter(|(def, _)| mode.runs(&def.meta))
             .flat_map(|(_, rule)| rule.uses())
             .copied()
             .collect();

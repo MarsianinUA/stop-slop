@@ -26,5 +26,5 @@ jobs:
       - name: rustfmt on rule checks (cargo fmt does not see files behind include!)
         shell: bash
         run: find rules -name check.rs -exec rustfmt --check --edition 2024 {} +
-      - run: cargo clippy --workspace --all-targets -- -D warnings
-      - run: cargo test --workspace
+      - run: cargo clippy --locked --workspace --all-targets -- -D warnings
+      - run: cargo test --locked --workspace

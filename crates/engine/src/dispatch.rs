@@ -1,5 +1,5 @@
 use kit::oxc::ast::ast_kind::AST_TYPE_MAX;
-use kit::{DynRule, Files, Impl, Package, Role, Ruleset};
+use kit::{DynRule, Files, Impl, Package, Role, RuleDef, Ruleset};
 
 use crate::Mode;
 use crate::config::{depends_on, requires_package};
@@ -8,7 +8,8 @@ use crate::config::{depends_on, requires_package};
 pub(crate) struct Profile {
     /// Indexed by `AstType as usize`.
     pub by_type: Vec<Vec<usize>>,
-    pub on_file: Vec<usize>,
+    /// Every rule of the profile; each gets `on_file`.
+    pub rules: Vec<usize>,
 }
 
 /// A profile for every mode x (Tests role or not) x (which group conditions the file's
@@ -22,10 +23,10 @@ pub(crate) struct Dispatch {
 }
 
 impl Dispatch {
-    pub fn new(set: &Ruleset, rules: &[(usize, Box<dyn DynRule>)]) -> Dispatch {
+    pub fn new(set: &Ruleset, rules: &[(&RuleDef, Box<dyn DynRule>)]) -> Dispatch {
         let mut conditions = Vec::new();
-        for (at, _) in rules {
-            if let Some(name) = requires_package(set, &set.rules[*at].meta)
+        for (def, _) in rules {
+            if let Some(name) = requires_package(set, &def.meta)
                 && !conditions.contains(&name)
             {
                 conditions.push(name);
@@ -33,8 +34,8 @@ impl Dispatch {
         }
         let condition_of: Vec<Option<usize>> = rules
             .iter()
-            .map(|(at, _)| {
-                let name = requires_package(set, &set.rules[*at].meta)?;
+            .map(|(def, _)| {
+                let name = requires_package(set, &def.meta)?;
                 conditions.iter().position(|c| *c == name)
             })
             .collect();
@@ -47,10 +48,9 @@ impl Dispatch {
                 let mode = Mode::ALL[index >> mode_shift];
                 let mut profile = Profile {
                     by_type: vec![Vec::new(); AST_TYPE_MAX as usize + 1],
-                    on_file: Vec::new(),
+                    rules: Vec::new(),
                 };
-                for (r, (at, _)) in rules.iter().enumerate() {
-                    let def = &set.rules[*at];
+                for (r, (def, _)) in rules.iter().enumerate() {
                     let files = match def.meta.files {
                         Files::All => true,
                         Files::Code => !bit(tests_bit),
@@ -65,7 +65,7 @@ impl Dispatch {
                             profile.by_type[*ty as usize].push(r);
                         }
                     }
-                    profile.on_file.push(r);
+                    profile.rules.push(r);
                 }
                 profile
             })

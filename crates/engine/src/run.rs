@@ -9,7 +9,7 @@ use rayon::prelude::*;
 
 use crate::dispatch::Profile;
 use crate::finding::{self, Draft, FileFindings, PARSE_ERROR};
-use crate::{Engine, Finding, Mode, RunReport, SourceFile, text};
+use crate::{Engine, Finding, Mode, RunReport, SourceFile, fix, text};
 
 impl Engine {
     /// The findings are sorted, so the order does not depend on the number of threads.
@@ -87,8 +87,7 @@ impl Engine {
         };
         let role = self.set.roles.role_of(&file.path);
         let profile = self.dispatch.profile(mode, role, facts.package(&file.path));
-        // Every rule of a profile is in `on_file`, so an empty one runs no rule.
-        if profile.on_file.is_empty() {
+        if profile.rules.is_empty() {
             return out.findings;
         }
         self.run_rules(
@@ -109,7 +108,13 @@ impl Engine {
                     message: finding::fill(meta.message, &report.args),
                     start: source.lines.position(report.span.start),
                     end: source.lines.position(report.span.end),
-                    fixable: fixable(meta, &report),
+                    fixable: fix::sound_edits(
+                        meta,
+                        report.edits,
+                        source.text,
+                        source.lines.line_ending(),
+                    )
+                    .is_some(),
                     place: report.span.source_text(source.text),
                     function,
                 });
@@ -154,25 +159,29 @@ impl Engine {
                 functions.push((node.span(), name));
             }
         }
-        for &r in &profile.on_file {
+        for &r in &profile.rules {
             self.rules[r]
                 .1
                 .on_file(&mut Cx::new(&source, facts, &mut reports[r]));
         }
 
-        for ((at, _), reports) in self.rules.iter().zip(reports) {
-            let meta = &self.set.rules[*at].meta;
-            for report in reports {
+        for ((def, _), reports) in self.rules.iter().zip(reports) {
+            for mut report in reports {
+                report.span = within(report.span, text);
                 let function = finding::function_around(&functions, report.span.start);
-                each(&source, meta, report, function);
+                each(&source, &def.meta, report, function);
             }
         }
     }
 }
 
-/// `Check` marks and `Fix` applies the same reports.
-pub(crate) fn fixable(meta: &RuleMeta, report: &Report) -> bool {
-    meta.fix && !report.edits.is_empty()
+/// `span` cut to fit `text` on char boundaries. A span past the end, inside a char or
+/// backwards would panic every slice of the text and stop the whole run; cut, the finding
+/// still shows near the place the rule meant.
+fn within(span: Span, text: &str) -> Span {
+    let floor = |offset: u32| text.floor_char_boundary(offset as usize) as u32;
+    let end = floor(span.end);
+    Span::new(floor(span.start).min(end), end)
 }
 
 /// The span and message of the first diagnostic when `text` does not parse.

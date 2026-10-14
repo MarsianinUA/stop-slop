@@ -9,7 +9,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
 use camino::Utf8PathBuf;
-use kit::{DynRule, FindingKind, Position, RuleKind, RuleMeta, Ruleset};
+use kit::{DynRule, FindingKind, Position, RuleDef, RuleKind, RuleMeta, Ruleset};
 
 pub use config::ConfigError;
 use dispatch::Dispatch;
@@ -46,6 +46,18 @@ impl Mode {
         }
     }
 }
+
+// `Dispatch` builds profiles in the order of `Mode::ALL` and picks one by `mode as usize`.
+const _: () = {
+    let mut i = 0;
+    while i < Mode::ALL.len() {
+        assert!(
+            Mode::ALL[i] as usize == i,
+            "Mode::ALL lists the variants out of order"
+        );
+        i += 1;
+    }
+};
 
 #[derive(Debug)]
 pub struct SourceFile {
@@ -123,8 +135,8 @@ pub struct Engine {
     set: &'static Ruleset,
     /// By index in `set.rules`; `agent` rules too.
     enabled: Vec<bool>,
-    /// The enabled `Impl::Check` rules, built, with their index in `set.rules`.
-    rules: Vec<(usize, Box<dyn DynRule>)>,
+    /// The enabled `Impl::Check` rules, built.
+    rules: Vec<(&'static RuleDef, Box<dyn DynRule>)>,
     dispatch: Dispatch,
     ignored: BTreeSet<(Utf8PathBuf, String)>,
 }

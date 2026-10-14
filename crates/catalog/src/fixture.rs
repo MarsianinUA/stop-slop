@@ -31,9 +31,17 @@ pub struct Expected {
 
 const EXPECT: &str = "// expect:";
 
+enum Header {
+    Path,
+    Alias,
+    Workspace,
+    Dependency,
+}
+
 /// Headers are the run of `// @path`, `// @alias`, `// @workspace`, `// @dependency` lines at
-/// the top of the file; any other line ends the run, `// @ts-nocheck` too. A mark is a line
-/// tail `// expect: <id>` or `// expect: <id> x<count>`.
+/// the top of the file; any other line ends the run, `// @ts-nocheck` too. A header takes one
+/// value, and `// @path` comes once. A mark is a line tail `// expect: <id>` or
+/// `// expect: <id> x<count>`.
 pub fn read_fixture(file: &Path) -> Result<Fixture, FolderError> {
     let error = |problem| FolderError::new(None, file, problem);
     let source = fs::read_to_string(file).map_err(|e| error(io(e)))?;
@@ -48,6 +56,7 @@ pub fn read_fixture(file: &Path) -> Result<Fixture, FolderError> {
         text: String::with_capacity(source.len()),
         expected: Vec::new(),
     };
+    let mut has_path = false;
     let mut in_headers = true;
     for (index, line) in source.split_inclusive('\n').enumerate() {
         let number = index as u32 + 1;
@@ -55,17 +64,26 @@ pub fn read_fixture(file: &Path) -> Result<Fixture, FolderError> {
         let ending = &line[body.len()..];
 
         if in_headers {
-            if let Some((name, value)) = header(body) {
+            if let Some((name, header, value)) = header(body) {
+                let bad =
+                    |what: String| error(Problem::BadFixture(format!("line {number}: {what}")));
                 if value.is_empty() {
-                    return Err(error(Problem::BadFixture(format!(
-                        "line {number}: `// @{name}` needs a value"
-                    ))));
+                    return Err(bad(format!("`// @{name}` needs a value")));
                 }
-                match name {
-                    "path" => fixture.path = value.into(),
-                    "alias" => fixture.aliases.push(value.to_string()),
-                    "dependency" => fixture.dependencies.push(value.to_string()),
-                    _ => fixture.workspace.push(value.to_string()),
+                if value.contains(char::is_whitespace) {
+                    return Err(bad(format!(
+                        "`// @{name}` takes one value; repeat the header for another"
+                    )));
+                }
+                match header {
+                    Header::Path if has_path => return Err(bad("a second `// @path`".into())),
+                    Header::Path => {
+                        fixture.path = value.into();
+                        has_path = true;
+                    }
+                    Header::Alias => fixture.aliases.push(value.to_string()),
+                    Header::Workspace => fixture.workspace.push(value.to_string()),
+                    Header::Dependency => fixture.dependencies.push(value.to_string()),
                 }
                 fixture.text.push_str(ending);
                 continue;
@@ -86,11 +104,18 @@ pub fn read_fixture(file: &Path) -> Result<Fixture, FolderError> {
     Ok(fixture)
 }
 
-/// `(name, value)` of a `// @path`, `// @alias`, `// @workspace` or `// @dependency` line.
-fn header(body: &str) -> Option<(&str, &str)> {
+/// `(name, header, value)` of a `// @<name> <value>` line with a header name.
+fn header(body: &str) -> Option<(&str, Header, &str)> {
     let rest = body.strip_prefix("// @")?;
     let (name, value) = rest.split_once(char::is_whitespace).unwrap_or((rest, ""));
-    matches!(name, "path" | "alias" | "workspace" | "dependency").then_some((name, value.trim()))
+    let header = match name {
+        "path" => Header::Path,
+        "alias" => Header::Alias,
+        "workspace" => Header::Workspace,
+        "dependency" => Header::Dependency,
+        _ => return None,
+    };
+    Some((name, header, value.trim()))
 }
 
 fn expect(line: u32, mark: &str) -> Result<Expected, Problem> {

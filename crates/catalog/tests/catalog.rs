@@ -450,6 +450,8 @@ fn bad_marks_and_unreadable_fixtures_name_the_rule() {
         "let a; // expect:\n",
         "let a; // expect: no-any xабв\n",
         "// @path\nlet a;\n",
+        "// @path src/a.ts\n// @path src/b.ts\nlet a;\n",
+        "// @dependency events util\nlet a;\n",
     ] {
         fs::write(&file, text).unwrap();
         let error = read_fixture(&file).unwrap_err();

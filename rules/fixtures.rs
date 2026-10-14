@@ -120,7 +120,8 @@ fn fix(def: &'static RuleDef, dir: &Path) -> Result<(), Failed> {
     let Some(got) = fixed_text(def, &invalid)? else {
         return Err(concat!(
             "`fix = true`, but the fix of invalid.ts changes nothing: no `.fix(..)`, or the engine ",
-            "dropped the edits (they overlap, cut a character or leave text that does not parse)"
+            "dropped the edits (they overlap, cut a character, write the text that is already ",
+            "there or leave text that does not parse)"
         )
         .into());
     };

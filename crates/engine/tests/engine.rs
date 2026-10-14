@@ -190,6 +190,52 @@ impl Rule for BadEdits {
     }
 }
 
+/// Spans past the end of the text, inside `é` and backwards. The first one also puts `0;`
+/// at the start of a text that does not have it yet.
+#[derive(Deserialize)]
+#[serde(crate = "kit::serde", deny_unknown_fields)]
+struct BadSpans {}
+
+impl Rule for BadSpans {
+    fn on_file<'a>(&self, cx: &mut Cx<'_, 'a>) {
+        let text = cx.file().text;
+        let end = text.len() as u32;
+        let past_end = cx.report(Span::new(end, end + 5));
+        if !text.starts_with("0;") {
+            past_end.fix([Edit {
+                span: Span::empty(0),
+                text: "0;".into(),
+            }]);
+        }
+        if let Some(at) = text.find('é') {
+            cx.report(Span::empty(at as u32 + 1));
+        }
+        cx.report(Span::new(2, 1));
+    }
+}
+
+/// `wrap(x)` -> `wrap(x)`: an edit that changes nothing.
+#[derive(Deserialize)]
+#[serde(crate = "kit::serde", deny_unknown_fields)]
+struct Same {}
+
+impl Rule for Same {
+    const NODES: &'static [AstType] = &[AstType::CallExpression];
+
+    fn on_node<'a>(&self, node: &AstNode<'a>, cx: &mut Cx<'_, 'a>) {
+        let AstKind::CallExpression(call) = node.kind() else {
+            return;
+        };
+        if call.callee_name() == Some("wrap") {
+            let text = call.span.source_text(cx.file().text).to_string();
+            cx.report(call.span).fix([Edit {
+                span: call.span,
+                text,
+            }]);
+        }
+    }
+}
+
 const META: RuleMeta = RuleMeta {
     id: "",
     group: "core",
@@ -261,6 +307,12 @@ static SET: Ruleset = Ruleset {
             fix: true,
             ..META
         }),
+        // Before `unwrap`, so its fix of a `wrap(..)` comes first in a pass.
+        check::<Same>(RuleMeta {
+            id: "same",
+            fix: true,
+            ..META
+        }),
         check::<Unwrap>(RuleMeta {
             id: "unwrap",
             fix: true,
@@ -279,6 +331,11 @@ static SET: Ruleset = Ruleset {
         }),
         check::<BadEdits>(RuleMeta {
             id: "bad-edits",
+            fix: true,
+            ..META
+        }),
+        check::<BadSpans>(RuleMeta {
+            id: "bad-spans",
             fix: true,
             ..META
         }),
@@ -460,6 +517,13 @@ fn config_options_override_rule_options_and_name_the_bad_key() {
     };
     assert_eq!(key, "rules.depth.depth");
     assert!(!message.is_empty());
+    assert!(
+        matches!(
+            with_depth_options(only(&[]), "depth = \"x\"").err(),
+            Some(ConfigError::BadOption { .. })
+        ),
+        "values of a disabled rule are checked too"
+    );
 }
 
 #[test]
@@ -957,11 +1021,52 @@ fn fix_runs_only_fix_rules_and_reports_no_findings() {
 
 #[test]
 fn broken_edits_are_not_applied_and_do_not_stop_the_run() {
+    let text = "wrap(1); const s = \"é\";";
     assert_eq!(
-        fix(
-            &engine(&["bad-edits", "unwrap"]),
-            "wrap(1); const s = \"é\";"
-        ),
+        fix(&engine(&["bad-edits", "unwrap"]), text),
         (Some("1; const s = \"é\";".into()), vec![("unwrap", 1)])
+    );
+
+    let findings = check_files(&engine(&["bad-edits"]), vec![source("src/a.ts", text)]);
+    assert_eq!(findings.len(), 4);
+    assert!(
+        findings.iter().all(|f| !f.fixable),
+        "`Fix` never takes them"
+    );
+}
+
+#[test]
+fn an_edit_that_changes_nothing_is_no_fix() {
+    let engine = engine(&["same", "unwrap"]);
+    assert_eq!(
+        fix(&engine, "wrap(1);"),
+        (Some("1;".into()), vec![("unwrap", 1)]),
+        "taken first in every pass, the edit of `same` would hold back `unwrap`"
+    );
+
+    let fixable: Vec<_> = check_files(&engine, vec![source("src/a.ts", "wrap(1);")])
+        .iter()
+        .map(|f| (f.rule, f.fixable))
+        .collect();
+    assert_eq!(fixable, [("same", false), ("unwrap", true)]);
+}
+
+#[test]
+fn a_report_span_past_the_text_or_inside_a_char_is_cut_to_fit() {
+    let engine = engine(&["bad-spans"]);
+    let text = "const s = \"é\";";
+
+    let findings = check_files(&engine, vec![source("src/a.ts", text)]);
+    assert_eq!(
+        brief(&findings),
+        [
+            "src/a.ts:1:2 bad-spans",
+            "src/a.ts:1:12 bad-spans",
+            "src/a.ts:1:15 bad-spans",
+        ]
+    );
+    assert_eq!(
+        fix(&engine, text),
+        (Some(format!("0;{text}")), vec![("bad-spans", 1)])
     );
 }

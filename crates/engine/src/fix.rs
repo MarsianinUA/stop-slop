@@ -3,9 +3,9 @@ use std::collections::BTreeMap;
 
 use kit::oxc::allocator::Allocator;
 use kit::oxc::span::SourceType;
-use kit::{Edit, Facts, LineIndex};
+use kit::{Edit, Facts, LineIndex, RuleMeta};
 
-use crate::run::{self, parse};
+use crate::run::parse;
 use crate::{Engine, FixCount, Mode, Rewritten, SourceFile, finding, text};
 
 /// Passes that apply edits; one more pass only parses the result.
@@ -25,7 +25,7 @@ impl Engine {
         let profile = self
             .dispatch
             .profile(Mode::Fix, role, facts.package(&file.path));
-        if profile.on_file.is_empty() {
+        if profile.rules.is_empty() {
             return None;
         }
         let (original, bom) = text::decode(&file.bytes)?;
@@ -48,17 +48,17 @@ impl Engine {
                 profile,
                 facts,
                 |source, meta, report, function| {
-                    if !run::fixable(meta, &report) {
+                    let Some(edits) = sound_edits(meta, report.edits, source.text, ending) else {
                         return;
-                    }
+                    };
                     let place = report.span.source_text(source.text);
                     let key = finding::ignore_key(&file.path, meta.id, place, function);
                     if !self.ignored.contains(&key) {
-                        fixes.push((meta.id, report.edits));
+                        fixes.push((meta.id, edits));
                     }
                 },
             );
-            let taken = choose(fixes, &current);
+            let taken = choose(fixes);
             if taken.is_empty() {
                 break;
             }
@@ -89,18 +89,42 @@ impl Engine {
     }
 }
 
+/// The edits `Fix` applies for a report, sorted, without those that leave `text` as it is.
+/// `None` when the rule has `fix = false`, when an edit lies outside `text`, cuts a char or
+/// overlaps the next one, or when no edit is left: that finding stays unfixed, and `Check`
+/// does not mark it fixable.
+pub(crate) fn sound_edits(
+    meta: &RuleMeta,
+    mut edits: Vec<Edit>,
+    text: &str,
+    ending: &str,
+) -> Option<Vec<Edit>> {
+    if !meta.fix {
+        return None;
+    }
+    edits.sort_by_key(|edit| (edit.span.start, edit.span.end));
+    let inside = |offset: u32| text.is_char_boundary(offset as usize);
+    let sound = edits.iter().all(|edit| {
+        edit.span.start <= edit.span.end && inside(edit.span.start) && inside(edit.span.end)
+    }) && edits
+        .windows(2)
+        .all(|pair| pair[0].span.end <= pair[1].span.start);
+    if !sound {
+        return None;
+    }
+    // Taken in every pass, an edit that changes nothing would count again each time and hold
+    // back the fixes it touches.
+    edits.retain(|edit| {
+        text[edit.span.start as usize..edit.span.end as usize]
+            != *text::with_line_ending(&edit.text, ending)
+    });
+    (!edits.is_empty()).then_some(edits)
+}
+
 /// The fixes of one pass: in order of their first edit, then as given, each fix whose edits
 /// neither overlap nor touch the edits of one already taken. Touching edits wait for the
-/// next pass, so the order of two inserts at one point is never guessed. A fix with a broken
-/// edit is never taken; it stays a finding.
-fn choose(fixes: Vec<(&'static str, Vec<Edit>)>, text: &str) -> Vec<(&'static str, Vec<Edit>)> {
-    let mut fixes: Vec<_> = fixes
-        .into_iter()
-        .filter_map(|(r, mut edits)| {
-            edits.sort_by_key(|edit| (edit.span.start, edit.span.end));
-            is_sound(&edits, text).then_some((r, edits))
-        })
-        .collect();
+/// next pass, so the order of two inserts at one point is never guessed.
+fn choose(mut fixes: Vec<(&'static str, Vec<Edit>)>) -> Vec<(&'static str, Vec<Edit>)> {
     fixes.sort_by_key(|(_, edits)| edits[0].span.start);
 
     let touches = |a: &Edit, b: &Edit| a.span.start <= b.span.end && b.span.start <= a.span.end;
@@ -117,17 +141,6 @@ fn choose(fixes: Vec<(&'static str, Vec<Edit>)>, text: &str) -> Vec<(&'static st
         }
     }
     taken
-}
-
-/// `edits` come sorted. Each must lie in `text` on char boundaries and not overlap the next
-/// one; touching is fine.
-fn is_sound(edits: &[Edit], text: &str) -> bool {
-    let inside = |offset: u32| text.is_char_boundary(offset as usize);
-    edits.iter().all(|edit| {
-        edit.span.start <= edit.span.end && inside(edit.span.start) && inside(edit.span.end)
-    }) && edits
-        .windows(2)
-        .all(|pair| pair[0].span.end <= pair[1].span.start)
 }
 
 /// `edits` of different fixes do not touch; the edits of one fix keep their sorted order.
