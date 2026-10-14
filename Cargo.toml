@@ -8,6 +8,7 @@ edition = "2024"
 
 [workspace.dependencies]
 camino = "1"
+libtest-mimic = "0.8"
 rayon = "1"
 serde = { version = "1", features = ["derive"] }
 tempfile = "3"

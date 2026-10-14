@@ -17,3 +17,13 @@ kit = { path = "../crates/kit" }
 
 [build-dependencies]
 catalog = { path = "../crates/catalog" }
+
+[[test]]
+name = "fixtures"
+path = "fixtures.rs"
+harness = false
+
+[dev-dependencies]
+catalog = { path = "../crates/catalog" }
+engine = { path = "../crates/engine" }
+libtest-mimic.workspace = true
