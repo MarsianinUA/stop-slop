@@ -366,6 +366,8 @@ fn read_fixture_takes_headers_and_marks_and_keeps_line_numbers() {
         "// @path src/orders/order.response.ts
 // @alias @/*
 // @workspace @acme/x
+// @dependency events
+// @dependency buffer
 // @ts-nocheck
 let a: any; // expect: no-any
 let b: any = 1 as any;   // expect: no-any x2
@@ -379,16 +381,17 @@ let b: any = 1 as any;   // expect: no-any x2
     assert_eq!(fixture.path, "src/orders/order.response.ts");
     assert_eq!(fixture.aliases, ["@/*"]);
     assert_eq!(fixture.workspace, ["@acme/x"]);
+    assert_eq!(fixture.dependencies, ["events", "buffer"]);
     assert_eq!(
         fixture.text,
-        "\n\n\n// @ts-nocheck\nlet a: any;\nlet b: any = 1 as any;\n// @path not-a-header\n"
+        "\n\n\n\n\n// @ts-nocheck\nlet a: any;\nlet b: any = 1 as any;\n// @path not-a-header\n"
     );
     let expected = |line, count| Expected {
         line,
         rule: "no-any".to_string(),
         count,
     };
-    assert_eq!(fixture.expected, [expected(5, 1), expected(6, 2)]);
+    assert_eq!(fixture.expected, [expected(7, 1), expected(8, 2)]);
 
     fs::write(&file, "let a; // expect: no-any\r\nlet b;\r\n").unwrap();
     let crlf = read_fixture(&file).unwrap();

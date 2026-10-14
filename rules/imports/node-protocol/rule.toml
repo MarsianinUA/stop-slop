@@ -1,0 +1,5 @@
+description = "`'fs'` instead of `'node:fs'`"
+kind = "error"
+fix = true
+source = ["personal"]
+message = "A bare `{module}` reads like a package from npm, and a bundler can resolve it to one. `node:{module}` says it is built into Node, and nothing else can stand in for it."

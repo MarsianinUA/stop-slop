@@ -14,6 +14,8 @@ pub struct Fixture {
     pub aliases: Vec<String>,
     /// From `// @workspace` headers.
     pub workspace: Vec<String>,
+    /// From `// @dependency` headers.
+    pub dependencies: Vec<String>,
     /// Header lines become empty lines and `// expect:` tails are cut with the spaces
     /// before them, so line numbers stay the same.
     pub text: String,
@@ -29,9 +31,9 @@ pub struct Expected {
 
 const EXPECT: &str = "// expect:";
 
-/// Headers are the run of `// @path`, `// @alias`, `// @workspace` lines at the top of the
-/// file; any other line ends the run, `// @ts-nocheck` too. A mark is a line tail
-/// `// expect: <id>` or `// expect: <id> x<count>`.
+/// Headers are the run of `// @path`, `// @alias`, `// @workspace`, `// @dependency` lines at
+/// the top of the file; any other line ends the run, `// @ts-nocheck` too. A mark is a line
+/// tail `// expect: <id>` or `// expect: <id> x<count>`.
 pub fn read_fixture(file: &Path) -> Result<Fixture, FolderError> {
     let error = |problem| FolderError::new(None, file, problem);
     let source = fs::read_to_string(file).map_err(|e| error(io(e)))?;
@@ -42,6 +44,7 @@ pub fn read_fixture(file: &Path) -> Result<Fixture, FolderError> {
         path: Utf8PathBuf::from("src/fixture.ts"),
         aliases: Vec::new(),
         workspace: Vec::new(),
+        dependencies: Vec::new(),
         text: String::with_capacity(source.len()),
         expected: Vec::new(),
     };
@@ -61,6 +64,7 @@ pub fn read_fixture(file: &Path) -> Result<Fixture, FolderError> {
                 match name {
                     "path" => fixture.path = value.into(),
                     "alias" => fixture.aliases.push(value.to_string()),
+                    "dependency" => fixture.dependencies.push(value.to_string()),
                     _ => fixture.workspace.push(value.to_string()),
                 }
                 fixture.text.push_str(ending);
@@ -82,11 +86,11 @@ pub fn read_fixture(file: &Path) -> Result<Fixture, FolderError> {
     Ok(fixture)
 }
 
-/// `(name, value)` of a `// @path`, `// @alias` or `// @workspace` line.
+/// `(name, value)` of a `// @path`, `// @alias`, `// @workspace` or `// @dependency` line.
 fn header(body: &str) -> Option<(&str, &str)> {
     let rest = body.strip_prefix("// @")?;
     let (name, value) = rest.split_once(char::is_whitespace).unwrap_or((rest, ""));
-    matches!(name, "path" | "alias" | "workspace").then_some((name, value.trim()))
+    matches!(name, "path" | "alias" | "workspace" | "dependency").then_some((name, value.trim()))
 }
 
 fn expect(line: u32, mark: &str) -> Result<Expected, Problem> {
