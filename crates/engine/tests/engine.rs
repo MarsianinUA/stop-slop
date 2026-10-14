@@ -1,7 +1,9 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use camino::{Utf8Path, Utf8PathBuf};
-use engine::{ConfigError, Engine, Finding, LineRange, Mode, RunConfig, SourceFile};
+use engine::{
+    ConfigError, Engine, Finding, FixCount, LineRange, Mode, RunConfig, RunReport, SourceFile,
+};
 use kit::prelude::*;
 use kit::{
     EnumIndex, Facts, Files, FindingKind, GroupDef, Impl, Package, RoleDef, Roles, RuleDef,
@@ -96,6 +98,98 @@ impl Rule for Fixer {
     }
 }
 
+/// `wrap(x)` -> `x`.
+#[derive(Deserialize)]
+#[serde(crate = "kit::serde", deny_unknown_fields)]
+struct Unwrap {}
+
+impl Rule for Unwrap {
+    const NODES: &'static [AstType] = &[AstType::CallExpression];
+
+    fn on_node<'a>(&self, node: &AstNode<'a>, cx: &mut Cx<'_, 'a>) {
+        let AstKind::CallExpression(call) = node.kind() else {
+            return;
+        };
+        if call.callee_name() == Some("wrap")
+            && let [argument] = call.arguments.as_slice()
+        {
+            let text = argument.span().source_text(cx.file().text).to_string();
+            cx.report(call.span).fix([Edit {
+                span: call.span,
+                text,
+            }]);
+        }
+    }
+}
+
+/// `pair()` -> `a();`, then `b()` on the next line, the two joined by `ending`.
+#[derive(Deserialize)]
+#[serde(crate = "kit::serde", deny_unknown_fields)]
+struct Split {
+    ending: String,
+}
+
+impl Rule for Split {
+    const NODES: &'static [AstType] = &[AstType::CallExpression];
+
+    fn on_node<'a>(&self, node: &AstNode<'a>, cx: &mut Cx<'_, 'a>) {
+        let AstKind::CallExpression(call) = node.kind() else {
+            return;
+        };
+        if call.callee_name() == Some("pair") {
+            cx.report(call.span).fix([Edit {
+                span: call.span,
+                text: format!("a();{}b()", self.ending),
+            }]);
+        }
+    }
+}
+
+/// Each `breaks()` adds `(` at the end of the file, which then does not parse.
+#[derive(Deserialize)]
+#[serde(crate = "kit::serde", deny_unknown_fields)]
+struct Break {}
+
+impl Rule for Break {
+    const NODES: &'static [AstType] = &[AstType::CallExpression];
+
+    fn on_node<'a>(&self, node: &AstNode<'a>, cx: &mut Cx<'_, 'a>) {
+        let AstKind::CallExpression(call) = node.kind() else {
+            return;
+        };
+        if call.callee_name() == Some("breaks") {
+            let end = cx.file().text.len() as u32;
+            cx.report(call.span).fix([Edit {
+                span: Span::empty(end),
+                text: "(".into(),
+            }]);
+        }
+    }
+}
+
+/// Sound findings with broken edits.
+#[derive(Deserialize)]
+#[serde(crate = "kit::serde", deny_unknown_fields)]
+struct BadEdits {}
+
+impl Rule for BadEdits {
+    fn on_file<'a>(&self, cx: &mut Cx<'_, 'a>) {
+        let text = cx.file().text;
+        let edit = |start: u32, end: u32| Edit {
+            span: Span::new(start, end),
+            text: "x".into(),
+        };
+        let past_end = text.len() as u32 + 1;
+        cx.report(Span::empty(0)).fix([edit(past_end, past_end)]);
+        cx.report(Span::empty(0)).fix([edit(2, 1)]);
+        cx.report(Span::empty(0)).fix([edit(0, 2), edit(1, 3)]);
+        if let Some(at) = text.find('é') {
+            let inside = at as u32 + 1;
+            cx.report(Span::empty(0)).fix([edit(inside, inside)]);
+        }
+    }
+}
+
 const META: RuleMeta = RuleMeta {
     id: "",
     group: "core",
@@ -164,6 +258,27 @@ static SET: Ruleset = Ruleset {
         }),
         check::<Fixer>(RuleMeta {
             id: "fix-on",
+            fix: true,
+            ..META
+        }),
+        check::<Unwrap>(RuleMeta {
+            id: "unwrap",
+            fix: true,
+            ..META
+        }),
+        check::<Split>(RuleMeta {
+            id: "split",
+            fix: true,
+            options: "ending = \"\\n\"\n",
+            ..META
+        }),
+        check::<Break>(RuleMeta {
+            id: "break",
+            fix: true,
+            ..META
+        }),
+        check::<BadEdits>(RuleMeta {
+            id: "bad-edits",
             fix: true,
             ..META
         }),
@@ -653,5 +768,200 @@ fn fixable_needs_fix_in_rule_toml_and_an_edit() {
             (2, "call", false),
             (2, "fix-on", false),
         ]
+    );
+}
+
+fn fix_files(engine: &Engine, files: Vec<SourceFile>) -> RunReport {
+    engine.run(files, &no_facts(), Mode::Fix)
+}
+
+fn rewritten(report: &RunReport) -> Vec<String> {
+    report
+        .rewritten
+        .iter()
+        .map(|file| format!("{}: {}", file.path, String::from_utf8_lossy(&file.bytes)))
+        .collect()
+}
+
+/// What `Fix` writes to `src/a.ts` (`None`: the file stays as it is) and the `fixed` count
+/// of each rule there.
+fn fix(engine: &Engine, text: &str) -> (Option<String>, Vec<(&'static str, u32)>) {
+    let report = fix_files(engine, vec![source("src/a.ts", text)]);
+    let text = report
+        .rewritten
+        .into_iter()
+        .next()
+        .map(|file| String::from_utf8(file.bytes).unwrap());
+    let counts = report.fixed.iter().map(|f| (f.rule, f.count)).collect();
+    (text, counts)
+}
+
+fn count(file: &str, rule: &'static str, count: u32) -> FixCount {
+    FixCount {
+        rule,
+        file: file.into(),
+        count,
+    }
+}
+
+#[test]
+fn fix_applies_edits_that_do_not_touch_in_at_most_three_passes() {
+    let engine = engine(&["unwrap"]);
+
+    assert_eq!(
+        fix(&engine, "wrap(1); wrap(2);"),
+        (Some("1; 2;".into()), vec![("unwrap", 2)])
+    );
+    assert_eq!(
+        fix(&engine, "wrap(wrap(1));"),
+        (Some("1;".into()), vec![("unwrap", 2)]),
+        "the inner edit lies inside the outer one and waits for the next pass"
+    );
+    assert_eq!(
+        fix(&engine, "wrap(wrap(wrap(wrap(1))));"),
+        (Some("wrap(1);".into()), vec![("unwrap", 3)])
+    );
+}
+
+#[test]
+fn a_second_fix_of_the_fixed_text_changes_nothing() {
+    let engine = engine(&["unwrap"]);
+    let first = fix_files(&engine, vec![source("src/a.ts", "wrap(wrap(1));")]);
+    assert_eq!(rewritten(&first), ["src/a.ts: 1;"]);
+
+    let fixed = SourceFile {
+        bytes: first.rewritten.into_iter().next().unwrap().bytes,
+        ..source("src/a.ts", "")
+    };
+    let again = fix_files(&engine, vec![fixed]);
+
+    assert!(again.rewritten.is_empty());
+    assert!(again.fixed.is_empty());
+}
+
+#[test]
+fn an_edit_that_breaks_parsing_leaves_its_file_and_edits_of_fix_false_rules_are_dropped() {
+    let report = fix_files(
+        &engine(&["unwrap", "break"]),
+        vec![
+            source("src/a.ts", "wrap(1); breaks();"),
+            source("src/b.ts", "wrap(2);"),
+        ],
+    );
+    assert_eq!(
+        rewritten(&report),
+        ["src/b.ts: 2;"],
+        "the good edit of `src/a.ts` is dropped too"
+    );
+    assert_eq!(report.fixed, [count("src/b.ts", "unwrap", 1)]);
+
+    assert_eq!(fix(&engine(&["call"]), "edit();"), (None, vec![]));
+    assert_eq!(
+        fix(&engine(&["fix-on"]), "edit();"),
+        (Some(";".into()), vec![("fix-on", 1)])
+    );
+}
+
+#[test]
+fn fixed_counts_fixed_findings_by_file_and_rule() {
+    let report = fix_files(
+        &engine(&["unwrap", "fix-on"]),
+        vec![
+            source("src/b.ts", "wrap(3);"),
+            source("src/a.ts", "wrap(1); wrap(2); edit();"),
+        ],
+    );
+
+    assert_eq!(
+        report.fixed,
+        [
+            count("src/a.ts", "fix-on", 1),
+            count("src/a.ts", "unwrap", 2),
+            count("src/b.ts", "unwrap", 1),
+        ]
+    );
+    assert_eq!(rewritten(&report), ["src/a.ts: 1; 2; ;", "src/b.ts: 3;"]);
+}
+
+#[test]
+fn fix_keeps_the_bom_and_writes_the_line_ending_of_the_file() {
+    let mut with_bom = source("src/bom.ts", "wrap(1);");
+    with_bom.bytes.splice(0..0, [0xEF, 0xBB, 0xBF]);
+    let report = fix_files(&engine(&["unwrap"]), vec![with_bom]);
+    assert_eq!(report.rewritten[0].bytes, b"\xEF\xBB\xBF1;");
+
+    let split = engine(&["split"]);
+    assert_eq!(
+        fix(&split, "x;\r\npair();\r\n").0.unwrap(),
+        "x;\r\na();\r\nb();\r\n"
+    );
+    assert_eq!(fix(&split, "pair();\n").0.unwrap(), "a();\nb();\n");
+
+    let crlf_edit = RunConfig {
+        options: BTreeMap::from([(
+            "split".into(),
+            toml::from_str(r#"ending = "\r\n""#).unwrap(),
+        )]),
+        ..only(&["split"])
+    };
+    assert_eq!(
+        fix(&Engine::new(&SET, crlf_edit).unwrap(), "x;\r\npair();\r\n")
+            .0
+            .unwrap(),
+        "x;\r\na();\r\nb();\r\n",
+        "a `\r\n` of the rule is not doubled"
+    );
+}
+
+#[test]
+fn fix_leaves_an_ignored_finding_as_it_is() {
+    let text = "function f() { wrap(1); }\nfunction g() { wrap(1); }";
+    let in_f = check_files(&engine(&["unwrap"]), vec![source("src/a.ts", text)])[0]
+        .fingerprint
+        .to_string();
+    let config = RunConfig {
+        ignored: BTreeSet::from([("src/a.ts".into(), in_f)]),
+        ..only(&["unwrap"])
+    };
+
+    assert_eq!(
+        fix(&Engine::new(&SET, config).unwrap(), text),
+        (
+            Some("function f() { wrap(1); }\nfunction g() { 1; }".into()),
+            vec![("unwrap", 1)]
+        )
+    );
+}
+
+#[test]
+fn fix_runs_only_fix_rules_and_reports_no_findings() {
+    let engine = engine(&["unwrap", "per-file", "candidate"]);
+    let run = |mode| engine.run(vec![source("src/a.ts", "wrap(1);")], &no_facts(), mode);
+
+    let fixed = run(Mode::Fix);
+    assert!(fixed.findings.is_empty());
+    assert_eq!(fixed.fixed, [count("src/a.ts", "unwrap", 1)]);
+    assert_eq!(
+        engine.facts_needed(Mode::Fix),
+        [],
+        "no facts of `candidate`"
+    );
+
+    for mode in [Mode::Check, Mode::Hook] {
+        let report = run(mode);
+        assert!(!report.findings.is_empty(), "{mode:?}");
+        assert!(report.fixed.is_empty(), "{mode:?}");
+        assert!(report.rewritten.is_empty(), "{mode:?}");
+    }
+}
+
+#[test]
+fn broken_edits_are_not_applied_and_do_not_stop_the_run() {
+    assert_eq!(
+        fix(
+            &engine(&["bad-edits", "unwrap"]),
+            "wrap(1); const s = \"é\";"
+        ),
+        (Some("1; const s = \"é\";".into()), vec![("unwrap", 1)])
     );
 }

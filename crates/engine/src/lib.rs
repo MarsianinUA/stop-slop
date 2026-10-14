@@ -1,6 +1,7 @@
 mod config;
 mod dispatch;
 mod finding;
+mod fix;
 mod run;
 mod text;
 
@@ -26,13 +27,23 @@ pub struct RunConfig {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Mode {
     Check,
+    /// Runs only `fix = true` rules and applies their edits, except on ignored findings. It
+    /// reports no findings: a `Check` run on the written files shows what is left.
+    Fix,
     /// Runs only `kind = error` rules.
     Hook,
 }
 
 impl Mode {
-    fn runs(self, kind: RuleKind) -> bool {
-        self == Mode::Check || kind == RuleKind::Error
+    /// In the order of the variants, so `Mode::ALL[mode as usize] == mode`.
+    const ALL: [Mode; 3] = [Mode::Check, Mode::Fix, Mode::Hook];
+
+    fn runs(self, meta: &RuleMeta) -> bool {
+        match self {
+            Mode::Check => true,
+            Mode::Fix => meta.fix,
+            Mode::Hook => meta.kind == RuleKind::Error,
+        }
     }
 }
 
@@ -53,8 +64,12 @@ pub struct LineRange {
 
 #[derive(Debug)]
 pub struct RunReport {
-    /// Sorted by file, line, column, rule.
+    /// Sorted by file, line, column, rule; empty in `Fix`.
     pub findings: Vec<Finding>,
+    /// Only in `Fix`; sorted by file, rule.
+    pub fixed: Vec<FixCount>,
+    /// Only in `Fix`; sorted by path.
+    pub rewritten: Vec<Rewritten>,
 }
 
 #[derive(Debug)]
@@ -81,6 +96,21 @@ impl fmt::Display for Fingerprint {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(&self.0)
     }
+}
+
+/// How many findings of `rule` `Fix` fixed in `file`.
+#[derive(Debug, PartialEq, Eq)]
+pub struct FixCount {
+    pub rule: &'static str,
+    pub file: Utf8PathBuf,
+    pub count: u32,
+}
+
+/// The new content of a file `Fix` changed, with its BOM and line endings as they were.
+#[derive(Debug)]
+pub struct Rewritten {
+    pub path: Utf8PathBuf,
+    pub bytes: Vec<u8>,
 }
 
 #[derive(Debug)]

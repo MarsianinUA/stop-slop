@@ -1,16 +1,36 @@
+use camino::Utf8Path;
 use kit::oxc::allocator::Allocator;
+use kit::oxc::ast::ast::Program;
 use kit::oxc::parser::{ParseOptions, Parser};
 use kit::oxc::semantic::SemanticBuilder;
 use kit::oxc::span::{GetSpan, SourceType, Span};
-use kit::{Cx, Facts, File, FindingKind, LineIndex, Position, Report, RuleKind};
+use kit::{Cx, Facts, File, FindingKind, LineIndex, Position, Report, Role, RuleKind, RuleMeta};
 use rayon::prelude::*;
 
+use crate::dispatch::Profile;
 use crate::finding::{self, Draft, FileFindings, PARSE_ERROR};
 use crate::{Engine, Finding, Mode, RunReport, SourceFile, text};
 
 impl Engine {
     /// The findings are sorted, so the order does not depend on the number of threads.
     pub fn run(&self, files: Vec<SourceFile>, facts: &dyn Facts, mode: Mode) -> RunReport {
+        if mode == Mode::Fix {
+            let mut fixes: Vec<_> = files
+                .into_par_iter()
+                .map_init(Allocator::default, |allocator, file| {
+                    self.fix_file(allocator, &file, facts)
+                })
+                .flatten_iter()
+                .collect();
+            // The counts of a file are sorted by rule, so this sorts `fixed` by file, rule.
+            fixes.sort_by(|(a, _), (b, _)| a.path.cmp(&b.path));
+            let (rewritten, fixed): (Vec<_>, Vec<_>) = fixes.into_iter().unzip();
+            return RunReport {
+                findings: Vec::new(),
+                fixed: fixed.into_iter().flatten().collect(),
+                rewritten,
+            };
+        }
         let mut findings: Vec<Finding> = files
             .into_par_iter()
             .map_init(Allocator::default, |allocator, file| {
@@ -20,7 +40,11 @@ impl Engine {
             .flatten_iter()
             .collect();
         finding::sort(&mut findings);
-        RunReport { findings }
+        RunReport {
+            findings,
+            fixed: Vec::new(),
+            rewritten: Vec::new(),
+        }
     }
 
     fn check_file(
@@ -36,7 +60,7 @@ impl Engine {
             ignored: &self.ignored,
             findings: Vec::new(),
         };
-        let Some(text) = text::decode(&file.bytes) else {
+        let Some((text, _)) = text::decode(&file.bytes) else {
             out.push(parse_error(
                 "the file is not UTF-8, so no rule checked it".into(),
             ));
@@ -48,40 +72,71 @@ impl Engine {
             ));
             return out.findings;
         };
-        let parsed = Parser::new(allocator, text, source_type)
-            .with_options(ParseOptions {
-                preserve_parens: false,
-                ..ParseOptions::default()
-            })
-            .parse();
-        let lines = LineIndex::new(text);
-        // oxc puts at least one diagnostic with a fatal error.
-        if let Some(diagnostic) = parsed.diagnostics.first() {
-            let span = diagnostic
-                .labels
-                .first()
-                .map_or(Span::empty(0), |label| label.span());
-            out.push(Draft {
-                start: lines.position(span.start),
-                end: lines.position(span.end),
-                place: span.source_text(text),
-                ..parse_error(diagnostic.to_string())
-            });
-            return out.findings;
-        }
+        let program = match parse(allocator, text, source_type) {
+            Ok(program) => program,
+            Err((span, message)) => {
+                let lines = LineIndex::new(text);
+                out.push(Draft {
+                    start: lines.position(span.start),
+                    end: lines.position(span.end),
+                    place: span.source_text(text),
+                    ..parse_error(message)
+                });
+                return out.findings;
+            }
+        };
         let role = self.set.roles.role_of(&file.path);
         let profile = self.dispatch.profile(mode, role, facts.package(&file.path));
         // Every rule of a profile is in `on_file`, so an empty one runs no rule.
         if profile.on_file.is_empty() {
             return out.findings;
         }
+        self.run_rules(
+            &program,
+            &file.path,
+            role,
+            profile,
+            facts,
+            |source, meta, report, function| {
+                let kind = match meta.kind {
+                    RuleKind::Error => FindingKind::Error,
+                    RuleKind::Candidate => FindingKind::Candidate,
+                    RuleKind::Agent => unreachable!("agent rules are never built"),
+                };
+                out.push(Draft {
+                    rule: meta.id,
+                    kind,
+                    message: finding::fill(meta.message, &report.args),
+                    start: source.lines.position(report.span.start),
+                    end: source.lines.position(report.span.end),
+                    fixable: fixable(meta, &report),
+                    place: report.span.source_text(source.text),
+                    function,
+                });
+            },
+        );
+        out.findings
+    }
 
+    /// Runs the rules of `profile` on `program` and hands `each` every report, rule by rule in
+    /// the order of `self.rules`, with the name of the function around the report.
+    pub(crate) fn run_rules(
+        &self,
+        program: &Program<'_>,
+        path: &Utf8Path,
+        role: Option<Role>,
+        profile: &Profile,
+        facts: &dyn Facts,
+        mut each: impl FnMut(&File, &'static RuleMeta, Report, &str),
+    ) {
+        let text = program.source_text;
+        let lines = LineIndex::new(text);
         let semantic = SemanticBuilder::new()
             .with_build_nodes(true)
-            .build(&parsed.program)
+            .build(program)
             .semantic;
         let source = File {
-            path: &file.path,
+            path,
             text,
             lines: &lines,
             semantic: &semantic,
@@ -107,25 +162,41 @@ impl Engine {
 
         for ((at, _), reports) in self.rules.iter().zip(reports) {
             let meta = &self.set.rules[*at].meta;
-            let kind = match meta.kind {
-                RuleKind::Error => FindingKind::Error,
-                RuleKind::Candidate => FindingKind::Candidate,
-                RuleKind::Agent => unreachable!("agent rules are never built"),
-            };
             for report in reports {
-                out.push(Draft {
-                    rule: meta.id,
-                    kind,
-                    message: finding::fill(meta.message, &report.args),
-                    start: lines.position(report.span.start),
-                    end: lines.position(report.span.end),
-                    fixable: meta.fix && !report.edits.is_empty(),
-                    place: report.span.source_text(text),
-                    function: finding::function_around(&functions, report.span.start),
-                });
+                let function = finding::function_around(&functions, report.span.start);
+                each(&source, meta, report, function);
             }
         }
-        out.findings
+    }
+}
+
+/// `Check` marks and `Fix` applies the same reports.
+pub(crate) fn fixable(meta: &RuleMeta, report: &Report) -> bool {
+    meta.fix && !report.edits.is_empty()
+}
+
+/// The span and message of the first diagnostic when `text` does not parse.
+pub(crate) fn parse<'a>(
+    allocator: &'a Allocator,
+    text: &'a str,
+    source_type: SourceType,
+) -> Result<Program<'a>, (Span, String)> {
+    let parsed = Parser::new(allocator, text, source_type)
+        .with_options(ParseOptions {
+            preserve_parens: false,
+            ..ParseOptions::default()
+        })
+        .parse();
+    // oxc puts at least one diagnostic with a fatal error.
+    match parsed.diagnostics.first() {
+        None => Ok(parsed.program),
+        Some(diagnostic) => {
+            let span = diagnostic
+                .labels
+                .first()
+                .map_or(Span::empty(0), |label| label.span());
+            Err((span, diagnostic.to_string()))
+        }
     }
 }
 

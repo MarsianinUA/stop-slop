@@ -15,7 +15,8 @@ pub(crate) struct Profile {
 /// package meets), built once so a file only picks its profile.
 pub(crate) struct Dispatch {
     /// `requires-package` of the groups with enabled rules. Bit `i` of a profile index says
-    /// whether `conditions[i]` holds; the next bit is the Tests role, the last one `Hook`.
+    /// whether `conditions[i]` holds; the next bit is the Tests role, the bits above it are
+    /// `mode as usize`.
     conditions: Vec<&'static str>,
     profiles: Vec<Profile>,
 }
@@ -38,16 +39,12 @@ impl Dispatch {
             })
             .collect();
         let tests_bit = conditions.len();
-        let hook_bit = tests_bit + 1;
+        let mode_shift = tests_bit + 1;
 
-        let profiles = (0..1 << (hook_bit + 1))
+        let profiles = (0..Mode::ALL.len() << mode_shift)
             .map(|index: usize| {
                 let bit = |at: usize| index >> at & 1 == 1;
-                let mode = if bit(hook_bit) {
-                    Mode::Hook
-                } else {
-                    Mode::Check
-                };
+                let mode = Mode::ALL[index >> mode_shift];
                 let mut profile = Profile {
                     by_type: vec![Vec::new(); AST_TYPE_MAX as usize + 1],
                     on_file: Vec::new(),
@@ -60,7 +57,7 @@ impl Dispatch {
                         Files::Tests => bit(tests_bit),
                     };
                     let group = condition_of[r].is_none_or(bit);
-                    if !(files && group && mode.runs(def.meta.kind)) {
+                    if !(files && group && mode.runs(&def.meta)) {
                         continue;
                     }
                     if let Impl::Check { nodes, .. } = def.imp {
@@ -82,7 +79,7 @@ impl Dispatch {
     pub fn profile(&self, mode: Mode, role: Option<Role>, package: Option<&Package>) -> &Profile {
         let tests_bit = self.conditions.len();
         let mut index = usize::from(role == Some(Role::Tests)) << tests_bit
-            | usize::from(mode == Mode::Hook) << (tests_bit + 1);
+            | (mode as usize) << (tests_bit + 1);
         for (at, name) in self.conditions.iter().enumerate() {
             if depends_on(package, name) {
                 index |= 1 << at;

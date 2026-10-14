@@ -34,10 +34,7 @@ pub(crate) struct FileFindings<'f> {
 impl FileFindings<'_> {
     /// Drops the draft when its (file, fingerprint) pair is ignored.
     pub fn push(&mut self, draft: Draft) {
-        let key = (
-            self.path.to_owned(),
-            fingerprint(draft.rule, draft.place, draft.function),
-        );
+        let key = ignore_key(self.path, draft.rule, draft.place, draft.function);
         if self.ignored.contains(&key) {
             return;
         }
@@ -58,6 +55,16 @@ impl FileFindings<'_> {
             fingerprint: Fingerprint(key.1),
         });
     }
+}
+
+/// The (file, fingerprint) pair as `ignore.json` stores it.
+pub(crate) fn ignore_key(
+    path: &Utf8Path,
+    rule: &str,
+    place: &str,
+    function: &str,
+) -> (Utf8PathBuf, String) {
+    (path.to_owned(), fingerprint(rule, place, function))
 }
 
 /// No line number goes in, so the fingerprint survives lines added above.

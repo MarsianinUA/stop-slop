@@ -56,12 +56,13 @@ impl Engine {
     }
 
     /// `uses()` of the enabled rules, plus `Packages` when a group of one of them has
-    /// `requires-package`; in `Hook` only `kind = error` rules count.
+    /// `requires-package`; in `Hook` only `kind = error` rules count, in `Fix` only
+    /// `fix = true` ones.
     pub fn facts_needed(&self, mode: Mode) -> Vec<Fact> {
         let mut needed: Vec<Fact> = self
             .rules
             .iter()
-            .filter(|(at, _)| mode.runs(self.set.rules[*at].meta.kind))
+            .filter(|(at, _)| mode.runs(&self.set.rules[*at].meta))
             .flat_map(|(_, rule)| rule.uses())
             .copied()
             .collect();
@@ -71,9 +72,7 @@ impl Engine {
             .iter()
             .zip(&self.enabled)
             .any(|(def, &enabled)| {
-                enabled
-                    && mode.runs(def.meta.kind)
-                    && requires_package(self.set, &def.meta).is_some()
+                enabled && mode.runs(&def.meta) && requires_package(self.set, &def.meta).is_some()
             });
         if conditional {
             needed.push(Fact::Packages);
