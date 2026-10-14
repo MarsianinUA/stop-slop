@@ -1,0 +1,19 @@
+[package]
+name = "rules"
+version.workspace = true
+edition.workspace = true
+publish = false
+build = "build.rs"
+autotests = false
+autobins = false
+autoexamples = false
+autobenches = false
+
+[lib]
+path = "lib.rs"
+
+[dependencies]
+kit = { path = "../crates/kit" }
+
+[build-dependencies]
+catalog = { path = "../crates/catalog" }

@@ -1,0 +1,4 @@
+description = "`any` anywhere"
+kind = "error"
+source = ["personal"]
+message = "`any` turns off type checking for this value, so mistakes pass silently. Use a precise type, or `unknown` and narrow it."
