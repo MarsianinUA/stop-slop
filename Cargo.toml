@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/catalog", "crates/kit", "rules"]
+members = ["crates/catalog", "crates/engine", "crates/kit", "rules"]
 
 [workspace.package]
 version = "0.1.0"
@@ -8,6 +8,7 @@ edition = "2024"
 
 [workspace.dependencies]
 camino = "1"
+rayon = "1"
 serde = { version = "1", features = ["derive"] }
 tempfile = "3"
 thiserror = "2"
