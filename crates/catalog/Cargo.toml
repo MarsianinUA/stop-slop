@@ -1,0 +1,14 @@
+[package]
+name = "catalog"
+version.workspace = true
+edition.workspace = true
+publish = false
+
+[dependencies]
+camino.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+toml.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
