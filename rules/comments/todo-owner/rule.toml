@@ -1,0 +1,4 @@
+description = "`TODO` without an owner"
+kind = "error"
+source = ["personal"]
+message = "A `TODO` without an owner belongs to nobody, so nobody comes back to it. Name the person who will do it: `TODO(owner)`."
