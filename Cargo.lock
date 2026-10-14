@@ -834,6 +834,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "repo"
+version = "0.1.0"
+dependencies = [
+ "camino",
+ "tempfile",
+ "testkit",
+ "thiserror",
+]
+
+[[package]]
 name = "rules"
 version = "0.1.0"
 dependencies = [
@@ -1012,6 +1022,13 @@ dependencies = [
  "once_cell",
  "rustix",
  "windows-sys",
+]
+
+[[package]]
+name = "testkit"
+version = "0.1.0"
+dependencies = [
+ "tempfile",
 ]
 
 [[package]]
