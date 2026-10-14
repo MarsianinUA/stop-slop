@@ -1,0 +1,62 @@
+use camino::Utf8Path;
+use oxc_semantic::Semantic;
+
+use crate::LineIndex;
+
+pub struct File<'a> {
+    /// Relative to the repo root, with `/`.
+    pub path: &'a Utf8Path,
+    /// Without BOM; line endings as in the file.
+    pub text: &'a str,
+    pub lines: &'a LineIndex,
+    pub semantic: &'a Semantic<'a>,
+    pub role: Option<Role>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Role {
+    Tests,
+    Types,
+    Constants,
+    Functions,
+}
+
+#[derive(Debug)]
+pub struct Roles {
+    pub tests: RoleDef,
+    pub types: RoleDef,
+    pub constants: RoleDef,
+    pub functions: RoleDef,
+}
+
+#[derive(Debug)]
+pub struct RoleDef {
+    pub suffixes: &'static [&'static str],
+    pub dirs: &'static [&'static str],
+}
+
+impl Roles {
+    /// The first matching role wins: `__tests__/a.types.ts` is Tests, not Types.
+    pub fn role_of(&self, path: &Utf8Path) -> Option<Role> {
+        let suffix = suffix_of(path);
+        let dirs = path.parent().unwrap_or(Utf8Path::new(""));
+        [
+            (Role::Tests, &self.tests),
+            (Role::Types, &self.types),
+            (Role::Constants, &self.constants),
+            (Role::Functions, &self.functions),
+        ]
+        .into_iter()
+        .find(|(_, def)| {
+            suffix.is_some_and(|suffix| def.suffixes.contains(&suffix))
+                || dirs.iter().any(|dir| def.dirs.contains(&dir))
+        })
+        .map(|(role, _)| role)
+    }
+}
+
+/// The extension of the file stem: `order.response.ts` -> `response`;
+/// `a.ts` and dotfiles like `.types.ts` -> `None`.
+pub fn suffix_of(path: &Utf8Path) -> Option<&str> {
+    Utf8Path::new(path.file_stem()?).extension()
+}
