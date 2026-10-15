@@ -1,5 +1,6 @@
 mod cx;
 mod def;
+mod exported;
 mod facts;
 mod file;
 mod lines;
@@ -11,6 +12,7 @@ pub use cx::{Cx, Edit, Report, Reported};
 pub use def::{
     Build, Files, FindingKind, GroupDef, Impl, RuleDef, RuleKind, RuleMeta, Ruleset, Source,
 };
+pub use exported::{is_exported, is_exported_node};
 pub use facts::{EnumIndex, EnumMember, Fact, Facts, Package, StaticFacts};
 pub use file::{File, Role, RoleDef, Roles, suffix_of};
 pub use lines::{LineIndex, Position};
@@ -33,7 +35,8 @@ pub mod oxc {
 pub mod prelude {
     pub use crate::{
         Cx, Edit, Fact, File, Role, Rule, expression_assertion, has_safety_comment,
-        is_const_assertion, is_known_value, is_open_key, lib_type, type_assertion, unwrapped_type,
+        is_const_assertion, is_exported, is_exported_node, is_known_value, is_open_key, lib_type,
+        type_assertion, unwrapped_type,
     };
     pub use oxc_allocator::Allocator;
     pub use oxc_ast::{AstKind, AstType};

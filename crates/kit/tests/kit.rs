@@ -455,3 +455,106 @@ fn known_value_has_its_type_in_its_own_syntax() {
         });
     }
 }
+
+#[test]
+fn is_exported_sees_export_statements_specifiers_and_namespaces() {
+    let text = "export const a = 1, a2 = 2;
+export function f() {}
+export class C {}
+export default class D {}
+export type T = 1;
+export interface I {}
+export enum E { X }
+const b = 1; export { b };
+const c = 1; export { c as cee };
+type U = 1; export type { U };
+const { d, e } = obj; export { d };
+export const { g, h } = obj;
+namespace N { export const inner = 1; const hidden = 2; }
+import { imp } from './x'; export { imp };
+export { re } from './y';
+const local = 1;
+function used() { const a = 1; return a + local; }";
+    with_file(text, |file| {
+        let scoping = file.semantic.scoping();
+        let used = text.find("function used").unwrap() as u32;
+        let mut exported: Vec<_> = scoping
+            .symbol_ids()
+            .map(|symbol| {
+                let declaration = scoping.symbol_declaration(symbol);
+                let name = match scoping.symbol_name(symbol) {
+                    "a" if file.semantic.nodes().get_node(declaration).span().start > used => {
+                        "a in used"
+                    }
+                    name => name,
+                };
+                (name, is_exported(file, symbol))
+            })
+            .collect();
+        exported.sort_unstable();
+
+        let mut expected: Vec<_> = [
+            "a", "a2", "f", "C", "D", "T", "I", "E", "b", "c", "U", "d", "g", "h", "inner", "imp",
+        ]
+        .map(|name| (name, true))
+        .into_iter()
+        .chain(["X", "e", "N", "hidden", "local", "used", "a in used"].map(|name| (name, false)))
+        .collect();
+        expected.sort_unstable();
+        assert_eq!(exported, expected);
+    });
+
+    for (text, name) in [
+        ("const dflt = 1; export default dflt;", "dflt"),
+        ("const assigned = 1; export = assigned;", "assigned"),
+    ] {
+        with_file(text, |file| {
+            let scoping = file.semantic.scoping();
+            let symbol = scoping.get_root_binding(name.into()).unwrap();
+            assert!(is_exported(file, symbol), "{text}");
+        });
+    }
+}
+
+#[test]
+fn is_exported_node_takes_the_own_name_the_default_export_or_an_exported_variable() {
+    for (text, exported) in [
+        ("export function f() {}", true),
+        ("export default function () {}", true),
+        ("export const g = () => 1;", true),
+        ("export const h = function () {};", true),
+        ("export default class {}", true),
+        ("export const K = class B {};", true),
+        ("class M {} export { M };", true),
+        ("export interface I {}", true),
+        ("export default interface Q {}", true),
+        ("export type T = 1;", true),
+        ("export enum E { X }", true),
+        ("export const typed: F = (x) => x;", true),
+        ("export const w = wrap(() => 1);", false),
+        ("class L {}", false),
+        ("interface J {}", false),
+        ("const local = () => 1;", false),
+        ("export const api = { get() {} };", false),
+    ] {
+        with_file(text, |file| {
+            let node = file
+                .semantic
+                .nodes()
+                .iter()
+                .find(|node| {
+                    matches!(
+                        node.kind(),
+                        AstKind::Function(_)
+                            | AstKind::ArrowFunctionExpression(_)
+                            | AstKind::Class(_)
+                            | AstKind::TSInterfaceDeclaration(_)
+                            | AstKind::TSTypeAliasDeclaration(_)
+                            | AstKind::TSEnumDeclaration(_)
+                    )
+                })
+                .unwrap();
+            assert_eq!(is_exported_node(file, node), exported, "{text}");
+        });
+    }
+}
