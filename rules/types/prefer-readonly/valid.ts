@@ -72,4 +72,23 @@ class TreeNode {
   }
 }
 
-export { Counter, Lazy, Dynamic, Rows, TreeNode };
+declare function Column(): PropertyDecorator;
+
+class Entity {
+  @Column() private name!: string;
+  private loaded!: boolean;
+}
+
+declare class Ambient {
+  private size: number;
+}
+
+class Draft {
+  private note?: string = 'draft';
+
+  constructor() {
+    delete this.note;
+  }
+}
+
+export { Counter, Lazy, Dynamic, Rows, TreeNode, Entity, Ambient, Draft };

@@ -436,6 +436,13 @@ fn known_value_has_its_type_in_its_own_syntax() {
         ("let changing = { a: 1 };\nlet probe = changing;", false),
         ("const { a } = obj;\nlet probe = a;", false),
         ("const a = b;\nconst b = a;\nlet probe = a;", false),
+        ("let probe = { a: 1 } as unknown;", false),
+        (
+            "const hidden = { a: 1 } as any;\nlet probe = hidden;",
+            false,
+        ),
+        ("let probe = <object>{ a: 1 };", false),
+        ("let probe = { a: 1 } as unknown as T;", false),
     ] {
         with_file(text, |file| {
             let init = file
@@ -507,6 +514,7 @@ function used() { const a = 1; return a + local; }";
     for (text, name) in [
         ("const dflt = 1; export default dflt;", "dflt"),
         ("const assigned = 1; export = assigned;", "assigned"),
+        ("const Row = 1; export interface Row {}", "Row"),
     ] {
         with_file(text, |file| {
             let scoping = file.semantic.scoping();
@@ -536,6 +544,11 @@ fn is_exported_node_takes_the_own_name_the_default_export_or_an_exported_variabl
         ("interface J {}", false),
         ("const local = () => 1;", false),
         ("export const api = { get() {} };", false),
+        (
+            "export const Kind = { A: 'a' }; type Kind = typeof Kind;",
+            false,
+        ),
+        ("const Row = 1; export interface Row {}", true),
     ] {
         with_file(text, |file| {
             let node = file

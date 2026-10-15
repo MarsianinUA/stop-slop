@@ -13,7 +13,7 @@ class UserService {
   private readonly logger: Logger;
   readonly #requests: number[] = [];
   private static readonly instances = new Set<string>();
-  private readonly retries = 3;
+  private retries = 3;
   private label = 'users';
   private mode = 'fast';
   private readonly kind = Kind.User;
@@ -36,4 +36,16 @@ class UserService {
   }
 }
 
-export { UserService };
+class Theme {
+  private color = 'blue';
+  private size = 'large';
+  private readonly weight = 'bold';
+
+  paint(): string {
+    const { color } = this;
+    const size = this.size;
+    return `${color} ${size} ${this.weight.length}`;
+  }
+}
+
+export { UserService, Theme };

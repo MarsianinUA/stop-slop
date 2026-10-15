@@ -1,4 +1,5 @@
 class Repo {}
+declare function setMode<T extends string>(mode: T): T;
 class Cache<T> {
   readonly items: T[] = [];
 }
@@ -15,6 +16,10 @@ const cache: Cache<string> = new Cache<string>(); // expect: no-trivial-annotati
 const limit: number = 50; // expect: no-trivial-annotation
 const status: string = 'open'; // expect: no-trivial-annotation
 export const pageSize: number = 20; // expect: no-trivial-annotation
+const preset: string = 'dev'; // expect: no-trivial-annotation
+const copied: string = 'copy'; // expect: no-trivial-annotation
+const alias = copied;
+setMode(preset);
 
 function total(): number {
   let sum: number = 0; // expect: no-trivial-annotation
@@ -28,4 +33,4 @@ if (status === 'closed') {
   count += 1;
 }
 
-export { count, title, enabled, offset, big, greeting, pattern, repo, cache, total };
+export { count, title, enabled, offset, big, greeting, pattern, repo, cache, total, alias };

@@ -24,6 +24,13 @@ function Cursor(): PropertyDecorator {
 
 [{}].forEach((item: object) => void item);
 
+declare const target: object;
+const proxy = new Proxy(target, {
+  get(source: object, key: string | symbol): unknown {
+    return Reflect.get(source, key);
+  },
+});
+
 const ignoreTarget = () => (target: object) => void target;
 
 const describe = (input: unknown): string => typeof input;
@@ -33,4 +40,4 @@ function shadowed<Alias>(value: Alias): Alias {
   return value;
 }
 
-export { load, first, isOwner, Cursor, ignoreTarget, describe, shadowed };
+export { load, first, isOwner, Cursor, ignoreTarget, describe, shadowed, proxy };

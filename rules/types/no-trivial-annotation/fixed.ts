@@ -1,4 +1,5 @@
 class Repo {}
+declare function setMode<T extends string>(mode: T): T;
 class Cache<T> {
   readonly items: T[] = [];
 }
@@ -15,6 +16,10 @@ const cache = new Cache<string>();
 const limit = 50;
 const status: string = 'open';
 export const pageSize: number = 20;
+const preset: string = 'dev';
+const copied: string = 'copy';
+const alias = copied;
+setMode(preset);
 
 function total(): number {
   let sum = 0;
@@ -28,4 +33,4 @@ if (status === 'closed') {
   count += 1;
 }
 
-export { count, title, enabled, offset, big, greeting, pattern, repo, cache, total };
+export { count, title, enabled, offset, big, greeting, pattern, repo, cache, total, alias };

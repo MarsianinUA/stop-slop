@@ -1,6 +1,7 @@
 use kit::oxc::ast::ast::{
     BindingIdentifier, Declaration, ExportDefaultDeclarationKind, IdentifierReference, Statement,
 };
+use kit::oxc::semantic::NodeId;
 use kit::prelude::*;
 use kit::suffix_of;
 
@@ -26,25 +27,15 @@ impl Rule for Check {
         // In a constants file `no-type-in-constants-file` reports types and interfaces.
         let enums_only = file.role == Some(Role::Constants);
         for statement in body {
-            let Some((start, id, is_enum)) = type_declaration(statement) else {
+            let Some(declaration) = type_declaration(statement) else {
                 continue;
             };
-            if enums_only && !is_enum {
+            if enums_only && !declaration.is_enum {
                 continue;
             }
-            // `is_exported` judges a merged name by its first declaration:
-            // `const Kind = {..} as const; export type Kind = ..`.
-            let under_export = matches!(
-                statement,
-                Statement::ExportDeclaration(_) | Statement::ExportDefaultDeclaration(_)
-            );
-            if under_export
-                || id
-                    .symbol_id
-                    .get()
-                    .is_some_and(|symbol| is_exported(file, symbol))
-            {
-                cx.report(Span::new(start, id.span.end))
+            let id = declaration.id;
+            if is_exported_node(file, file.semantic.nodes().get_node(declaration.node)) {
+                cx.report(Span::new(declaration.start, id.span.end))
                     .arg("name", id.name.as_str());
             }
         }
@@ -92,31 +83,55 @@ fn is_code_declaration(declaration: &Declaration<'_>) -> bool {
     }
 }
 
-/// A type alias, interface or enum, alone or under `export` / `export default`: where its head
-/// starts (`type`, `interface`, `enum`, `const`, `declare`), its name, and whether it is an enum.
-fn type_declaration<'s, 'a>(
-    statement: &'s Statement<'a>,
-) -> Option<(u32, &'s BindingIdentifier<'a>, bool)> {
+/// A type alias, interface or enum, alone or under `export` / `export default`.
+struct TypeDeclaration<'s, 'a> {
+    /// Where the head starts: `type`, `interface`, `enum`, `const`, `declare`.
+    start: u32,
+    id: &'s BindingIdentifier<'a>,
+    node: NodeId,
+    is_enum: bool,
+}
+
+fn type_declaration<'s, 'a>(statement: &'s Statement<'a>) -> Option<TypeDeclaration<'s, 'a>> {
     let declaration = match statement {
         Statement::ExportDeclaration(export) => &export.declaration,
         Statement::ExportDefaultDeclaration(export) => {
             return match &export.declaration {
                 ExportDefaultDeclarationKind::TSInterfaceDeclaration(interface) => {
-                    Some((interface.span.start, &interface.id, false))
+                    Some(TypeDeclaration {
+                        start: interface.span.start,
+                        id: &interface.id,
+                        node: interface.node_id.get(),
+                        is_enum: false,
+                    })
                 }
                 _ => None,
             };
         }
         _ => statement.as_declaration()?,
     };
-    match declaration {
-        Declaration::TSTypeAliasDeclaration(alias) => Some((alias.span.start, &alias.id, false)),
-        Declaration::TSInterfaceDeclaration(interface) => {
-            Some((interface.span.start, &interface.id, false))
+    let (start, id, node, is_enum) = match declaration {
+        Declaration::TSTypeAliasDeclaration(alias) => {
+            (alias.span.start, &alias.id, alias.node_id.get(), false)
         }
-        Declaration::TSEnumDeclaration(declaration) => {
-            Some((declaration.span.start, &declaration.id, true))
-        }
-        _ => None,
-    }
+        Declaration::TSInterfaceDeclaration(interface) => (
+            interface.span.start,
+            &interface.id,
+            interface.node_id.get(),
+            false,
+        ),
+        Declaration::TSEnumDeclaration(declaration) => (
+            declaration.span.start,
+            &declaration.id,
+            declaration.node_id.get(),
+            true,
+        ),
+        _ => return None,
+    };
+    Some(TypeDeclaration {
+        start,
+        id,
+        node,
+        is_enum,
+    })
 }

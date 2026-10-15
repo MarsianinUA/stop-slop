@@ -216,14 +216,16 @@ fn is_comparator(expression: &Expression<'_>) -> bool {
     }
 }
 
-/// `const ok: boolean = a || b`, `return a || b` in a function typed `: boolean`, the body of an
-/// arrow typed `: boolean`.
+/// `const ok: boolean = a || b`, a field `ok: boolean = a || b`, `return a || b` in a function
+/// typed `: boolean`, the body of an arrow typed `: boolean`.
 fn has_boolean_target(file: &File<'_>, node: &AstNode<'_>) -> bool {
     let nodes = file.semantic.nodes();
     match nodes.parent_kind(node.id()) {
         AstKind::VariableDeclarator(declarator) => {
             is_boolean_type(declarator.type_annotation.as_deref())
         }
+        AstKind::PropertyDefinition(field) => is_boolean_type(field.type_annotation.as_deref()),
+        AstKind::AccessorProperty(field) => is_boolean_type(field.type_annotation.as_deref()),
         AstKind::ArrowFunctionExpression(arrow) => is_boolean_type(arrow.return_type.as_deref()),
         AstKind::ReturnStatement(_) => nodes
             .ancestors(node.id())

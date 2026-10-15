@@ -27,6 +27,35 @@ declare const key: string;
 const merged: Record<string, string> = { ...env };
 const keyed: Record<string, number> = { [key]: 1 };
 
+class Loader {
+  private state: unknown = 'idle';
+
+  load(): void {
+    this.state = input;
+  }
+}
+
+class Table {
+  private readonly rows: Record<string, number> = { a: 1 };
+
+  constructor(seed: Record<string, number>) {
+    this.rows = seed;
+  }
+}
+
+class Counter {
+  #count: unknown = 1;
+
+  bump(): void {
+    this.#count = Number(this.#count) + 1;
+  }
+}
+
+// Another file may write `token`.
+export class Session {
+  token: unknown = 'none';
+}
+
 function normalize(value: unknown): unknown {
   if (value === null) {
     return 'null';
@@ -43,5 +72,10 @@ const chained = 'text' as unknown as number;
 // SAFETY: plugins add their commands to this registry at startup.
 const seeded = { start } as Record<string, Command>;
 
+// SAFETY: the plugin API takes any value here.
+const hidden = { id: 1 } as unknown;
+const passed: unknown = hidden;
+
 export { commands, frozen, checked, empty, accumulated, fromCall, fromInput, labels, nothing };
 export { fromNamed, failure, lastError, merged, keyed, normalize, create, chained, seeded };
+export { Loader, Table, Counter, passed };

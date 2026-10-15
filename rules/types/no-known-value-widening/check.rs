@@ -1,9 +1,10 @@
 use std::collections::HashMap;
 use std::fmt;
 
+use kit::oxc::ast::MemberExpressionKind;
 use kit::oxc::ast::ast::{
-    AssignmentTarget, BindingPattern, Expression, ObjectPropertyKind, TSSignature, TSType,
-    TSTypeAnnotation,
+    AssignmentTarget, BindingPattern, Expression, ObjectPropertyKind, PropertyKey, TSAccessibility,
+    TSSignature, TSType, TSTypeAnnotation, UnaryOperator,
 };
 use kit::oxc::semantic::SymbolId;
 use kit::prelude::*;
@@ -25,23 +26,26 @@ impl Rule for Check {
 
     fn on_node<'a>(&self, node: &AstNode<'a>, cx: &mut Cx<'_, 'a>) {
         let file = cx.file();
-        // `binding`: the variable whose every write must be known, not only this one.
-        let (value, ty, binding) = match node.kind() {
+        let (value, ty, writes) = match node.kind() {
             AstKind::VariableDeclarator(d) => (
                 d.init.as_ref(),
                 written(d.type_annotation.as_deref()),
                 d.id.get_binding_identifier()
-                    .and_then(|id| id.symbol_id.get()),
+                    .and_then(|id| id.symbol_id.get())
+                    .map_or(Writes::One, Writes::Variable),
             ),
             AstKind::PropertyDefinition(p) => (
                 p.value.as_ref(),
                 written(p.type_annotation.as_deref()),
-                None,
+                field_writes(
+                    &p.key,
+                    p.readonly || p.accessibility == Some(TSAccessibility::Private),
+                ),
             ),
             AstKind::AccessorProperty(p) => (
                 p.value.as_ref(),
                 written(p.type_annotation.as_deref()),
-                None,
+                field_writes(&p.key, p.accessibility == Some(TSAccessibility::Private)),
             ),
             AstKind::AssignmentExpression(assignment) if assignment.operator.is_assign() => {
                 let AssignmentTarget::AssignmentTargetIdentifier(id) = &assignment.left else {
@@ -62,12 +66,14 @@ impl Rule for Check {
                 (
                     Some(&assignment.right),
                     written(d.type_annotation.as_deref()),
-                    Some(symbol),
+                    Writes::Variable(symbol),
                 )
             }
-            AstKind::ArrowFunctionExpression(f) => {
-                (f.get_expression(), written(f.return_type.as_deref()), None)
-            }
+            AstKind::ArrowFunctionExpression(f) => (
+                f.get_expression(),
+                written(f.return_type.as_deref()),
+                Writes::One,
+            ),
             kind => {
                 let Some((value, ty)) = type_assertion(kind) else {
                     return;
@@ -77,7 +83,7 @@ impl Rule for Check {
                 if type_assertion(parent).is_some() || has_safety_comment(file, node.span()) {
                     return;
                 }
-                (Some(value), Some(ty), None)
+                (Some(value), Some(ty), Writes::One)
             }
         };
         let (Some(value), Some(ty)) = (value, ty) else {
@@ -86,9 +92,25 @@ impl Rule for Check {
         let Some(target) = widening_target(file, ty).filter(|&t| widens(file, value, t)) else {
             return;
         };
-        if binding.is_none_or(|symbol| every_write_widens(file, symbol, target)) {
-            cx.report(value.span()).arg("target", target);
+        let others_widen = match writes {
+            Writes::One => true,
+            Writes::Variable(symbol) => every_write_widens(file, symbol, target),
+            Writes::Field(key) => every_field_write_widens(file, key, target),
+            Writes::Elsewhere => false,
+        };
+        if !others_widen {
+            return;
         }
+        // From the name: `a: unknown = 1` and `b: unknown = 1` get different fingerprints.
+        let start = match node.kind() {
+            AstKind::VariableDeclarator(d) => d.span.start,
+            AstKind::PropertyDefinition(p) => p.key.span().start,
+            AstKind::AccessorProperty(p) => p.key.span().start,
+            AstKind::AssignmentExpression(assignment) => assignment.span.start,
+            _ => value.span().start,
+        };
+        cx.report(Span::new(start, value.span().end))
+            .arg("target", target);
     }
 
     /// A function with a wide return type reports only when every `return` gives a known
@@ -132,6 +154,25 @@ impl Rule for Check {
         for (span, target) in found {
             cx.report(span).arg("target", target);
         }
+    }
+}
+
+/// The other writes into what gets the value: one that is not known keeps the wide type.
+enum Writes<'a> {
+    One,
+    Variable(SymbolId),
+    /// A field that only this file writes.
+    Field(&'a PropertyKey<'a>),
+    /// A field that other files may write too.
+    Elsewhere,
+}
+
+/// Code outside the class may write a field that is not `private`, `readonly` or `#name`.
+fn field_writes<'a>(key: &'a PropertyKey<'a>, closed: bool) -> Writes<'a> {
+    if closed || key.is_private_identifier() {
+        Writes::Field(key)
+    } else {
+        Writes::Elsewhere
     }
 }
 
@@ -203,6 +244,72 @@ fn every_write_widens(file: &File<'_>, symbol: SymbolId, target: Target) -> bool
                 }
                 _ => false,
             })
+}
+
+/// Every write to a member of the field's name in the file gives a known value too:
+/// `this.state = input` needs the wide type.
+fn every_field_write_widens(file: &File<'_>, key: &PropertyKey<'_>, target: Target) -> bool {
+    let Some(name) = key.name() else {
+        return false;
+    };
+    let private = key.is_private_identifier();
+    let nodes = file.semantic.nodes();
+    nodes.iter().all(|node| {
+        let Some(member) = node.kind().as_member_expression_kind() else {
+            return true;
+        };
+        let same = match member {
+            MemberExpressionKind::PrivateField(member) => {
+                private && name == member.field.name.as_str()
+            }
+            _ => match member.static_property_name() {
+                Some(property) => !private && name == property.as_str(),
+                // `this[key] = ..` may write any field.
+                None => matches!(member.object(), Expression::ThisExpression(_)),
+            },
+        };
+        !same
+            || match assigned(file, node) {
+                None => true,
+                Some(Some(value)) => widens(file, value, target),
+                Some(None) => false,
+            }
+    })
+}
+
+/// What a write puts into the member at `node`, also through `!`, `as`, `<T>` and
+/// `satisfies`: `None` for a read, `Some(None)` for a write without one value (`+=`, `++`,
+/// `delete`, destructuring, a `for` target).
+fn assigned<'a>(file: &File<'a>, node: &AstNode<'a>) -> Option<Option<&'a Expression<'a>>> {
+    let nodes = file.semantic.nodes();
+    let mut target = node;
+    let mut parent = nodes.parent_node(target.id());
+    while matches!(
+        parent.kind(),
+        AstKind::TSNonNullExpression(_)
+            | AstKind::TSAsExpression(_)
+            | AstKind::TSTypeAssertion(_)
+            | AstKind::TSSatisfiesExpression(_)
+    ) {
+        target = parent;
+        parent = nodes.parent_node(target.id());
+    }
+    let span = target.span();
+    let write = match parent.kind() {
+        AstKind::AssignmentExpression(assignment) if assignment.left.span() == span => {
+            return Some(assignment.operator.is_assign().then_some(&assignment.right));
+        }
+        AstKind::UpdateExpression(_)
+        | AstKind::ArrayAssignmentTarget(_)
+        | AstKind::AssignmentTargetRest(_) => true,
+        AstKind::UnaryExpression(unary) => unary.operator == UnaryOperator::Delete,
+        AstKind::AssignmentTargetPropertyProperty(property) => property.binding.span() == span,
+        AstKind::AssignmentTargetWithDefault(default) => default.binding.span() == span,
+        AstKind::ForOfStatement(statement) => statement.left.span() == span,
+        AstKind::ForInStatement(statement) => statement.left.span() == span,
+        _ => false,
+    };
+    write.then_some(None)
 }
 
 /// An empty `{}` put into a dictionary is an accumulator that gets filled later; `{ ...env }`

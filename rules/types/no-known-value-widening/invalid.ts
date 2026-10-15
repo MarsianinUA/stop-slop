@@ -12,6 +12,9 @@ const table: Record<string, number> = { // expect: no-known-value-widening
   mainnet: 1,
   base: 8453,
 };
+// The finding starts at the name, so equal values of two names differ.
+const wrapped: unknown = // expect: no-known-value-widening
+  'ready';
 
 const source = { start };
 const fromBinding: Record<string, Command> = source; // expect: no-known-value-widening
@@ -21,7 +24,15 @@ const opaque = 'text' as unknown; // expect: no-known-value-widening
 const castTwice: unknown = { cast: 1 } as unknown; // expect: no-known-value-widening
 
 class Registry {
-  commands: Record<string, Command> = { boot: start }; // expect: no-known-value-widening
+  readonly commands: Record<string, Command> = { boot: start }; // expect: no-known-value-widening
+}
+
+class Machine {
+  #state: unknown = 'idle'; // expect: no-known-value-widening
+
+  stop(): void {
+    this.#state = 'stopped';
+  }
 }
 
 let later: Record<string, Command>;
@@ -49,3 +60,4 @@ const arrow = (): object => ({ id: 2 }); // expect: no-known-value-widening
 
 export { value, shape, commands, indexed, mapped, frozen, label, table, fromBinding };
 export { asserted, opaque, castTwice, Registry, later, status, part, create, pick, arrow };
+export { Machine, wrapped };

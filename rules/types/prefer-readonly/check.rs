@@ -1,7 +1,9 @@
+use std::borrow::Cow;
+
 use kit::oxc::ast::MemberExpressionKind;
 use kit::oxc::ast::ast::{
     Class, ClassElement, Expression, FormalParameter, MethodDefinitionKind, PropertyDefinition,
-    PropertyDefinitionType, PropertyKey, TSAccessibility, UnaryOperator,
+    PropertyDefinitionType, PropertyKey, TSAccessibility, UnaryOperator, VariableDeclarationKind,
 };
 use kit::oxc::semantic::NodeId;
 use kit::prelude::*;
@@ -16,8 +18,9 @@ impl Rule for Check {
         let nodes = file.semantic.nodes();
         let mut fields = Vec::new();
         let mut uses = Vec::new();
-        // `this[key] = ..`: any field of the class may be written there.
+        // `this[key]`: any field of the class may be written or read there.
         let mut dynamic_writes = Vec::new();
+        let mut dynamic_reads = Vec::new();
         for node in nodes.iter() {
             let member = match node.kind() {
                 AstKind::PropertyDefinition(property) => {
@@ -28,6 +31,20 @@ impl Rule for Check {
                     fields.extend(parameter_field(file, node, parameter));
                     continue;
                 }
+                // `const { mode } = this` reads a field without a member expression.
+                AstKind::BindingProperty(property) => {
+                    uses.extend(destructured(property.key.static_name(), node));
+                    continue;
+                }
+                AstKind::AssignmentTargetPropertyProperty(property) => {
+                    uses.extend(destructured(property.name.static_name(), node));
+                    continue;
+                }
+                AstKind::AssignmentTargetPropertyIdentifier(property) => {
+                    let name = Cow::Borrowed(property.binding.name.as_str());
+                    uses.extend(destructured(Some(name), node));
+                    continue;
+                }
                 kind => match kind.as_member_expression_kind() {
                     Some(member) => member,
                     None => continue,
@@ -35,13 +52,19 @@ impl Rule for Check {
             };
             let access = if is_write(file, node) {
                 // The constructor may set a `readonly` field through `this` only, not through
-                // `parent.children = ..`.
+                // `parent.children = ..`, and never `delete` it.
                 let on_this = matches!(member.object(), Expression::ThisExpression(_));
-                Access::Write(on_this.then(|| enclosing_function(file, node)).flatten())
-            } else if is_compared(file, node) {
-                Access::Compare
+                let deleted = matches!(
+                    nodes.parent_kind(node.id()),
+                    AstKind::UnaryExpression(unary) if unary.operator == UnaryOperator::Delete
+                );
+                Access::Write(
+                    (on_this && !deleted)
+                        .then(|| enclosing_function(file, node))
+                        .flatten(),
+                )
             } else {
-                continue;
+                Access::Read(keeps_primitive(file, node))
             };
             if let Some(name) = member_name(&member) {
                 uses.push(Use {
@@ -49,10 +72,11 @@ impl Rule for Check {
                     span: node.span(),
                     access,
                 });
-            } else if matches!(access, Access::Write(_))
-                && matches!(member.object(), Expression::ThisExpression(_))
-            {
-                dynamic_writes.push(node.span());
+            } else if matches!(member.object(), Expression::ThisExpression(_)) {
+                match access {
+                    Access::Write(_) => dynamic_writes.push(node.span()),
+                    Access::Read(_) => dynamic_reads.push(node.span()),
+                }
             }
         }
 
@@ -63,7 +87,7 @@ impl Rule for Check {
             }
             let field_uses: Vec<&Use> = uses
                 .iter()
-                .filter(|u| u.name == field.name && inside(u.span))
+                .filter(|u| u.name == field.name.as_str() && inside(u.span))
                 .collect();
             let written_elsewhere = field_uses.iter().any(|u| {
                 matches!(u.access, Access::Write(function)
@@ -74,8 +98,12 @@ impl Rule for Check {
             }
             let reported = cx.report(field.span).arg("name", &field.name);
             // `private readonly mode = 'fast'` has the type `'fast'`: a constructor that sets
-            // another value, or a comparison with one, would stop compiling.
-            if !(field.narrows && !field_uses.is_empty()) {
+            // another value, a comparison, a generic call or an alias would stop compiling.
+            let noticed = field_uses
+                .iter()
+                .any(|u| !matches!(u.access, Access::Read(true)))
+                || dynamic_reads.iter().any(|&span| inside(span));
+            if !(field.narrows && noticed) {
                 reported.fix([Edit {
                     span: Span::empty(field.span.start),
                     text: "readonly ".into(),
@@ -99,17 +127,26 @@ struct Field {
     narrows: bool,
 }
 
-struct Use {
-    name: String,
+struct Use<'a> {
+    name: Cow<'a, str>,
     span: Span,
     access: Access,
 }
 
 enum Access {
     /// With the nearest enclosing function, static block or field initializer of a write
-    /// through `this`; `None` for a write through another object.
+    /// through `this`; `None` for a write through another object and for `delete`.
     Write(Option<NodeId>),
-    Compare,
+    /// True where a literal type behaves like its primitive.
+    Read(bool),
+}
+
+fn destructured<'a>(name: Option<Cow<'a, str>>, node: &AstNode<'_>) -> Option<Use<'a>> {
+    Some(Use {
+        name: name?,
+        span: node.span(),
+        access: Access::Read(false),
+    })
 }
 
 fn property_field(
@@ -119,10 +156,13 @@ fn property_field(
 ) -> Option<Field> {
     let private = property.accessibility == Some(TSAccessibility::Private)
         || property.key.is_private_identifier();
+    // A framework sets a decorated or `!` field after the object is built.
     if !private
         || property.readonly
         || property.declare
         || property.computed
+        || property.definite
+        || !property.decorators.is_empty()
         || property.r#type != PropertyDefinitionType::PropertyDefinition
     {
         return None;
@@ -131,6 +171,10 @@ fn property_field(
     let AstKind::Class(class) = nodes.parent_kind(nodes.parent_id(node.id())) else {
         return None;
     };
+    // The code of a `declare class` is elsewhere.
+    if class.declare {
+        return None;
+    }
     let key = property.key.span();
     let end = property
         .type_annotation
@@ -206,10 +250,14 @@ fn key_name(key: &PropertyKey<'_>) -> Option<String> {
 }
 
 /// `x` of `.x` and `['x']`, `#x` of `.#x`; `None` for `[key]`.
-fn member_name(member: &MemberExpressionKind<'_>) -> Option<String> {
+fn member_name<'a>(member: &MemberExpressionKind<'a>) -> Option<Cow<'a, str>> {
     match member {
-        MemberExpressionKind::PrivateField(member) => Some(format!("#{}", member.field.name)),
-        _ => member.static_property_name().map(|name| name.to_string()),
+        MemberExpressionKind::PrivateField(member) => {
+            Some(Cow::Owned(format!("#{}", member.field.name)))
+        }
+        _ => member
+            .static_property_name()
+            .map(|name| Cow::Borrowed(name.as_str())),
     }
 }
 
@@ -263,11 +311,47 @@ fn is_write(file: &File<'_>, node: &AstNode<'_>) -> bool {
     }
 }
 
-/// `this.mode === ..`, `switch (this.mode)`, `case this.mode:`.
-fn is_compared(file: &File<'_>, node: &AstNode<'_>) -> bool {
-    match file.semantic.nodes().parent_kind(node.id()) {
-        AstKind::BinaryExpression(binary) => binary.operator.is_equality(),
-        AstKind::SwitchStatement(_) | AstKind::SwitchCase(_) => true,
+/// A read where `'fast'` behaves like `string`: `${this.mode}`, `this.mode + '!'`,
+/// `this.mode.length`, `!this.mode`, the test of `if`, a loop or `?:`, the value of a `let`,
+/// `var` or annotated variable, which widens it again. A comparison, a generic call or a
+/// `const` alias would see the literal type.
+fn keeps_primitive(file: &File<'_>, node: &AstNode<'_>) -> bool {
+    let nodes = file.semantic.nodes();
+    let span = node.span();
+    let parent = nodes.parent_node(node.id());
+    match parent.kind() {
+        // A tag function may be generic over its values.
+        AstKind::TemplateLiteral(_) => !matches!(
+            nodes.parent_kind(parent.id()),
+            AstKind::TaggedTemplateExpression(_)
+        ),
+        AstKind::BinaryExpression(binary) => {
+            binary.operator.is_numeric_or_string_binary_operator() || binary.operator.is_compare()
+        }
+        AstKind::UnaryExpression(unary) => unary.operator != UnaryOperator::Delete,
+        AstKind::StaticMemberExpression(member) => member.object.span() == span,
+        AstKind::ComputedMemberExpression(member) => member.object.span() == span,
+        AstKind::PrivateFieldExpression(member) => member.object.span() == span,
+        AstKind::IfStatement(statement) => statement.test.span() == span,
+        AstKind::WhileStatement(statement) => statement.test.span() == span,
+        AstKind::DoWhileStatement(statement) => statement.test.span() == span,
+        AstKind::ForStatement(statement) => statement
+            .test
+            .as_ref()
+            .is_some_and(|test| test.span() == span),
+        AstKind::ConditionalExpression(conditional) => conditional.test.span() == span,
+        AstKind::ExpressionStatement(_) => true,
+        AstKind::VariableDeclarator(declarator) => {
+            declarator.type_annotation.is_some()
+                || matches!(
+                    nodes.parent_kind(parent.id()),
+                    AstKind::VariableDeclaration(declaration)
+                        if matches!(
+                            declaration.kind,
+                            VariableDeclarationKind::Let | VariableDeclarationKind::Var
+                        )
+                )
+        }
         _ => false,
     }
 }

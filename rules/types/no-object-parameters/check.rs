@@ -21,7 +21,7 @@ impl Rule for Check {
         }
         let nodes = file.semantic.nodes();
         let function = nodes.parent_node(nodes.parent_id(node.id()));
-        if is_callback(function, nodes.parent_kind(function.id())) {
+        if is_callback(file, function) {
             return;
         }
         if let Some(guarded) = guarded_name(function.kind())
@@ -29,7 +29,11 @@ impl Rule for Check {
         {
             return;
         }
-        cx.report(Span::new(parameter.span.start, annotation.span.end));
+        // From the name: the parameter itself starts at its decorator.
+        cx.report(Span::new(
+            parameter.pattern.span().start,
+            annotation.span.end,
+        ));
     }
 }
 
@@ -59,20 +63,32 @@ fn is_object(file: &File<'_>, ty: &TSType<'_>, depth: u32) -> bool {
     }
 }
 
-/// A function passed to a call or `new`, returned, or the body of an arrow: the API that
-/// calls it sets its parameter types (a decorator, `ValidateIf`, `forEach`).
-fn is_callback(function: &AstNode<'_>, parent: AstKind<'_>) -> bool {
+/// A function passed to a call or `new`, alone or in an object literal
+/// (`new Proxy(target, { get(source: object) {..} })`), returned, or the body of an arrow: the
+/// API that calls it sets its parameter types (a decorator, `ValidateIf`, `forEach`).
+fn is_callback(file: &File<'_>, function: &AstNode<'_>) -> bool {
     if !matches!(
         function.kind(),
         AstKind::Function(_) | AstKind::ArrowFunctionExpression(_)
     ) {
         return false;
     }
-    let span = function.span();
+    let nodes = file.semantic.nodes();
+    let parent = nodes.parent_node(function.id());
+    match parent.kind() {
+        AstKind::ObjectProperty(property) if property.value.span() == function.span() => {
+            let object = nodes.parent_node(parent.id());
+            is_argument(nodes.parent_kind(object.id()), object.span())
+        }
+        AstKind::ReturnStatement(_) | AstKind::ArrowFunctionExpression(_) => true,
+        kind => is_argument(kind, function.span()),
+    }
+}
+
+fn is_argument(parent: AstKind<'_>, span: Span) -> bool {
     match parent {
         AstKind::CallExpression(call) => call.arguments.iter().any(|a| a.span() == span),
         AstKind::NewExpression(new) => new.arguments.iter().any(|a| a.span() == span),
-        AstKind::ReturnStatement(_) | AstKind::ArrowFunctionExpression(_) => true,
         _ => false,
     }
 }

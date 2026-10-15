@@ -19,6 +19,10 @@ declare module 'express' {
   }
 }
 
-export function total(orders: Order[], draft: Draft, mode: Mode): Totals {
-  return { sum: orders.length + draft.note.length + mode.length };
+// Only the value leaves the file; the type of the same name stays local.
+export const Speed = { Fast: 'fast' } as const;
+type Speed = (typeof Speed)[keyof typeof Speed];
+
+export function total(orders: Order[], draft: Draft, mode: Mode, speed: Speed): Totals {
+  return { sum: orders.length + draft.note.length + mode.length + speed.length };
 }

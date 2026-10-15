@@ -8,10 +8,19 @@ function consume(value: object = {}): void { // expect: no-object-parameters
 
 const read = (source: object | null): number => (source ? 1 : 0); // expect: no-object-parameters
 
+declare function Inject(): ParameterDecorator;
+
 class Registry {
   register(entry: (object), name: string): void { // expect: no-object-parameters
     void entry;
     void name;
+  }
+
+  handle(
+    @Inject()
+    payload: object, // expect: no-object-parameters
+  ): void {
+    void payload;
   }
 }
 

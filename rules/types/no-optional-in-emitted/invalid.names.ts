@@ -15,6 +15,10 @@ export default class AccountView {
   label?: string; // expect: no-optional-in-emitted
 }
 
+export class AccountBalanceResponse {
+  constructor(public readonly pending?: string) {} // expect: no-optional-in-emitted
+}
+
 export function settingsOf(row: AccountRow): Settings {
   return { closedAt: row.closedAt };
 }

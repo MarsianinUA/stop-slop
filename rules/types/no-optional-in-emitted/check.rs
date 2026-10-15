@@ -1,3 +1,4 @@
+use kit::oxc::semantic::NodeId;
 use kit::prelude::*;
 
 /// Words of the file name and the owner's name that mark a shape as sent out, and words that
@@ -10,20 +11,36 @@ pub struct Check {
 }
 
 impl Rule for Check {
-    const NODES: &'static [AstType] = &[AstType::TSPropertySignature, AstType::PropertyDefinition];
+    const NODES: &'static [AstType] = &[
+        AstType::TSPropertySignature,
+        AstType::PropertyDefinition,
+        AstType::FormalParameter,
+    ];
 
     fn on_node<'a>(&self, node: &AstNode<'a>, cx: &mut Cx<'_, 'a>) {
         let file = cx.file();
-        let (key, annotation) = match node.kind() {
+        let nodes = file.semantic.nodes();
+        let (key, annotation, inside) = match node.kind() {
             AstKind::TSPropertySignature(field) if field.optional => {
-                (&field.key, &field.type_annotation)
+                (field.key.span(), &field.type_annotation, node.id())
             }
             AstKind::PropertyDefinition(field) if field.optional => {
-                (&field.key, &field.type_annotation)
+                (field.key.span(), &field.type_annotation, node.id())
+            }
+            // `constructor(public note?: string)` declares a field of the constructor's class.
+            AstKind::FormalParameter(parameter)
+                if parameter.optional && parameter.has_modifier() =>
+            {
+                let function = nodes.parent_id(nodes.parent_id(node.id()));
+                (
+                    parameter.pattern.span(),
+                    &parameter.type_annotation,
+                    function,
+                )
             }
             _ => return,
         };
-        let Some(owner) = owner(file, node) else {
+        let Some(owner) = owner(file, inside) else {
             return;
         };
         let name = owner_name(file, owner);
@@ -36,16 +53,15 @@ impl Rule for Check {
         }
         let end = annotation
             .as_ref()
-            .map_or(key.span().end, |annotation| annotation.span.end);
-        cx.report(Span::new(key.span().start, end))
-            .arg("owner", name);
+            .map_or(key.end, |annotation| annotation.span.end);
+        cx.report(Span::new(key.start, end)).arg("owner", name);
     }
 }
 
-/// The nearest interface, type alias or class around the field. A field in a parameter or
+/// The nearest interface, type alias or class above `inside`. A field in a parameter or
 /// signature type (`options?: { verbose?: boolean }`) has none: it is an input.
-fn owner<'s, 'a>(file: &'s File<'a>, field: &AstNode<'a>) -> Option<&'s AstNode<'a>> {
-    for ancestor in file.semantic.nodes().ancestors(field.id()) {
+fn owner<'s, 'a>(file: &'s File<'a>, inside: NodeId) -> Option<&'s AstNode<'a>> {
+    for ancestor in file.semantic.nodes().ancestors(inside) {
         match ancestor.kind() {
             AstKind::TSInterfaceDeclaration(_)
             | AstKind::TSTypeAliasDeclaration(_)

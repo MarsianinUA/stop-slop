@@ -30,11 +30,18 @@ function check(flag: boolean): boolean {
   return flag || !ready;
 }
 
+declare function retry(): boolean;
+
 let synced: boolean = false;
 synced ||= refresh();
+
+class Gate {
+  open: boolean = refresh() || retry();
+}
 
 while (!ready || dirty) {
   break;
 }
 
 export { label, ready, done, dirty, order, empty, shown, both, pick, hasItems, check, synced };
+export { Gate };

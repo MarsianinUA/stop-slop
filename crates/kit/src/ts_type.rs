@@ -112,8 +112,9 @@ pub fn is_open_key(file: &File<'_>, ty: &TSType<'_>) -> bool {
 }
 
 /// The value's type is known from its own syntax: an object, array, function, class, `new`,
-/// literal (not `null`), template or unary expression (not `void`), under `as`, `<T>`, `satisfies` and `!`;
-/// or an unannotated `const` of the file that nothing writes, whose initializer is known.
+/// literal (not `null`), template or unary expression (not `void`), under `as`, `<T>`,
+/// `satisfies` and `!`; or an unannotated `const` of the file that nothing writes, whose
+/// initializer is known. `as unknown`, `as any` and `as object` hide the type.
 pub fn is_known_value(file: &File<'_>, expression: &Expression<'_>) -> bool {
     is_known(file, expression, &mut HashSet::new())
 }
@@ -122,9 +123,17 @@ pub fn is_known_value(file: &File<'_>, expression: &Expression<'_>) -> bool {
 fn is_known(file: &File<'_>, expression: &Expression<'_>, seen: &mut HashSet<SymbolId>) -> bool {
     let mut expression = expression;
     loop {
+        if let Some((value, ty)) = expression_assertion(expression) {
+            if matches!(
+                ty,
+                TSType::TSUnknownKeyword(_) | TSType::TSAnyKeyword(_) | TSType::TSObjectKeyword(_)
+            ) {
+                return false;
+            }
+            expression = value;
+            continue;
+        }
         expression = match expression {
-            Expression::TSAsExpression(e) => &e.expression,
-            Expression::TSTypeAssertion(e) => &e.expression,
             Expression::TSSatisfiesExpression(e) => &e.expression,
             Expression::TSNonNullExpression(e) => &e.expression,
             _ => break,

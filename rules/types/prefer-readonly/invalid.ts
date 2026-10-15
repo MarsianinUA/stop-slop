@@ -36,4 +36,16 @@ class UserService {
   }
 }
 
-export { UserService };
+class Theme {
+  private color = 'blue'; // expect: prefer-readonly
+  private size = 'large'; // expect: prefer-readonly
+  private weight = 'bold'; // expect: prefer-readonly
+
+  paint(): string {
+    const { color } = this;
+    const size = this.size;
+    return `${color} ${size} ${this.weight.length}`;
+  }
+}
+
+export { UserService, Theme };
