@@ -132,7 +132,7 @@ fn by_folder(
         .collect();
     let bytes = snapshot.read(&candidates)?;
     let mut found = candidates.into_iter().zip(bytes);
-    let mut package_list = Vec::new();
+    let mut package_list: Vec<Package> = Vec::new();
     let mut configs = Vec::new();
     // A parent is a prefix of its child, so the set gives it first. The root finds no
     // parent: its `dir_of` is itself.
@@ -142,8 +142,19 @@ fn by_folder(
         for (path, bytes) in found.by_ref().take(names.len()) {
             let Some(bytes) = bytes else { continue };
             if path.file_name() == Some(PACKAGE_JSON) {
+                let mut package = package::parse(&path, bytes)?;
+                // Node looks for a bare import in `node_modules` from the folder of the file up
+                // to the root, so the packages of every `package.json` above can be imported
+                // too; the nearest one above already holds them all.
+                if let Some(parent) = near.package {
+                    let parent = &package_list[parent];
+                    package
+                        .dependencies
+                        .extend(parent.dependencies.iter().cloned());
+                    package.workspace.extend(parent.workspace.iter().cloned());
+                }
                 near.package = Some(package_list.len());
-                package_list.push(package::parse(&path, bytes)?);
+                package_list.push(package);
             } else {
                 // `tsconfig::aliases` answers in the order of `configs`.
                 near.aliases = Some(configs.len());

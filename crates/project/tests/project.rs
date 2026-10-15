@@ -55,33 +55,52 @@ fn json_error(result: Result<ProjectFacts, ProjectError>) -> (String, String) {
 }
 
 #[test]
-fn each_file_gets_its_nearest_package_json() {
+fn a_file_gets_the_packages_of_every_package_json_up_to_the_root() {
     let t = TempRepo::new();
-    t.write("package.json", r#"{"dependencies": {"root-dep": "1"}}"#)
-        .write(
-            "apps/x/package.json",
-            r#"{
-                "name": "x",
-                "scripts": {"build": "tsc"},
-                "jest": {"testEnvironment": "node"},
-                "dependencies": {"a": "1"},
-                "devDependencies": {"b": "1"},
-                "peerDependencies": {"c": "1"},
-                "optionalDependencies": {"d": "1"}
-            }"#,
-        )
-        .write("apps/x/src/deep/a.ts", "")
-        .write("apps/y/src/b.ts", "")
-        .write("c.ts", "")
-        .commit("init");
-    let files = ["apps/x/src/deep/a.ts", "apps/y/src/b.ts", "c.ts"];
+    // A polyfill and Nest only in the root, as a monorepo may keep them.
+    t.write(
+        "package.json",
+        r#"{"dependencies": {"@nestjs/core": "1"}, "devDependencies": {"events": "3"}}"#,
+    )
+    .write(
+        "apps/x/package.json",
+        r#"{
+            "name": "x",
+            "scripts": {"build": "tsc"},
+            "jest": {"testEnvironment": "node"},
+            "dependencies": {"a": "1"},
+            "devDependencies": {"b": "1"},
+            "peerDependencies": {"c": "1"},
+            "optionalDependencies": {"d": "1"}
+        }"#,
+    )
+    .write(
+        "apps/x/tools/package.json",
+        r#"{"dependencies": {"e": "1"}}"#,
+    )
+    .write("apps/x/src/deep/a.ts", "")
+    .write("apps/x/tools/t.ts", "")
+    .write("apps/y/src/b.ts", "")
+    .write("c.ts", "")
+    .commit("init");
+    let files = [
+        "apps/x/src/deep/a.ts",
+        "apps/x/tools/t.ts",
+        "apps/y/src/b.ts",
+        "c.ts",
+    ];
     let facts = load(&open(&t).worktree(), &files, &[Fact::Packages]);
     let package = |file: &str| facts.package(Utf8Path::new(file));
 
-    assert_eq!(deps(package("apps/x/src/deep/a.ts")), ["a", "b", "c", "d"]);
-    assert_eq!(deps(package("apps/y/src/b.ts")), ["root-dep"]);
-    assert_eq!(deps(package("c.ts")), ["root-dep"]);
-    assert_eq!(deps(package("apps/x/package.json")), ["a", "b", "c", "d"]);
+    let of_x = ["@nestjs/core", "a", "b", "c", "d", "events"];
+    assert_eq!(deps(package("apps/x/src/deep/a.ts")), of_x);
+    assert_eq!(deps(package("apps/x/package.json")), of_x);
+    assert_eq!(
+        deps(package("apps/x/tools/t.ts")),
+        ["@nestjs/core", "a", "b", "c", "d", "e", "events"]
+    );
+    assert_eq!(deps(package("apps/y/src/b.ts")), ["@nestjs/core", "events"]);
+    assert_eq!(deps(package("c.ts")), ["@nestjs/core", "events"]);
     assert!(package("other/z.ts").is_none());
 
     let bare = TempRepo::new();
@@ -94,6 +113,10 @@ fn each_file_gets_its_nearest_package_json() {
 fn workspace_dependencies_go_into_workspace() {
     let t = TempRepo::new();
     t.write(
+        "package.json",
+        r#"{"devDependencies": {"@acme/tools": "workspace:*"}}"#,
+    )
+    .write(
         "apps/x/package.json",
         r#"{
             "dependencies": {"@acme/lib": "workspace:*", "left-pad": "1.0.0"},
@@ -105,10 +128,13 @@ fn workspace_dependencies_go_into_workspace() {
     let facts = load(&open(&t).worktree(), &["apps/x/a.ts"], &[Fact::Packages]);
     let package = facts.package(Utf8Path::new("apps/x/a.ts")).unwrap();
 
-    assert_eq!(names(&package.workspace), ["@acme/lib", "@acme/test"]);
+    assert_eq!(
+        names(&package.workspace),
+        ["@acme/lib", "@acme/test", "@acme/tools"]
+    );
     assert_eq!(
         names(&package.dependencies),
-        ["@acme/lib", "@acme/test", "left-pad"]
+        ["@acme/lib", "@acme/test", "@acme/tools", "left-pad"]
     );
 }
 

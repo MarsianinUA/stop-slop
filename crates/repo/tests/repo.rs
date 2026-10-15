@@ -284,6 +284,19 @@ fn branch_distances_count_the_commits_on_each_side_of_the_head() {
 }
 
 #[test]
+fn branch_distances_leave_out_a_ref_to_a_tree() {
+    let t = TempRepo::new();
+    t.write("a.ts", "a\n").commit("init");
+    let tree = t.git(&["rev-parse", "HEAD^{tree}"]);
+    t.git(&["update-ref", "refs/remotes/origin/tree", &tree]);
+
+    let distances = open(&t).worktree().branch_distances().unwrap();
+
+    let names: Vec<&str> = distances.iter().map(|d| d.tip.name.as_str()).collect();
+    assert_eq!(names, ["main"]);
+}
+
+#[test]
 fn resolve_and_merge_base() {
     let t = TempRepo::new();
     t.write("a.ts", "a\n").commit("fork");
@@ -353,6 +366,55 @@ fn read_of_a_revision_answers_a_long_list_in_order() {
     assert_eq!(read.len(), 2001);
     assert_eq!(read[1000], Some(b"a\n".to_vec()));
     assert_eq!(read.iter().filter(|file| file.is_some()).count(), 1);
+}
+
+#[test]
+fn read_of_a_revision_keeps_the_order_after_a_path_with_a_newline() {
+    let t = TempRepo::new();
+    t.write("a.ts", "a\n").write("b.ts", "b\n").commit("init");
+
+    let read = open(&t)
+        .at_rev("HEAD")
+        .unwrap()
+        .read(&paths(&["a.ts", "x\nb.ts", "b.ts"]))
+        .unwrap();
+
+    assert_eq!(read, [Some(b"a\n".to_vec()), None, Some(b"b\n".to_vec())]);
+}
+
+#[test]
+fn read_of_a_revision_follows_a_symlink() {
+    let t = TempRepo::new();
+    t.write("real/base.json", "{}\n").commit("init");
+    // The links go straight into the index: a symlink on disk needs rights on Windows.
+    let link = |path: &str, target: &str| {
+        t.write("target.txt", target);
+        let blob = t.git(&["hash-object", "-w", "target.txt"]);
+        let entry = format!("120000,{blob},{path}");
+        t.git(&["update-index", "--add", "--cacheinfo", &entry]);
+    };
+    link("link.json", "real/base.json");
+    link("dir", "real");
+    link("dangling.json", "missing.json");
+    link("loop.json", "loop.json");
+    link("out.json", "../out.json");
+    t.git(&["commit", "-q", "--no-verify", "-m", "links"]);
+
+    let read = open(&t)
+        .at_rev("HEAD")
+        .unwrap()
+        .read(&paths(&[
+            "link.json",
+            "dir/base.json",
+            "dangling.json",
+            "loop.json",
+            "out.json",
+            "real/base.json",
+        ]))
+        .unwrap();
+
+    let json = Some(b"{}\n".to_vec());
+    assert_eq!(read, [json.clone(), json.clone(), None, None, None, json]);
 }
 
 #[test]
@@ -441,6 +503,38 @@ fn write_replaces_the_file_and_keeps_its_permissions() {
         other => panic!("{other:?}"),
     }
     assert!(!t.path().join("src/nope.ts").exists());
+}
+
+#[test]
+fn write_leaves_a_read_only_file_alone() {
+    let t = TempRepo::new();
+    t.write("src/a.ts", "old\n").commit("init");
+    let file = t.path().join("src/a.ts");
+    let writable = fs::metadata(&file).unwrap().permissions();
+    let mut read_only = writable.clone();
+    read_only.set_readonly(true);
+    fs::set_permissions(&file, read_only).unwrap();
+    let Snapshot::WorkTree(tree) = open(&t).worktree() else {
+        panic!("worktree() is a WorkTree");
+    };
+
+    let written = tree.write(Utf8Path::new("src/a.ts"), b"new\n");
+
+    let text = fs::read(&file).unwrap();
+    let names: Vec<_> = fs::read_dir(t.path().join("src"))
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name())
+        .collect();
+    // Windows cannot remove the temp folder with a read-only file in it.
+    fs::set_permissions(&file, writable).unwrap();
+    match written {
+        Err(RepoError::Io { source, .. }) => {
+            assert_eq!(source.kind(), ErrorKind::PermissionDenied);
+        }
+        other => panic!("{other:?}"),
+    }
+    assert_eq!(text, b"old\n");
+    assert_eq!(names, ["a.ts"]);
 }
 
 #[test]
@@ -692,6 +786,9 @@ fn the_users_diff_config_changes_nothing() {
         ("diff.interHunkContext", "5"),
         ("diff.renames", "false"),
         ("diff.external", "no-such-diff-tool"),
+        ("diff.algorithm", "patience"),
+        ("diff.indentHeuristic", "false"),
+        ("submodule.recurse", "true"),
     ] {
         t.git(&["config", key, value]);
     }

@@ -5,6 +5,22 @@ use std::process::{Command, Stdio};
 
 use tempfile::TempDir;
 
+/// The variables `repo` clears too. Set when tests run from a git hook or by the shell, they
+/// point git at the outer repo or change how the `*.ts` pathspecs of the tests match.
+const CLEARED_ENV: [&str; 11] = [
+    "GIT_DIR",
+    "GIT_WORK_TREE",
+    "GIT_COMMON_DIR",
+    "GIT_INDEX_FILE",
+    "GIT_OBJECT_DIRECTORY",
+    "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+    "GIT_LITERAL_PATHSPECS",
+    "GIT_GLOB_PATHSPECS",
+    "GIT_NOGLOB_PATHSPECS",
+    "GIT_ICASE_PATHSPECS",
+    "GIT_DIFF_OPTS",
+];
+
 /// A git repo in a temporary folder, removed on drop.
 pub struct TempRepo {
     dir: TempDir,
@@ -21,8 +37,12 @@ impl TempRepo {
         };
         repo.git(&["init", "-q", "-b", "main"]);
         // The local config beats global and system ones, also for the calls of `repo` in
-        // tests: CI runners have no identity, and Windows sets `core.autocrlf=true`. One
-        // append instead of a `git config` per key: a git start costs tens of ms on Windows.
+        // tests: CI runners have no identity, Windows sets `core.autocrlf=true`, a global
+        // fsmonitor holds the temp folder, global hooks still run on checkout and after a
+        // commit (`--no-verify` skips only `pre-commit` and `commit-msg`), and global
+        // attributes and ignores change what tests write. `hooksPath` names a folder that
+        // does not exist. One append instead of a `git config` per key: a git start costs tens
+        // of ms on Windows.
         let config = repo.path().join(".git/config");
         fs::OpenOptions::new()
             .append(true)
@@ -30,7 +50,8 @@ impl TempRepo {
             .and_then(|mut file| {
                 file.write_all(
                     b"[user]\n\tname = test\n\temail = test@stop-slop.invalid\n\
-                      [core]\n\tautocrlf = false\n\
+                      [core]\n\tautocrlf = false\n\tfsmonitor = false\n\
+                      \thooksPath = .git/no-hooks\n\tattributesFile =\n\texcludesFile =\n\
                       [commit]\n\tgpgsign = false\n\
                       [tag]\n\tgpgsign = false\n",
                 )
@@ -72,13 +93,13 @@ impl TempRepo {
     /// Returns stdout without the trailing newline; panics with the command and stderr
     /// when git fails.
     pub fn git(&self, args: &[&str]) -> String {
-        let output = Command::new("git")
+        let mut command = Command::new("git");
+        for name in CLEARED_ENV {
+            command.env_remove(name);
+        }
+        let output = command
             .args(args)
             .current_dir(self.path())
-            // Set when tests run from a git hook: they would point git at the outer repo.
-            .env_remove("GIT_DIR")
-            .env_remove("GIT_WORK_TREE")
-            .env_remove("GIT_INDEX_FILE")
             .stdin(Stdio::null())
             .output()
             .expect("start git");

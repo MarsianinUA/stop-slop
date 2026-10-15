@@ -5,6 +5,24 @@ use std::thread;
 
 use crate::RepoError;
 
+/// Set by a git hook or the user's shell, these point git at another repo, index or object
+/// store than the one of `cwd`, or make the `*.ts` pathspecs match literally, without
+/// crossing `/` or ignoring case. `GIT_DIFF_OPTS` beats `-U0` and would turn context lines
+/// into changed ones.
+const CLEARED_ENV: [&str; 11] = [
+    "GIT_DIR",
+    "GIT_WORK_TREE",
+    "GIT_COMMON_DIR",
+    "GIT_INDEX_FILE",
+    "GIT_OBJECT_DIRECTORY",
+    "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+    "GIT_LITERAL_PATHSPECS",
+    "GIT_GLOB_PATHSPECS",
+    "GIT_NOGLOB_PATHSPECS",
+    "GIT_ICASE_PATHSPECS",
+    "GIT_DIFF_OPTS",
+];
+
 /// A non-zero exit is `RepoError::Git`.
 pub(crate) fn run(dir: &Path, args: &[&str]) -> Result<Vec<u8>, RepoError> {
     succeeded(args, output(dir, args, None)?)
@@ -46,13 +64,15 @@ pub(crate) fn unexpected(command: &str) -> RepoError {
 }
 
 fn output(dir: &Path, args: &[&str], input: Option<&[u8]>) -> Result<Output, RepoError> {
-    let mut child = Command::new("git")
+    let mut command = Command::new("git");
+    for name in CLEARED_ENV {
+        command.env_remove(name);
+    }
+    let mut child = command
         .args(args)
         .current_dir(dir)
         // English messages: `Repo::open` recognizes "not a git repository" in stderr.
         .env("LC_ALL", "C")
-        // It beats `-U0` and would turn context lines into changed ones.
-        .env_remove("GIT_DIFF_OPTS")
         .stdin(if input.is_some() {
             Stdio::piped()
         } else {

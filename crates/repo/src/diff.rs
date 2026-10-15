@@ -10,7 +10,8 @@ struct Section {
 }
 
 /// The output format `parse` relies on. The user's config could drop or swap the `a/` `b/`
-/// prefixes, add colors, glue hunks, turn off renames or run another diff program.
+/// prefixes, add colors, glue hunks, turn off renames or run another diff program. Another
+/// algorithm would move the changed lines away from the ones a pull request on GitHub shows.
 pub(crate) const ARGS: &[&str] = &[
     "-U0",
     "--no-color",
@@ -20,6 +21,8 @@ pub(crate) const ARGS: &[&str] = &[
     "--inter-hunk-context=0",
     "--src-prefix=a/",
     "--dst-prefix=b/",
+    "--diff-algorithm=myers",
+    "--indent-heuristic",
 ];
 
 /// Reads `git diff` made with `ARGS`. Only lines that start with `diff --git `,

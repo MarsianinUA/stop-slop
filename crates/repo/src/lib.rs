@@ -97,7 +97,14 @@ pub struct Repo {
 
 impl Repo {
     pub fn open(cwd: &Path) -> Result<Repo, RepoError> {
-        let args = ["rev-parse", "--show-toplevel", "--git-common-dir"];
+        // From a subfolder git prints the common dir relative to `cwd`, which may be relative
+        // itself; `--path-format` makes it absolute. The root is absolute anyway.
+        let args = [
+            "rev-parse",
+            "--show-toplevel",
+            "--path-format=absolute",
+            "--git-common-dir",
+        ];
         let out = git::run(cwd, &args).map_err(|error| match error {
             RepoError::Git { stderr, .. } if stderr.contains("not a git repository") => {
                 RepoError::NotARepo
@@ -110,9 +117,7 @@ impl Repo {
             .ok_or_else(|| git::unexpected("rev-parse"))?;
         Ok(Repo {
             root: PathBuf::from(root),
-            // From a subfolder git prints the common dir relative to `cwd`; `join` keeps an
-            // absolute one as is.
-            common_dir: cwd.join(common_dir),
+            common_dir: PathBuf::from(common_dir),
             cwd: cwd.to_owned(),
         })
     }
@@ -121,7 +126,7 @@ impl Repo {
         &self.root
     }
 
-    /// Absolute, but not canonical.
+    /// Absolute, as git prints it: `C:/...` on Windows, never `\\?\C:\...`.
     pub fn git_common_dir(&self) -> &Path {
         &self.common_dir
     }

@@ -1,6 +1,6 @@
 use std::collections::BTreeSet;
 use std::fs;
-use std::io::{ErrorKind, Write as _};
+use std::io::{self, ErrorKind, Write as _};
 use std::panic::resume_unwind;
 use std::path::PathBuf;
 use std::thread;
@@ -37,8 +37,9 @@ impl Snapshot {
         }
     }
 
-    /// Bytes as git stores them, without CRLF filters. A missing file is `None`, and on `Rev`
-    /// a folder too.
+    /// The bytes on disk on `WorkTree`; on `Rev` the bytes git stores, without CRLF filters.
+    /// Both follow a symlink. A missing file is `None`, and on `Rev` also a folder and a link
+    /// that leads nowhere inside the revision.
     pub fn read(&self, paths: &[Utf8PathBuf]) -> Result<Vec<Option<Vec<u8>>>, RepoError> {
         match self {
             Snapshot::WorkTree(tree) => paths.iter().map(|path| tree.read(path)).collect(),
@@ -157,7 +158,18 @@ impl Snapshot {
     /// Sorted files that contain `word` as a whole word, without binary files. On `WorkTree`
     /// untracked files count too.
     pub fn grep_word(&self, word: &str) -> Result<Vec<Utf8PathBuf>, RepoError> {
-        let mut args = vec!["grep", "-l", "-z", "-w", "-F", "-I", "--no-color"];
+        // `submodule.recurse` in the user's config turns on `--recurse-submodules`, and
+        // `--untracked` refuses to run with it.
+        let mut args = vec![
+            "grep",
+            "-l",
+            "-z",
+            "-w",
+            "-F",
+            "-I",
+            "--no-color",
+            "--no-recurse-submodules",
+        ];
         let (root, prefix) = match self {
             Snapshot::WorkTree(tree) => {
                 args.extend(["--untracked", "-e", word]);
@@ -179,24 +191,30 @@ impl Snapshot {
         Ok(files)
     }
 
-    /// The branches of [`crate::Repo::branches`], each with its distance to the head of this
-    /// snapshot: `ahead` counts the commits of the branch that the head lacks, `behind` the
-    /// commits of the head that the branch lacks, so `behind` is 0 when the branch contains
-    /// the head. One `for-each-ref`; its `%(ahead-behind)` needs git 2.41.
+    /// The branches of [`crate::Repo::branches`] that point to a commit, each with its
+    /// distance to the head of this snapshot: `ahead` counts the commits of the branch that
+    /// the head lacks, `behind` the commits of the head that the branch lacks, so `behind` is
+    /// 0 when the branch contains the head. One `for-each-ref`; its `%(ahead-behind)` needs
+    /// git 2.41.
     pub fn branch_distances(&self) -> Result<Vec<BranchDistance>, RepoError> {
         let (root, head) = match self {
             Snapshot::WorkTree(tree) => (&tree.root, "HEAD"),
             Snapshot::Rev(rev) => (&rev.root, rev.oid.0.as_str()),
         };
         let fields = format!("%(ahead-behind:{head})");
-        crate::for_each_branch(root, &fields, |tip, counts| {
+        let distances = crate::for_each_branch(root, &fields, |tip, counts| {
+            // A ref to a tree or a blob gets no counts: git only warns about it and goes on.
+            if counts.is_empty() {
+                return Ok(None);
+            }
             let (ahead, behind) = counts
                 .split_once(' ')
                 .and_then(|(ahead, behind)| Some((ahead.parse().ok()?, behind.parse().ok()?)))
                 .ok_or_else(|| git::unexpected("for-each-ref"))?;
-            Ok(BranchDistance { tip, ahead, behind })
+            Ok(Some(BranchDistance { tip, ahead, behind }))
         })
-        .map_err(needs_new_git)
+        .map_err(needs_new_git)?;
+        Ok(distances.into_iter().flatten().collect())
     }
 }
 
@@ -216,18 +234,27 @@ fn needs_new_git(error: RepoError) -> RepoError {
 
 impl WorkTree {
     /// Replaces an existing file through a temporary file and a rename, with the permissions
-    /// of the old file. A missing file is `Io` with `NotFound`. A symlink becomes a plain file.
+    /// of the old file. A missing file is `Io` with `NotFound`, a read-only one `Io` with
+    /// `PermissionDenied`. A symlink becomes a plain file.
     pub fn write(&self, path: &Utf8Path, bytes: &[u8]) -> Result<(), RepoError> {
         let full = self.root.join(path);
         let io_error = RepoError::io(&full);
         let permissions = fs::metadata(&full).map_err(&io_error)?.permissions();
+        if permissions.readonly() {
+            // Windows cannot rename over a read-only file, while Linux and macOS would quietly
+            // replace a file the user locked.
+            let error = io::Error::new(ErrorKind::PermissionDenied, "the file is read-only");
+            return Err(io_error(error));
+        }
         let dir = full.parent().expect("a file in the repo has a folder");
         let mut temp = NamedTempFile::new_in(dir).map_err(&io_error)?;
         temp.write_all(bytes).map_err(&io_error)?;
+        // Before the rename, so the new file never shows up with the mode of a temp file.
+        temp.as_file()
+            .set_permissions(permissions)
+            .map_err(&io_error)?;
         temp.persist(&full).map_err(|error| io_error(error.error))?;
-        // After the rename: a read-only temp file on Windows could not be removed when the
-        // rename fails, and would stay in the project.
-        fs::set_permissions(&full, permissions).map_err(&io_error)
+        Ok(())
     }
 
     fn read(&self, path: &Utf8Path) -> Result<Option<Vec<u8>>, RepoError> {
@@ -242,20 +269,34 @@ impl WorkTree {
 
 impl Rev {
     /// One `cat-file --batch` for all paths. Its answers come in the order of the requests:
-    /// `<oid> <type> <size>\n<bytes>\n`, or `<request> missing\n`.
+    /// `<oid> <type> <size>\n<bytes>\n`, or `<request> missing\n`. A symlink is followed inside
+    /// the revision, as `fs::read` does on disk; a link that leads nowhere answers
+    /// `<dangling|loop|notdir|symlink> <size>\n<bytes>\n`.
     fn read(&self, paths: &[Utf8PathBuf]) -> Result<Vec<Option<Vec<u8>>>, RepoError> {
-        if paths.is_empty() {
-            return Ok(Vec::new());
-        }
+        // A request is one line: a path with `\n` would split in two and shift every later
+        // answer. Such a path is not asked and reads as missing.
+        let asked = |path: &Utf8PathBuf| !path.as_str().contains('\n');
         let requests: String = paths
             .iter()
+            .filter(|path| asked(path))
             .map(|path| format!("{}:{path}\n", self.oid))
             .collect();
-        let out = git::run_with_input(&self.root, &["cat-file", "--batch"], requests.as_bytes())?;
+        if requests.is_empty() {
+            return Ok(vec![None; paths.len()]);
+        }
+        let out = git::run_with_input(
+            &self.root,
+            &["cat-file", "--batch", "--follow-symlinks"],
+            requests.as_bytes(),
+        )?;
         let unexpected = || git::unexpected("cat-file --batch");
         let mut rest = out.as_slice();
         let mut files = Vec::with_capacity(paths.len());
-        for _ in paths {
+        for path in paths {
+            if !asked(path) {
+                files.push(None);
+                continue;
+            }
             let end = rest
                 .iter()
                 .position(|&byte| byte == b'\n')
@@ -266,16 +307,12 @@ impl Rev {
                 files.push(None);
                 continue;
             }
-            let mut fields = header.split(' ').skip(1);
-            let kind = fields.next().ok_or_else(unexpected)?;
-            let size: usize = fields
-                .next()
-                .and_then(|size| size.parse().ok())
-                .ok_or_else(unexpected)?;
+            let (kind, size) = header.rsplit_once(' ').ok_or_else(unexpected)?;
+            let size: usize = size.parse().map_err(|_| unexpected())?;
             let body = rest.get(..size).ok_or_else(unexpected)?;
             // A folder answers with the bytes of its tree: they are skipped all the same, or the
             // next answers would shift.
-            files.push((kind == "blob").then(|| body.to_vec()));
+            files.push(kind.ends_with(" blob").then(|| body.to_vec()));
             rest = rest.get(size + 1..).ok_or_else(unexpected)?;
         }
         Ok(files)

@@ -3,7 +3,8 @@ use std::collections::{BTreeSet, HashMap};
 use camino::{Utf8Path, Utf8PathBuf};
 
 pub trait Facts: Sync {
-    /// The nearest `package.json`.
+    /// The nearest `package.json`, with the packages of every `package.json` above it up to the
+    /// repo root: Node looks for a bare import in `node_modules` from the folder of the file up.
     fn package(&self, file: &Utf8Path) -> Option<&Package>;
     /// Keys of `paths` in the nearest `tsconfig.json`.
     fn aliases(&self, file: &Utf8Path) -> &[String];
@@ -20,7 +21,7 @@ pub enum Fact {
 #[derive(Debug)]
 pub struct Package {
     /// Keys of `dependencies`, `devDependencies`, `peerDependencies` and
-    /// `optionalDependencies`.
+    /// `optionalDependencies` of the nearest `package.json` and of every one above it.
     pub dependencies: BTreeSet<String>,
     /// Packages of the same monorepo (`workspace:` dependencies).
     pub workspace: BTreeSet<String>,
