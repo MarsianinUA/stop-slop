@@ -1,0 +1,5 @@
+description = "A type annotation the value already gives, like `const count: number = 5` or `const repo: Repo = new Repo()`"
+kind = "error"
+fix = true
+source = ["personal"]
+message = "The value already tells TypeScript that this is `{type}`, so the annotation only repeats it and has to change together with the value. Let the value give the type."

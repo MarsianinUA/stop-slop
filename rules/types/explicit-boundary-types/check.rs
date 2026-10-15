@@ -126,6 +126,7 @@ fn method_signature<'a>(
     if !is_public(method.accessibility, &method.key)
         || !in_exported_class(file, node)
         || is_overload_body_method(body, method)
+        || typed_by_getter(body, method)
     {
         return None;
     }
@@ -222,17 +223,33 @@ fn is_overload_body(file: &File<'_>, function: &Function<'_>) -> bool {
 
 /// A method body next to a bodiless method of the same name and `static` in the same class.
 fn is_overload_body_method(body: &ClassBody<'_>, method: &MethodDefinition<'_>) -> bool {
+    method.value.body.is_some() && has_twin(body, method, |other| other.value.body.is_none())
+}
+
+/// A setter next to a getter of the same name and `static` with a return type: TS takes the
+/// setter's parameter type from the getter.
+fn typed_by_getter(body: &ClassBody<'_>, setter: &MethodDefinition<'_>) -> bool {
+    setter.kind == MethodDefinitionKind::Set
+        && has_twin(body, setter, |getter| {
+            getter.kind == MethodDefinitionKind::Get && getter.value.return_type.is_some()
+        })
+}
+
+fn has_twin(
+    body: &ClassBody<'_>,
+    method: &MethodDefinition<'_>,
+    test: impl Fn(&MethodDefinition<'_>) -> bool,
+) -> bool {
     let Some(name) = method.key.static_name() else {
         return false;
     };
-    method.value.body.is_some()
-        && body.body.iter().any(|element| {
-            matches!(
-                element,
-                ClassElement::MethodDefinition(other)
-                    if other.value.body.is_none()
-                        && other.r#static == method.r#static
-                        && other.key.static_name().as_ref() == Some(&name)
-            )
-        })
+    body.body.iter().any(|element| {
+        matches!(
+            element,
+            ClassElement::MethodDefinition(other)
+                if other.r#static == method.r#static
+                    && other.key.static_name().as_ref() == Some(&name)
+                    && test(other)
+        )
+    })
 }

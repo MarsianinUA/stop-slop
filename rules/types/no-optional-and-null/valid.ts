@@ -21,5 +21,11 @@ class Filter {
   label?: string;
 }
 
+class Draft {
+  constructor(note?: string | null) {
+    void note;
+  }
+}
+
 export type { ApiKey, Page };
-export { update, Filter };
+export { update, Filter, Draft };

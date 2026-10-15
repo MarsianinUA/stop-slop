@@ -6,15 +6,25 @@ use kit::prelude::*;
 pub struct Check {}
 
 impl Rule for Check {
-    const NODES: &'static [AstType] = &[AstType::TSPropertySignature, AstType::PropertyDefinition];
+    const NODES: &'static [AstType] = &[
+        AstType::TSPropertySignature,
+        AstType::PropertyDefinition,
+        AstType::FormalParameter,
+    ];
 
     fn on_node<'a>(&self, node: &AstNode<'a>, cx: &mut Cx<'_, 'a>) {
-        let (key, annotation) = match node.kind() {
+        let (name, annotation) = match node.kind() {
             AstKind::TSPropertySignature(field) if field.optional => {
-                (&field.key, &field.type_annotation)
+                (field.key.span(), &field.type_annotation)
             }
             AstKind::PropertyDefinition(field) if field.optional => {
-                (&field.key, &field.type_annotation)
+                (field.key.span(), &field.type_annotation)
+            }
+            // `constructor(public note?: string | null)` declares a field.
+            AstKind::FormalParameter(parameter)
+                if parameter.optional && parameter.has_modifier() =>
+            {
+                (parameter.pattern.span(), &parameter.type_annotation)
             }
             _ => return,
         };
@@ -22,7 +32,7 @@ impl Rule for Check {
             return;
         };
         if has_null(&annotation.type_annotation) {
-            cx.report(Span::new(key.span().start, annotation.span.end));
+            cx.report(Span::new(name.start, annotation.span.end));
         }
     }
 }

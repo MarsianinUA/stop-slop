@@ -61,6 +61,14 @@ export class UserService {
     void value;
   }
 
+  get title(): string {
+    return 'users';
+  }
+
+  set title(value) {
+    void value;
+  }
+
   handle: Handler = (event) => event.length;
 
   private lookup(id) {
