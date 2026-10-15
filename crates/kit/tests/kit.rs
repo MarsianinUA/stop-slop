@@ -1,10 +1,14 @@
+use std::collections::BTreeSet;
+
 use camino::Utf8Path;
 use kit::oxc::ast::ast::{Expression, TSType};
 use kit::oxc::parser::ParseOptions;
 use kit::oxc::semantic::SemanticBuilder;
 use kit::oxc::span::SourceType;
 use kit::prelude::*;
-use kit::{EnumIndex, EnumMember, LineIndex, RoleDef, Roles, StaticFacts, build, suffix_of};
+use kit::{
+    EnumIndex, EnumMember, LineIndex, Package, RoleDef, Roles, StaticFacts, build, suffix_of,
+};
 
 #[test]
 fn role_of_takes_the_first_role_matching_a_suffix_or_a_folder() {
@@ -101,11 +105,7 @@ impl Rule for ReportTwice {
 
 #[test]
 fn a_bare_report_is_a_finding_and_arg_and_fix_add_to_it() {
-    let facts = StaticFacts {
-        package: None,
-        aliases: Vec::new(),
-        enums: EnumIndex::new(Vec::new()),
-    };
+    let facts = no_facts();
     let rule = build::<ReportTwice>("").unwrap();
     let mut out = Vec::new();
 
@@ -557,4 +557,133 @@ fn is_exported_node_takes_the_own_name_the_default_export_or_an_exported_variabl
             assert_eq!(is_exported_node(file, node), exported, "{text}");
         });
     }
+}
+
+/// `events` is a declared polyfill; `@acme/db` is a workspace package and a key of `paths`.
+fn acme_facts() -> StaticFacts {
+    StaticFacts {
+        package: Some(Package {
+            dependencies: BTreeSet::from(["events".to_string()]),
+            workspace: BTreeSet::from(["@acme/db".to_string()]),
+        }),
+        aliases: ["@/*", "@acme/shared/*", "@acme/db", "~config", "*"]
+            .map(String::from)
+            .into(),
+        enums: EnumIndex::new(Vec::new()),
+    }
+}
+
+fn no_facts() -> StaticFacts {
+    StaticFacts {
+        package: None,
+        aliases: Vec::new(),
+        enums: EnumIndex::new(Vec::new()),
+    }
+}
+
+#[test]
+fn import_kind_takes_relative_node_workspace_alias_then_external() {
+    let acme = acme_facts();
+    let none = no_facts();
+    with_file("", |file| {
+        for (source, kind) in [
+            ("node:fs", ImportKind::Node),
+            ("node:test", ImportKind::Node),
+            ("fs", ImportKind::Node),
+            ("fs/promises", ImportKind::Node),
+            ("util/types", ImportKind::Node),
+            ("events", ImportKind::External),
+            ("fs/x", ImportKind::External),
+            ("lodash", ImportKind::External),
+            ("@nestjs/core", ImportKind::External),
+            ("~config/x", ImportKind::External),
+            ("@acme/db", ImportKind::Workspace),
+            ("@acme/db/schema", ImportKind::Workspace),
+            ("@/orders/x", ImportKind::Alias),
+            ("@acme/shared/types", ImportKind::Alias),
+            ("~config", ImportKind::Alias),
+            ("./order", ImportKind::Relative),
+            ("../lib/x", ImportKind::Relative),
+            (".", ImportKind::Relative),
+            ("..", ImportKind::Relative),
+            ("/abs/x", ImportKind::Relative),
+        ] {
+            assert_eq!(import_kind(file, &acme, source), kind, "{source}");
+        }
+        for (source, kind) in [
+            ("events", ImportKind::Node),
+            ("@acme/db", ImportKind::External),
+            ("@/x", ImportKind::External),
+        ] {
+            assert_eq!(
+                import_kind(file, &none, source),
+                kind,
+                "{source} without facts"
+            );
+        }
+    });
+}
+
+#[test]
+fn own_type_is_declared_or_imported_from_the_project() {
+    let header = "import type { Order } from './order';
+import type { Row } from '@/rows';
+import type { Invoice } from '@acme/db/invoices';
+import Def from './def';
+import type { Request } from 'express';
+import type { Stats } from 'node:fs';
+import type * as models from './models';
+import Legacy = require('./legacy');
+import Lib = require('lib');
+interface Local { a: string }
+class Model {}
+enum Kind { A = 'a' }
+declare const model: Model;
+type Generic<T> = T;
+";
+    // (type, own with `acme_facts`, own without facts)
+    let cases = [
+        ("Order", true, true),
+        ("Row", true, false),
+        ("Invoice", true, false),
+        ("Def", true, true),
+        ("models.Receipt", true, true),
+        ("Legacy", true, true),
+        ("Local", true, true),
+        ("Model", true, true),
+        ("Kind", true, true),
+        ("Order['items'][number]", true, true),
+        ("import('./x').Y", true, true),
+        ("Order | string", true, true),
+        ("Local & { b: 1 }", true, true),
+        ("Request", false, false),
+        ("Stats", false, false),
+        ("Lib", false, false),
+        ("Record<string, number>", false, false),
+        ("Express.Request", false, false),
+        ("keyof Local", false, false),
+        ("typeof model", false, false),
+        ("string", false, false),
+        ("import('lodash').Z", false, false),
+    ];
+    let aliases: String = cases
+        .iter()
+        .enumerate()
+        .map(|(i, (ty, _, _))| format!("type T{i} = {ty};\n"))
+        .collect();
+    let text = format!("{header}{aliases}");
+    let acme = acme_facts();
+    let none = no_facts();
+    with_file(&text, |file| {
+        for (i, (ty, own, own_without_facts)) in cases.iter().enumerate() {
+            let alias = alias_type(file, &format!("T{i}"));
+            assert_eq!(is_own_type(file, &acme, alias), *own, "{ty}");
+            assert_eq!(
+                is_own_type(file, &none, alias),
+                *own_without_facts,
+                "{ty} without facts"
+            );
+        }
+        assert!(!is_own_type(file, &acme, alias_type(file, "Generic")), "T");
+    });
 }
