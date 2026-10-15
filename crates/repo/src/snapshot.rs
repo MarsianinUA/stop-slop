@@ -8,7 +8,7 @@ use std::thread;
 use camino::{Utf8Path, Utf8PathBuf};
 use tempfile::NamedTempFile;
 
-use crate::{Change, ChangedFile, LineRange, Oid, RepoError, diff, git};
+use crate::{BranchDistance, Change, ChangedFile, LineRange, Oid, RepoError, diff, git};
 
 /// Files on disk or files of a commit, with paths relative to the repo root.
 #[derive(Debug)]
@@ -178,6 +178,40 @@ impl Snapshot {
         files.sort();
         Ok(files)
     }
+
+    /// The branches of [`crate::Repo::branches`], each with its distance to the head of this
+    /// snapshot: `ahead` counts the commits of the branch that the head lacks, `behind` the
+    /// commits of the head that the branch lacks, so `behind` is 0 when the branch contains
+    /// the head. One `for-each-ref`; its `%(ahead-behind)` needs git 2.41.
+    pub fn branch_distances(&self) -> Result<Vec<BranchDistance>, RepoError> {
+        let (root, head) = match self {
+            Snapshot::WorkTree(tree) => (&tree.root, "HEAD"),
+            Snapshot::Rev(rev) => (&rev.root, rev.oid.0.as_str()),
+        };
+        let fields = format!("%(ahead-behind:{head})");
+        crate::for_each_branch(root, &fields, |tip, counts| {
+            let (ahead, behind) = counts
+                .split_once(' ')
+                .and_then(|(ahead, behind)| Some((ahead.parse().ok()?, behind.parse().ok()?)))
+                .ok_or_else(|| git::unexpected("for-each-ref"))?;
+            Ok(BranchDistance { tip, ahead, behind })
+        })
+        .map_err(needs_new_git)
+    }
+}
+
+fn needs_new_git(error: RepoError) -> RepoError {
+    match error {
+        RepoError::Git { command, stderr }
+            if stderr.contains("unknown field name: ahead-behind") =>
+        {
+            RepoError::Git {
+                command,
+                stderr: format!("{stderr}; stop-slop needs git 2.41 or newer"),
+            }
+        }
+        error => error,
+    }
 }
 
 impl WorkTree {
@@ -245,5 +279,40 @@ impl Rev {
             rest = rest.get(size + 1..).ok_or_else(unexpected)?;
         }
         Ok(files)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn git_error(stderr: &str) -> RepoError {
+        RepoError::Git {
+            command: "git for-each-ref ...".to_owned(),
+            stderr: stderr.to_owned(),
+        }
+    }
+
+    #[test]
+    fn needs_new_git_adds_a_hint_to_the_unknown_field_error() {
+        let error = needs_new_git(git_error("fatal: unknown field name: ahead-behind:HEAD"));
+        assert_eq!(
+            error.to_string(),
+            "`git for-each-ref ...` failed: fatal: unknown field name: ahead-behind:HEAD; \
+             stop-slop needs git 2.41 or newer"
+        );
+    }
+
+    #[test]
+    fn needs_new_git_passes_other_errors_as_they_are() {
+        let error = needs_new_git(git_error("fatal: failed to find 'HEAD'"));
+        assert_eq!(
+            error.to_string(),
+            "`git for-each-ref ...` failed: fatal: failed to find 'HEAD'"
+        );
+        assert!(matches!(
+            needs_new_git(RepoError::NotARepo),
+            RepoError::NotARepo
+        ));
     }
 }

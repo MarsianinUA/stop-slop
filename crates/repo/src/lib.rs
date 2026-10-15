@@ -28,6 +28,13 @@ pub struct BranchTip {
     pub oid: Oid,
 }
 
+#[derive(Debug, PartialEq, Eq)]
+pub struct BranchDistance {
+    pub tip: BranchTip,
+    pub ahead: u32,
+    pub behind: u32,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Change {
     Added,
@@ -177,31 +184,7 @@ impl Repo {
     /// Local branches and the ones of `origin`, in the order of ref names; `origin/HEAD`,
     /// other remotes and tags are left out.
     pub fn branches(&self) -> Result<Vec<BranchTip>, RepoError> {
-        let out = git::run(
-            &self.root,
-            &[
-                "for-each-ref",
-                // `lstrip=2` turns `refs/heads/x` into `x` and `refs/remotes/origin/x` into
-                // `origin/x`.
-                "--format=%(objectname) %(refname:lstrip=2) %(symref)",
-                "refs/heads",
-                "refs/remotes/origin",
-            ],
-        )?;
-        let mut tips = Vec::new();
-        for line in git::split(&out, b'\n') {
-            // A ref name has no spaces; `symref` is empty unless the ref is symbolic.
-            let mut fields = line.split(' ');
-            let (Some(oid), Some(name), Some("")) = (fields.next(), fields.next(), fields.next())
-            else {
-                continue;
-            };
-            tips.push(BranchTip {
-                name: name.to_owned(),
-                oid: Oid(oid.to_owned()),
-            });
-        }
-        Ok(tips)
+        for_each_branch(&self.root, "", |tip, _| Ok(tip))
     }
 
     /// The branch `origin/HEAD` points to; `None` when there is no `origin/HEAD`.
@@ -229,6 +212,34 @@ impl Repo {
         let out = git::run_found(&self.root, &["merge-base", &a.0, &b.0])?;
         Ok(out.map(oid))
     }
+}
+
+/// `fields` go into the format after the name, and `parse` gets what git printed for them.
+fn for_each_branch<T>(
+    root: &Path,
+    fields: &str,
+    mut parse: impl FnMut(BranchTip, &str) -> Result<T, RepoError>,
+) -> Result<Vec<T>, RepoError> {
+    // `lstrip=2` turns `refs/heads/x` into `x` and `refs/remotes/origin/x` into `origin/x`.
+    let format = format!("--format=%(symref) %(objectname) %(refname:lstrip=2) {fields}");
+    let out = git::run(
+        root,
+        &["for-each-ref", &format, "refs/heads", "refs/remotes/origin"],
+    )?;
+    let mut branches = Vec::new();
+    for line in git::split(&out, b'\n') {
+        // `symref` is empty unless the ref is symbolic; a ref name has no spaces.
+        let mut parts = line.splitn(4, ' ');
+        let (Some(""), Some(oid), Some(name)) = (parts.next(), parts.next(), parts.next()) else {
+            continue;
+        };
+        let tip = BranchTip {
+            name: name.to_owned(),
+            oid: Oid(oid.to_owned()),
+        };
+        branches.push(parse(tip, parts.next().unwrap_or(""))?);
+    }
+    Ok(branches)
 }
 
 fn commit(root: &Path, rev: &str) -> Result<Oid, RepoError> {

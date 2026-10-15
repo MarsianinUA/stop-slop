@@ -4,7 +4,9 @@ use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 
 use camino::{Utf8Path, Utf8PathBuf};
-use repo::{BranchTip, Change, ChangedFile, LineRange, Oid, Repo, RepoError, Snapshot};
+use repo::{
+    BranchDistance, BranchTip, Change, ChangedFile, LineRange, Oid, Repo, RepoError, Snapshot,
+};
 use testkit::TempRepo;
 
 #[cfg(unix)]
@@ -213,6 +215,72 @@ fn current_and_default_branch() {
             oid: main,
         })
     );
+}
+
+/// `ahead` and `behind` as `rev-list` counts them, with a TAB between.
+fn distance(d: &BranchDistance) -> String {
+    format!("{}\t{}", d.ahead, d.behind)
+}
+
+#[test]
+fn branch_distances_count_the_commits_on_each_side_of_the_head() {
+    let t = TempRepo::new();
+    t.write("m.ts", "m\n").commit("init");
+    t.branch("a").write("a.ts", "a\n").commit("a");
+    t.branch("b").write("b.ts", "b\n").commit("b");
+    t.branch("c").write("c.ts", "c\n").commit("c");
+    t.git(&["update-ref", "refs/remotes/origin/c", "c"]);
+    t.write("c2.ts", "c2\n").commit("c2 not pushed");
+    t.branch("d").write("d.ts", "d\n").commit("d");
+    t.checkout("b").write("b2.ts", "b2\n").commit("b moves on");
+    t.checkout("main")
+        .write("m2.ts", "m2\n")
+        .commit("main moves on");
+    set_origin_main(&t, &t.git(&["rev-parse", "main"]));
+    t.git(&["update-ref", "refs/remotes/upstream/x", "main"]);
+    t.git(&["tag", "v1"]);
+    t.git(&["checkout", "-q", "--orphan", "lone"]);
+    t.commit("lone");
+    t.checkout("c");
+    let repo = open(&t);
+
+    let distances = repo.worktree().branch_distances().unwrap();
+
+    let tips: Vec<BranchTip> = distances.iter().map(|d| d.tip.clone()).collect();
+    assert_eq!(tips, repo.branches().unwrap());
+    for d in &distances {
+        let range = format!("{}...HEAD", d.tip.name);
+        let counts = t.git(&["rev-list", "--left-right", "--count", &range]);
+        assert_eq!(distance(d), counts, "{}", d.tip.name);
+    }
+    let table: Vec<(&str, u32, u32)> = distances
+        .iter()
+        .map(|d| (d.tip.name.as_str(), d.ahead, d.behind))
+        .collect();
+    assert_eq!(
+        table,
+        [
+            ("a", 0, 3),
+            ("b", 1, 2),
+            ("c", 0, 0),
+            ("d", 1, 0),
+            ("lone", 1, 5),
+            ("main", 1, 4),
+            ("origin/c", 0, 1),
+            ("origin/main", 1, 4),
+        ]
+    );
+
+    let b = t.git(&["rev-parse", "b"]);
+    let at_b = repo.at_rev("b").unwrap().branch_distances().unwrap();
+    assert_eq!(at_b.len(), distances.len());
+    for d in &at_b {
+        let range = format!("{}...{b}", d.tip.name);
+        let counts = t.git(&["rev-list", "--left-right", "--count", &range]);
+        assert_eq!(distance(d), counts, "{}", d.tip.name);
+    }
+    let of_b = at_b.iter().find(|d| d.tip.name == "b").expect("b");
+    assert_eq!((of_b.ahead, of_b.behind), (0, 0));
 }
 
 #[test]
