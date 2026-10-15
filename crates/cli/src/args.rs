@@ -25,7 +25,7 @@ pub(crate) struct CheckArgs {
     #[arg(long, conflicts_with_all = ["files", "all"])]
     pub(crate) base: Option<String>,
     /// Reads the files from git at this revision instead of the disk.
-    #[arg(long, requires = "base")]
+    #[arg(long, requires = "base", conflicts_with = "fix")]
     pub(crate) rev: Option<String>,
     /// Checks only these files.
     #[arg(long, num_args = 1.., conflicts_with = "all")]
@@ -33,6 +33,9 @@ pub(crate) struct CheckArgs {
     /// Checks every file of the repository.
     #[arg(long)]
     pub(crate) all: bool,
+    /// Applies the fixes of the rules that have one, then checks the files again.
+    #[arg(long)]
+    pub(crate) fix: bool,
     /// Prints JSON for an agent.
     #[arg(long)]
     pub(crate) json: bool,

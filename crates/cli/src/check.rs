@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::env;
 use std::panic::resume_unwind;
 use std::thread;
@@ -6,7 +7,7 @@ use camino::{Utf8Path, Utf8PathBuf};
 use engine::{Engine, Finding, FixCount, LineRange, Mode, RunConfig, SourceFile};
 use kit::{EnumIndex, Fact, Facts, Package};
 use project::ProjectFacts;
-use repo::{Repo, RepoError, Snapshot};
+use repo::{Repo, RepoError, Snapshot, WorkTree};
 use scope::{Base, GhPrBase, Scope, ScopeRequest, ScopedFile, Skipped};
 use state::State;
 
@@ -65,6 +66,9 @@ fn check(args: CheckArgs) -> Result<Checked, CliError> {
         Some(rev) => repo.at_rev(rev)?,
         None => repo.worktree(),
     };
+    let fix = args.fix;
+    // Built once for `Fix` and `Check`: `Fix` does not edit `package.json`, `tsconfig.json`
+    // or the values of enums, and `Check` runs every rule `Fix` runs.
     let mut needed = engine.facts_needed(Mode::Check);
     let enums_needed = needed.contains(&Fact::Enums);
     needed.retain(|fact| *fact != Fact::Enums);
@@ -79,7 +83,7 @@ fn check(args: CheckArgs) -> Result<Checked, CliError> {
         (prepared, index)
     });
     // A `scope` error names the base or the path the user gave, so it goes first.
-    let (scope, facts, sources) = prepared?;
+    let (mut scope, facts, mut sources) = prepared?;
     let index = index.transpose()?;
     let joined = Joined {
         files: &facts,
@@ -87,6 +91,17 @@ fn check(args: CheckArgs) -> Result<Checked, CliError> {
         enums: index.as_ref().unwrap_or(&facts),
     };
 
+    let mut fixed = Vec::new();
+    if let Snapshot::WorkTree(tree) = &snapshot
+        && fix
+    {
+        fixed = write_fixes(&engine, tree, &mut sources, &joined)?;
+        if !fixed.is_empty()
+            && let Some(base) = &scope.base
+        {
+            scope.skipped = rescope(&repo, &snapshot, base, &mut sources)?;
+        }
+    }
     let files = sources.iter().map(|source| source.path.clone()).collect();
     let report = engine.run(sources, &joined, Mode::Check);
     Ok(Checked {
@@ -94,8 +109,68 @@ fn check(args: CheckArgs) -> Result<Checked, CliError> {
         files,
         skipped: scope.skipped,
         findings: report.findings,
-        fixed: report.fixed,
+        fixed,
     })
+}
+
+/// Writes only the files `Fix` changed. Their `sources` get the written bytes, so `Check`
+/// reads nothing again.
+fn write_fixes(
+    engine: &Engine,
+    tree: &WorkTree,
+    sources: &mut [SourceFile],
+    facts: &dyn Facts,
+) -> Result<Vec<FixCount>, CliError> {
+    let copies = sources
+        .iter()
+        .map(|source| SourceFile {
+            path: source.path.clone(),
+            bytes: source.bytes.clone(),
+            changed: None,
+        })
+        .collect();
+    let report = engine.run(copies, facts, Mode::Fix);
+    let mut rewritten: BTreeMap<_, _> = report
+        .rewritten
+        .into_iter()
+        .map(|file| (file.path, file.bytes))
+        .collect();
+    for source in sources {
+        if let Some(bytes) = rewritten.remove(&source.path) {
+            tree.write(&source.path, &bytes)?;
+            source.bytes = bytes;
+        }
+    }
+    Ok(report.fixed)
+}
+
+/// Takes the changed lines of `sources` and the skipped files anew after `Fix` wrote them.
+fn rescope(
+    repo: &Repo,
+    snapshot: &Snapshot,
+    base: &Base,
+    sources: &mut Vec<SourceFile>,
+) -> Result<Vec<Skipped>, CliError> {
+    // The oid of the first base, not a new search: no second `gh` call (half a second of
+    // network) and no second ancestor search.
+    let request = ScopeRequest::Branch {
+        base: Some(base.oid.to_string()),
+    };
+    let again = scope::resolve(repo, snapshot, &GhPrBase, request)?;
+    let mut changed: BTreeMap<_, _> = again
+        .files
+        .into_iter()
+        .map(|file| (file.path, file.changed))
+        .collect();
+    // A file that became as in the base drops out; `Fix` creates no files, so none comes in.
+    sources.retain_mut(|source| match changed.remove(&source.path) {
+        Some(lines) => {
+            source.changed = lines.map(engine_lines);
+            true
+        }
+        None => false,
+    });
+    Ok(again.skipped)
 }
 
 fn request(args: CheckArgs) -> ScopeRequest {

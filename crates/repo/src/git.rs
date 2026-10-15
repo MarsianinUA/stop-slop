@@ -2,8 +2,12 @@ use std::io::{self, Write};
 use std::path::Path;
 use std::process::{Command, Output, Stdio};
 use std::thread;
+use std::time::Duration;
 
 use crate::RepoError;
+
+/// Before the second and the third start of a git that could not open the index.
+const INDEX_RETRY_PAUSES: [Duration; 2] = [Duration::from_millis(10), Duration::from_millis(50)];
 
 /// Set by a git hook or the user's shell, these point git at another repo, index or object
 /// store than the one of `cwd`, or make the `*.ts` pathspecs match literally, without
@@ -63,7 +67,27 @@ pub(crate) fn unexpected(command: &str) -> RepoError {
     ))
 }
 
+/// On Windows `git diff` on the work tree rewrites the index itself (`diff.autoRefreshIndex`)
+/// when a file's stat changed but not its content. A git started at that moment, ours in
+/// parallel or an IDE's, cannot open the index and fails; a moment later it would not.
 fn output(dir: &Path, args: &[&str], input: Option<&[u8]>) -> Result<Output, RepoError> {
+    let mut output = start(dir, args, input)?;
+    for pause in INDEX_RETRY_PAUSES {
+        if output.status.success() || !index_busy(&output.stderr) {
+            break;
+        }
+        thread::sleep(pause);
+        output = start(dir, args, input)?;
+    }
+    Ok(output)
+}
+
+fn index_busy(stderr: &[u8]) -> bool {
+    const BUSY: &[u8] = b"index file open failed";
+    stderr.windows(BUSY.len()).any(|window| window == BUSY)
+}
+
+fn start(dir: &Path, args: &[&str], input: Option<&[u8]>) -> Result<Output, RepoError> {
     let mut command = Command::new("git");
     for name in CLEARED_ENV {
         command.env_remove(name);
@@ -109,5 +133,22 @@ fn failed(args: &[&str], stderr: &[u8]) -> RepoError {
     RepoError::Git {
         command: format!("git {}", args.join(" ")),
         stderr: String::from_utf8_lossy(stderr).trim_end().to_owned(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_a_failed_index_open_is_started_again() {
+        assert!(index_busy(
+            b"fatal: .git/index: index file open failed: Permission denied\n"
+        ));
+        assert!(!index_busy(
+            b"fatal: not a git repository (or any of the parent directories): .git\n"
+        ));
+        assert!(!index_busy(b"fatal: bad revision 'no-such'\n"));
+        assert!(!index_busy(b""));
     }
 }

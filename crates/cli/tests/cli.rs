@@ -451,8 +451,7 @@ fn check_at_a_revision_reads_the_files_from_git() {
     assert_eq!(finding["rule"], "no-any");
     assert_eq!(finding["file"], "src/r.ts");
     assert_eq!(finding["inHunk"], true);
-    let on_disk = fs::read_to_string(t.path().join("src/r.ts")).expect("read src/r.ts");
-    assert_eq!(on_disk, "export const r = 1;\n");
+    assert_eq!(read(&t, "src/r.ts"), "export const r = 1;\n");
 
     let report = check(t.path(), &["check", "--base", "main", "--json"], 1);
     assert_eq!(finding_files(&report), ["src/u.ts"]);
@@ -525,4 +524,174 @@ fn check_skips_files_a_squash_merge_brought_into_the_base() {
         report["skipped"],
         json!([{"file": "a.ts", "reason": "already-in-base"}])
     );
+}
+
+const IO_FEAT: &str = "import { readFileSync } from 'fs'; export const r: any = readFileSync;\n\
+                       export const a = 10;\nexport const b: any = 2;\n";
+const MAIN_FEAT: &str =
+    "import path from 'path';\nimport os from 'os';\nexport const p = [path, os];\n";
+
+/// `main` with `src/io.ts`: a bare `'fs'` and an `any` on line 1, an `any` on line 3. `feat`
+/// changes line 2 of it and adds `src/main.ts` with two bare imports.
+fn fix_repo() -> TempRepo {
+    let t = TempRepo::new();
+    t.write("src/io.ts", &IO_FEAT.replace("a = 10", "a = 1"))
+        .commit("main");
+    t.branch("feat")
+        .write("src/io.ts", IO_FEAT)
+        .write("src/main.ts", MAIN_FEAT)
+        .commit("feat");
+    t
+}
+
+fn read(t: &TempRepo, path: &str) -> String {
+    fs::read_to_string(t.path().join(path)).unwrap_or_else(|error| panic!("{path}: {error}"))
+}
+
+/// Rule, file, line, column and `inHunk` of each finding.
+fn places(report: &Value) -> Vec<(&str, &str, u64, u64, Option<bool>)> {
+    findings(report)
+        .iter()
+        .map(|finding| {
+            (
+                finding["rule"].as_str().expect("rule"),
+                finding["file"].as_str().expect("file"),
+                finding["line"].as_u64().expect("line"),
+                finding["column"].as_u64().expect("column"),
+                finding["inHunk"].as_bool(),
+            )
+        })
+        .collect()
+}
+
+#[test]
+fn check_fix_writes_the_fixes_and_checks_the_new_text() {
+    let t = fix_repo();
+    let before = check(t.path(), &["check", "--base", "main", "--json"], 1);
+    assert_eq!(
+        places(&before),
+        [
+            ("node-protocol", "src/io.ts", 1, 30, Some(false)),
+            ("no-any", "src/io.ts", 1, 52, Some(false)),
+            ("no-any", "src/io.ts", 3, 17, Some(false)),
+            ("node-protocol", "src/main.ts", 1, 18, Some(true)),
+            ("node-protocol", "src/main.ts", 2, 16, Some(true)),
+        ]
+    );
+    assert_eq!(findings(&before)[0]["fixable"], true);
+
+    let args = ["check", "--base", "main", "--fix", "--json"];
+    let report = check(t.path(), &args, 1);
+    let io_fixed = IO_FEAT.replace("'fs'", "'node:fs'");
+    let main_fixed = "import path from 'node:path';\nimport os from 'node:os';\n\
+                      export const p = [path, os];\n";
+    assert_eq!(read(&t, "src/io.ts"), io_fixed);
+    assert_eq!(read(&t, "src/main.ts"), main_fixed);
+    assert_eq!(
+        report["fixed"],
+        json!([
+            {"rule": "node-protocol", "file": "src/io.ts", "count": 1},
+            {"rule": "node-protocol", "file": "src/main.ts", "count": 2},
+        ])
+    );
+    // `--fix` changed line 1 of `src/io.ts`, so it is in the diff now.
+    assert_eq!(
+        places(&report),
+        [
+            ("no-any", "src/io.ts", 1, 57, Some(true)),
+            ("no-any", "src/io.ts", 3, 17, Some(false)),
+        ]
+    );
+    assert_eq!(
+        report["base"],
+        json!({"ref": "main", "sha": sha7(&t, "main"), "reason": "flag"})
+    );
+    assert_eq!(report["files"], json!(["src/io.ts", "src/main.ts"]));
+
+    let again = check(t.path(), &args, 1);
+    assert_eq!(again["fixed"], json!([]));
+    assert_eq!(again["findings"], report["findings"]);
+    assert_eq!(read(&t, "src/io.ts"), io_fixed);
+    assert_eq!(read(&t, "src/main.ts"), main_fixed);
+
+    t.git(&["checkout", "--", "src"]);
+    let out = run(t.path(), &["check", "--base", "main", "--fix"]);
+    assert_eq!(code(&out), 1, "{}", stderr(&out));
+    let text = stdout(&out);
+    let lines: Vec<&str> = text.lines().collect();
+    for line in [
+        "fixed src/io.ts node-protocol x1",
+        "fixed src/main.ts node-protocol x2",
+    ] {
+        assert!(lines.contains(&line), "no `{line}` in\n{text}");
+    }
+}
+
+#[test]
+fn check_fix_of_files_fixes_only_those_files() {
+    let t = fix_repo();
+    let args = ["check", "--files", "src/main.ts", "--fix", "--json"];
+    let report = check(t.path(), &args, 0);
+    assert_eq!(
+        report["fixed"],
+        json!([{"rule": "node-protocol", "file": "src/main.ts", "count": 2}])
+    );
+    assert_eq!(report["base"], Value::Null);
+    assert_eq!(report["findings"], json!([]));
+    assert_eq!(read(&t, "src/io.ts"), IO_FEAT);
+}
+
+#[test]
+fn check_fix_at_a_revision_is_refused() {
+    let t = fix_repo();
+    let out = run(
+        t.path(),
+        &["check", "--rev", "feat", "--base", "main", "--fix"],
+    );
+    assert_eq!(code(&out), 2);
+    assert!(!stderr(&out).is_empty());
+    assert_eq!(read(&t, "src/io.ts"), IO_FEAT);
+    assert_eq!(read(&t, "src/main.ts"), MAIN_FEAT);
+}
+
+#[test]
+fn check_fix_keeps_crlf_line_endings() {
+    let t = TempRepo::new();
+    t.write("src/m.ts", "export const m = 1;\n").commit("main");
+    t.branch("feat")
+        .write(
+            "src/crlf.ts",
+            "import os from 'os';\r\nexport const o = os;\r\n",
+        )
+        .commit("feat");
+
+    let report = check(t.path(), &["check", "--base", "main", "--fix", "--json"], 0);
+    assert_eq!(
+        report["fixed"],
+        json!([{"rule": "node-protocol", "file": "src/crlf.ts", "count": 1}])
+    );
+    assert_eq!(
+        read(&t, "src/crlf.ts"),
+        "import os from 'node:os';\r\nexport const o = os;\r\n"
+    );
+}
+
+#[test]
+fn check_fix_drops_a_file_that_became_as_in_the_base() {
+    let t = TempRepo::new();
+    let base_text = "import fs from 'node:fs';\nexport const f = fs;\n";
+    t.write("src/x.ts", base_text).commit("main");
+    t.branch("feat")
+        .write("src/x.ts", &base_text.replace("node:", ""))
+        .write("src/y.ts", "export const y = 1;\n")
+        .commit("feat");
+
+    let report = check(t.path(), &["check", "--base", "main", "--fix", "--json"], 0);
+    assert_eq!(read(&t, "src/x.ts"), base_text);
+    assert_eq!(
+        report["fixed"],
+        json!([{"rule": "node-protocol", "file": "src/x.ts", "count": 1}])
+    );
+    assert_eq!(report["files"], json!(["src/y.ts"]));
+    assert_eq!(report["skipped"], json!([]));
 }
