@@ -75,11 +75,36 @@ pub fn unwrapped_type<'a>(file: &File<'_>, ty: &'a TSType<'a>) -> &'a TSType<'a>
     }
 }
 
-/// A key type that admits any key: `string`, `number`, `symbol`, lib `PropertyKey`, or a union with one.
+/// A key type that admits any key: `string`, `number`, `symbol`, `any`, `keyof any`, lib
+/// `PropertyKey`, a template with a `string` or `number` slot (`` `id-${string}` ``),
+/// `string & {}`, or a union with one.
 pub fn is_open_key(file: &File<'_>, ty: &TSType<'_>) -> bool {
     match ty {
-        TSType::TSStringKeyword(_) | TSType::TSNumberKeyword(_) | TSType::TSSymbolKeyword(_) => {
-            true
+        TSType::TSStringKeyword(_)
+        | TSType::TSNumberKeyword(_)
+        | TSType::TSSymbolKeyword(_)
+        | TSType::TSAnyKeyword(_) => true,
+        TSType::TSTypeOperatorType(operator) => {
+            operator.operator == TSTypeOperatorOperator::Keyof
+                && matches!(operator.type_annotation, TSType::TSAnyKeyword(_))
+        }
+        TSType::TSTemplateLiteralType(template) => template.types.iter().any(|slot| {
+            matches!(
+                slot,
+                TSType::TSStringKeyword(_) | TSType::TSNumberKeyword(_)
+            )
+        }),
+        // `string & {}` keeps editor suggestions for literal members and still takes any string.
+        TSType::TSIntersectionType(intersection) => {
+            intersection
+                .types
+                .iter()
+                .any(|member| matches!(member, TSType::TSStringKeyword(_)))
+                && intersection.types.iter().all(|member| match member {
+                    TSType::TSStringKeyword(_) => true,
+                    TSType::TSTypeLiteral(literal) => literal.members.is_empty(),
+                    _ => false,
+                })
         }
         TSType::TSUnionType(union) => union.types.iter().any(|member| is_open_key(file, member)),
         _ => lib_type(file, ty, "PropertyKey").is_some(),

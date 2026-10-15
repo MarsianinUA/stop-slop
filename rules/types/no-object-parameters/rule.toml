@@ -1,0 +1,5 @@
+description = "A parameter of type `object`"
+kind = "error"
+files = "code"
+source = ["anti-slop"]
+message = "A parameter typed `object` accepts any non-primitive and says nothing about its shape, so the function has to guess what it got. Take a named type, and parse outside data into it before the call."

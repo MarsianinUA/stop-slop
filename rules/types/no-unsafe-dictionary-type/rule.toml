@@ -1,0 +1,5 @@
+description = "A dictionary type with `unknown`, `any`, `object` or `{}` values, like `Record<string, unknown>`"
+kind = "error"
+files = "code"
+source = ["anti-slop"]
+message = "A dictionary with {value} values promises nothing about what it holds, so every read needs its own check or cast. Give the values a named type, and parse outside data into it at the boundary."
