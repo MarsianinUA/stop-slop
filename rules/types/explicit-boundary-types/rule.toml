@@ -1,0 +1,5 @@
+description = "An exported function or a public method without parameter or return types"
+kind = "error"
+files = "code"
+source = ["personal"]
+message = "`{name}` is part of the module's surface but leaves its {missing} to inference, so its contract shifts whenever the body changes and callers must read the body to learn it. Declare the types in the signature."

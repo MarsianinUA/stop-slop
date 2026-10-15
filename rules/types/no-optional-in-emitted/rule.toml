@@ -1,0 +1,12 @@
+description = "An optional `?:` field in a shape the service sends out: a response, DTO, view or row"
+kind = "candidate"
+files = "code"
+source = ["personal"]
+message = "`{owner}` leaves the service, and an optional key may be missing from the payload, so a client cannot tell an unknown value from a forgotten one and `undefined` leaks into the JSON. Keep the key and type it `T | null`."
+agent = """
+The rule guesses emitted shapes from words in the file name and the type name. If this type is an input that callers may leave out (a request, query or options), the `?` is right: ignore the finding with that reason. If it is sent out (a response, a persisted row, a published message), make the field `: T | null` and set `null` where the value is absent.
+"""
+
+[options]
+emitted = ["response", "dto", "view", "row"]
+input = ["request", "input", "query", "params", "args", "body", "create", "update", "patch", "filter", "options"]
