@@ -1,8 +1,12 @@
+use std::fmt::Write as _;
 use std::io::{self, Write as _};
 
 use engine::RuleState;
 use kit::serde::Serialize;
-use kit::{Files, RuleKind, Ruleset, Source};
+use kit::{Files, FindingKind, RuleKind, Ruleset, Source};
+use scope::{Base, BaseReason, SkipReason};
+
+use crate::check::Checked;
 
 #[derive(Serialize)]
 #[serde(crate = "kit::serde", rename_all = "camelCase")]
@@ -17,6 +21,56 @@ struct RuleJson {
     message: &'static str,
     agent: Option<&'static str>,
     active: bool,
+}
+
+#[derive(Serialize)]
+#[serde(crate = "kit::serde", rename_all = "camelCase")]
+struct CheckJson<'c> {
+    base: Option<BaseJson<'c>>,
+    files: Vec<&'c str>,
+    skipped: Vec<SkippedJson<'c>>,
+    findings: Vec<FindingJson<'c>>,
+    fixed: Vec<FixedJson<'c>>,
+}
+
+#[derive(Serialize)]
+#[serde(crate = "kit::serde", rename_all = "camelCase")]
+struct BaseJson<'c> {
+    #[serde(rename = "ref")]
+    reference: &'c str,
+    sha: String,
+    reason: &'static str,
+}
+
+#[derive(Serialize)]
+#[serde(crate = "kit::serde", rename_all = "camelCase")]
+struct SkippedJson<'c> {
+    file: &'c str,
+    reason: &'static str,
+}
+
+#[derive(Serialize)]
+#[serde(crate = "kit::serde", rename_all = "camelCase")]
+struct FindingJson<'c> {
+    rule: &'static str,
+    kind: &'static str,
+    file: &'c str,
+    line: u32,
+    column: u32,
+    end_line: u32,
+    end_column: u32,
+    message: &'c str,
+    in_hunk: Option<bool>,
+    fixable: bool,
+    fingerprint: String,
+}
+
+#[derive(Serialize)]
+#[serde(crate = "kit::serde", rename_all = "camelCase")]
+struct FixedJson<'c> {
+    rule: &'static str,
+    file: &'c str,
+    count: u32,
 }
 
 pub(crate) fn rules_text(set: &Ruleset) -> String {
@@ -40,7 +94,6 @@ pub(crate) fn rules_text(set: &Ruleset) -> String {
         .collect()
 }
 
-/// One line: the reader is an agent, and indentation costs it tokens.
 pub(crate) fn rules_json(states: &[RuleState]) -> String {
     let rules: Vec<RuleJson> = states
         .iter()
@@ -60,14 +113,95 @@ pub(crate) fn rules_json(states: &[RuleState]) -> String {
             }
         })
         .collect();
-    let mut json = serde_json::to_string(&rules).expect("a list of strings serializes");
-    json.push('\n');
-    json
+    json_line(&rules)
+}
+
+pub(crate) fn check_json(checked: &Checked) -> String {
+    json_line(&CheckJson {
+        base: checked.base.as_ref().map(|base| BaseJson {
+            reference: &base.reference,
+            sha: sha7(base),
+            reason: base_reason(base.reason),
+        }),
+        files: checked.files.iter().map(|path| path.as_str()).collect(),
+        skipped: checked
+            .skipped
+            .iter()
+            .map(|skipped| SkippedJson {
+                file: skipped.path.as_str(),
+                reason: skip_reason(skipped.reason),
+            })
+            .collect(),
+        findings: checked
+            .findings
+            .iter()
+            .map(|finding| FindingJson {
+                rule: finding.rule,
+                kind: finding_kind(finding.kind),
+                file: finding.file.as_str(),
+                line: finding.start.line,
+                column: finding.start.column,
+                end_line: finding.end.line,
+                end_column: finding.end.column,
+                message: &finding.message,
+                in_hunk: finding.in_hunk,
+                fixable: finding.fixable,
+                fingerprint: finding.fingerprint.to_string(),
+            })
+            .collect(),
+        fixed: checked
+            .fixed
+            .iter()
+            .map(|fixed| FixedJson {
+                rule: fixed.rule,
+                file: fixed.file.as_str(),
+                count: fixed.count,
+            })
+            .collect(),
+    })
+}
+
+pub(crate) fn check_text(checked: &Checked) -> String {
+    let mut text = String::new();
+    // `write!` to a `String` does not fail.
+    if let Some(base) = &checked.base {
+        let reason = base_reason(base.reason);
+        let _ = writeln!(text, "base {} {} ({reason})", base.reference, sha7(base));
+    }
+    for skipped in &checked.skipped {
+        let reason = skip_reason(skipped.reason);
+        let _ = writeln!(text, "skipped {} ({reason})", skipped.path);
+    }
+    for fixed in &checked.fixed {
+        let _ = writeln!(text, "fixed {} {} x{}", fixed.file, fixed.rule, fixed.count);
+    }
+    for finding in &checked.findings {
+        let start = &finding.start;
+        let _ = writeln!(
+            text,
+            "{}:{}:{} {} {}",
+            finding.file, start.line, start.column, finding.rule, finding.message
+        );
+    }
+    text
 }
 
 /// A closed pipe (`| head`) is not a failure of the command: the exit code stays as it was.
 pub(crate) fn print(text: &str) {
     let _ = io::stdout().lock().write_all(text.as_bytes());
+}
+
+/// One line: the reader is an agent, and indentation costs it tokens.
+fn json_line(value: &impl Serialize) -> String {
+    let mut json = serde_json::to_string(value).expect("strings, numbers and bools serialize");
+    json.push('\n');
+    json
+}
+
+fn sha7(base: &Base) -> String {
+    let mut sha = base.oid.to_string();
+    sha.truncate(7);
+    sha
 }
 
 fn rule_kind(kind: RuleKind) -> &'static str {
@@ -92,5 +226,28 @@ fn source(source: Source) -> &'static str {
         Source::Direct => "direct",
         Source::Project => "project",
         Source::AntiSlop => "anti-slop",
+    }
+}
+
+fn finding_kind(kind: FindingKind) -> &'static str {
+    match kind {
+        FindingKind::Error => "error",
+        FindingKind::Candidate => "candidate",
+        FindingKind::ParseError => "parse-error",
+    }
+}
+
+fn base_reason(reason: BaseReason) -> &'static str {
+    match reason {
+        BaseReason::Flag => "flag",
+        BaseReason::Pr => "pr",
+        BaseReason::Ancestor => "ancestor",
+        BaseReason::Default => "default",
+    }
+}
+
+fn skip_reason(reason: SkipReason) -> &'static str {
+    match reason {
+        SkipReason::AlreadyInBase => "already-in-base",
     }
 }

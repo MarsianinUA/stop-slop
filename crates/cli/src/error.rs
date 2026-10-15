@@ -1,12 +1,15 @@
 use engine::ConfigError;
 use project::ProjectError;
 use repo::RepoError;
+use scope::ScopeError;
 use state::StateError;
 
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum CliError {
     #[error(transparent)]
     Repo(#[from] RepoError),
+    #[error(transparent)]
+    Scope(#[from] ScopeError),
     #[error(transparent)]
     Project(#[from] ProjectError),
     #[error(transparent)]
@@ -19,5 +22,6 @@ pub(crate) enum CliError {
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum Exit {
     Clean = 0,
+    Found = 1,
     Failure = 2,
 }
