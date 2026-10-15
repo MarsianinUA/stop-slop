@@ -1,0 +1,4 @@
+description = "A single-letter name outside a one-line callback and a loop counter"
+kind = "error"
+source = ["project", "direct"]
+message = "`{name}` is a single letter: outside a one-line callback or a loop counter, a reader has to go back to where it was set to learn what it holds. Name what it holds, like `row`, `width` or `index`."

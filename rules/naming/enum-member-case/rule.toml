@@ -1,0 +1,4 @@
+description = "An enum member not in PascalCase: `ETHEREUM` instead of `Ethereum`"
+kind = "error"
+source = ["project"]
+message = "`{name}` is not PascalCase: members in one case read as one family (`Chain.Ethereum`), and capitals or underscores make a member look like a constant or a raw value. Name it `{suggestion}`; an outside spelling stays in the value."
