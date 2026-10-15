@@ -1,7 +1,7 @@
 use std::fmt::Write as _;
 use std::io::{self, Write as _};
 
-use engine::RuleState;
+use engine::{Finding, RuleState};
 use kit::serde::Serialize;
 use kit::{Files, FindingKind, RuleKind, Ruleset, Source};
 use scope::{Base, BaseReason, SkipReason};
@@ -176,12 +176,26 @@ pub(crate) fn check_text(checked: &Checked) -> String {
         let _ = writeln!(text, "fixed {} {} x{}", fixed.file, fixed.rule, fixed.count);
     }
     for finding in &checked.findings {
-        let start = &finding.start;
-        let _ = writeln!(
-            text,
-            "{}:{}:{} {} {}",
-            finding.file, start.line, start.column, finding.rule, finding.message
-        );
+        finding_line(&mut text, finding);
+    }
+    text
+}
+
+/// Over 20 findings, 19 and a line with the rest: Claude sees the list is cut, and its next
+/// edit shows the others.
+pub(crate) fn hook_text(findings: &[Finding]) -> String {
+    const MAX_LINES: usize = 20;
+    let shown = if findings.len() > MAX_LINES {
+        MAX_LINES - 1
+    } else {
+        findings.len()
+    };
+    let mut text = String::new();
+    for finding in &findings[..shown] {
+        finding_line(&mut text, finding);
+    }
+    if shown < findings.len() {
+        let _ = writeln!(text, "stop-slop: {} more errors", findings.len() - shown);
     }
     text
 }
@@ -189,6 +203,20 @@ pub(crate) fn check_text(checked: &Checked) -> String {
 /// A closed pipe (`| head`) is not a failure of the command: the exit code stays as it was.
 pub(crate) fn print(text: &str) {
     let _ = io::stdout().lock().write_all(text.as_bytes());
+}
+
+/// Same policy as `print`.
+pub(crate) fn print_err(text: &str) {
+    let _ = io::stderr().lock().write_all(text.as_bytes());
+}
+
+fn finding_line(text: &mut String, finding: &Finding) {
+    let start = &finding.start;
+    let _ = writeln!(
+        text,
+        "{}:{}:{} {} {}",
+        finding.file, start.line, start.column, finding.rule, finding.message
+    );
 }
 
 /// One line: the reader is an agent, and indentation costs it tokens.

@@ -1,6 +1,7 @@
 use std::collections::BTreeSet;
 use std::fs;
-use std::path::Path;
+use std::io::Write;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 
 use kit::RuleMeta;
@@ -21,14 +22,19 @@ fn run(dir: &Path, args: &[&str]) -> Output {
     exe(dir).args(args).output().expect("start stop-slop")
 }
 
-/// In a fresh temp folder; git stops at its parent, so a repo above it (dotfiles in the home
+/// Git stops at the parent of the temp folder `dir`, so a repo above it (dotfiles in the home
 /// folder) is not found. `repo` passes the variable on to git.
+fn exe_outside(dir: &Path) -> Command {
+    let parent = dir.parent().expect("a temp folder has a parent");
+    let mut command = exe(dir);
+    command.env("GIT_CEILING_DIRECTORIES", parent);
+    command
+}
+
 fn run_outside(args: &[&str]) -> Output {
     let dir = tempfile::tempdir().expect("create a temp folder");
-    let parent = dir.path().parent().expect("a temp folder has a parent");
-    exe(dir.path())
+    exe_outside(dir.path())
         .args(args)
-        .env("GIT_CEILING_DIRECTORIES", parent)
         .output()
         .expect("start stop-slop")
 }
@@ -694,4 +700,287 @@ fn check_fix_drops_a_file_that_became_as_in_the_base() {
     );
     assert_eq!(report["files"], json!(["src/y.ts"]));
     assert_eq!(report["skipped"], json!([]));
+}
+
+const ANY: &str = "export const a = 1;\nexport const b: any = 2;\n";
+
+fn hook_input(file: &Path) -> String {
+    let file = file.to_str().expect("a UTF-8 path");
+    json!({"hook_event_name": "PostToolUse", "tool_name": "Edit", "tool_input": {"file_path": file}})
+        .to_string()
+}
+
+fn hook(dir: &Path, input: &str) -> Output {
+    feed(exe(dir), input)
+}
+
+fn feed(mut command: Command, input: &str) -> Output {
+    let mut child = command
+        .arg("hook")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("start stop-slop");
+    let mut stdin = child.stdin.take().expect("a piped stdin");
+    stdin
+        .write_all(input.as_bytes())
+        .expect("write the hook input");
+    drop(stdin);
+    child.wait_with_output().expect("wait for stop-slop")
+}
+
+fn enable(t: &TempRepo) {
+    let out = run(t.path(), &["enable"]);
+    assert_eq!(code(&out), 0, "{}", stderr(&out));
+}
+
+fn marker(t: &TempRepo) -> PathBuf {
+    t.path().join(".git/info/stop-slop/enabled")
+}
+
+/// Code and stderr of the hook on `file` of `t`, from its root.
+fn hook_on(t: &TempRepo, file: &str) -> (i32, String) {
+    let out = hook(t.path(), &hook_input(&t.path().join(file)));
+    assert!(out.stdout.is_empty(), "{}", stdout(&out));
+    (code(&out), stderr(&out))
+}
+
+#[cfg(unix)]
+fn symlink_file_or_skip(target: &Path, link: &Path) -> bool {
+    std::os::unix::fs::symlink(target, link).unwrap();
+    true
+}
+
+/// A symlink on Windows needs admin rights or Developer Mode; without them the case is
+/// skipped. The GitHub Actions runner is admin, so CI runs it.
+#[cfg(windows)]
+fn symlink_file_or_skip(target: &Path, link: &Path) -> bool {
+    const ERROR_PRIVILEGE_NOT_HELD: i32 = 1314;
+    match std::os::windows::fs::symlink_file(target, link) {
+        Ok(()) => true,
+        Err(error) if error.raw_os_error() == Some(ERROR_PRIVILEGE_NOT_HELD) => {
+            eprintln!("skipped: no right to create a symlink ({error})");
+            false
+        }
+        Err(error) => panic!("symlink {}: {error}", link.display()),
+    }
+}
+
+#[test]
+fn enable_and_disable_change_only_the_marker() {
+    let t = TempRepo::new();
+    write_config(&t, "disabled = []\n");
+    t.write(".git/info/stop-slop/ignore.json", "[]\n")
+        .write("src/a.ts", ANY);
+    let state_files = || {
+        ["config.toml", "ignore.json"].map(|name| {
+            let path = t.path().join(".git/info/stop-slop").join(name);
+            fs::read(&path).unwrap_or_else(|error| panic!("{}: {error}", path.display()))
+        })
+    };
+    let before = state_files();
+    let src = t.path().join("src");
+
+    for (command, enabled) in [
+        ("enable", true),
+        ("enable", true),
+        ("disable", false),
+        ("disable", false),
+    ] {
+        let out = run(&src, &[command]);
+        assert_eq!(code(&out), 0, "{command}: {}", stderr(&out));
+        assert_eq!(stdout(&out), "", "{command}");
+        assert_eq!(marker(&t).is_file(), enabled, "{command}");
+        assert_eq!(state_files(), before, "{command}");
+    }
+}
+
+#[test]
+fn enable_and_disable_outside_a_repo_fail() {
+    for command in ["enable", "disable"] {
+        let out = run_outside(&[command]);
+        assert_eq!(code(&out), 2, "{command}");
+        assert!(
+            stderr(&out).contains("not inside a git repository"),
+            "{command}: {}",
+            stderr(&out)
+        );
+    }
+}
+
+#[test]
+fn enable_in_a_linked_worktree_turns_the_hook_on_for_the_repo() {
+    let t = TempRepo::new();
+    t.write("src/a.ts", ANY).commit("main");
+    let trees = tempfile::tempdir().expect("create a temp folder");
+    let tree = trees.path().join("tree");
+    let tree_arg = tree.to_str().expect("a UTF-8 temp path");
+    t.git(&["worktree", "add", "-q", tree_arg, "-b", "side"]);
+
+    let out = run(&tree, &["enable"]);
+    assert_eq!(code(&out), 0, "{}", stderr(&out));
+    assert!(marker(&t).is_file());
+    assert!(tree.join(".git").is_file());
+
+    assert_eq!(hook_on(&t, "src/a.ts").0, 2);
+    let out = hook(&tree, &hook_input(&tree.join("src").join("a.ts")));
+    assert_eq!(code(&out), 2, "{}", stderr(&out));
+}
+
+#[test]
+fn hook_reports_errors_with_code_2() {
+    let t = TempRepo::new();
+    enable(&t);
+    t.write("src/a.ts", ANY);
+    let expected = format!("src/a.ts:2:17 no-any {}\n", meta("no-any").message);
+
+    let absolute = t.path().join("src").join("a.ts");
+    for input in [hook_input(&absolute), hook_input(Path::new("src/a.ts"))] {
+        let out = hook(t.path(), &input);
+        assert_eq!(code(&out), 2, "{input}: {}", stderr(&out));
+        assert_eq!(stdout(&out), "", "{input}");
+        assert_eq!(stderr(&out), expected, "{input}");
+    }
+}
+
+#[test]
+fn hook_prints_at_most_20_lines() {
+    let t = TempRepo::new();
+    enable(&t);
+    let text: String = (1..=25)
+        .map(|i| format!("export const a{i}: any = {i};\n"))
+        .collect();
+    t.write("src/many.ts", &text);
+
+    let (code, text) = hook_on(&t, "src/many.ts");
+    assert_eq!(code, 2, "{text}");
+    let message = meta("no-any").message;
+    let mut expected: Vec<String> = (1..=19)
+        .map(|i| {
+            let column = 17 + i.to_string().len();
+            format!("src/many.ts:{i}:{column} no-any {message}")
+        })
+        .collect();
+    expected.push("stop-slop: 6 more errors".into());
+    assert_eq!(text.lines().collect::<Vec<_>>(), expected);
+}
+
+#[test]
+fn hook_passes_what_it_does_not_check() {
+    let t = TempRepo::new();
+    t.write("src/a.ts", ANY);
+    assert_eq!(hook_on(&t, "src/a.ts"), (0, String::new()), "no marker");
+
+    enable(&t);
+    let draft = ".git/info/stop-slop/reviews/pr-1.md";
+    t.write("notes.md", "# any\n")
+        .write("src/types.d.ts", "export type T = any;\n")
+        .write(draft, "# review\n")
+        .write("src/clean.ts", "export const c = 1;\n");
+    for file in ["notes.md", "src/types.d.ts", draft, "src/clean.ts"] {
+        assert_eq!(hook_on(&t, file), (0, String::new()), "{file}");
+    }
+
+    let outside = tempfile::tempdir().expect("create a temp folder");
+    let file = outside.path().join("a.ts");
+    fs::write(&file, ANY).expect("write a.ts");
+    if symlink_file_or_skip(&file, &t.path().join("src/link.ts")) {
+        assert_eq!(hook_on(&t, "src/link.ts"), (0, String::new()), "symlink");
+    }
+    let out = feed(exe_outside(outside.path()), &hook_input(&file));
+    assert_eq!(code(&out), 0, "outside a repo: {}", stderr(&out));
+    assert_eq!(stderr(&out), "", "outside a repo");
+
+    let out = run(t.path(), &["disable"]);
+    assert_eq!(code(&out), 0, "{}", stderr(&out));
+    assert_eq!(hook_on(&t, "src/a.ts"), (0, String::new()), "disabled");
+}
+
+#[test]
+fn hook_uses_the_repo_of_the_file() {
+    let a = TempRepo::new();
+    enable(&a);
+    a.write("src/a.ts", ANY);
+    let b = TempRepo::new();
+    b.write("src/b.ts", ANY);
+
+    let out = hook(b.path(), &hook_input(&a.path().join("src/a.ts")));
+    assert_eq!(code(&out), 2, "{}", stderr(&out));
+    let out = hook(a.path(), &hook_input(&b.path().join("src/b.ts")));
+    assert_eq!(code(&out), 0, "{}", stderr(&out));
+}
+
+#[test]
+fn hook_fails_with_the_cause() {
+    let t = TempRepo::new();
+    t.write("src/a.ts", ANY);
+    for input in ["not json", r#"{"tool_input": {}}"#] {
+        let out = hook(t.path(), input);
+        assert_eq!(code(&out), 2, "{input}");
+        assert!(
+            stderr(&out).contains("hook input"),
+            "{input}: {}",
+            stderr(&out)
+        );
+    }
+
+    write_config(&t, "disabled = [\"no-such\"]\n");
+    assert_eq!(hook_on(&t, "src/a.ts"), (0, String::new()), "no marker");
+    enable(&t);
+    let (code, text) = hook_on(&t, "src/a.ts");
+    assert_eq!(code, 2);
+    assert!(text.contains("config.toml"), "{text}");
+    assert!(text.contains("disabled[0]"), "{text}");
+}
+
+#[test]
+fn hook_reports_a_file_that_does_not_parse() {
+    let t = TempRepo::new();
+    enable(&t);
+    t.write("src/bad.ts", "const = ;\n");
+    let (code, text) = hook_on(&t, "src/bad.ts");
+    assert_eq!(code, 2, "{text}");
+    let [line] = text.lines().collect::<Vec<_>>()[..] else {
+        panic!("one line: {text}");
+    };
+    assert!(line.starts_with("src/bad.ts:1:"), "{line}");
+    assert!(line.contains(" parse-error "), "{line}");
+}
+
+/// The command of each `git` run, from a `GIT_TRACE` file; none when there is no file.
+fn git_commands(trace: &Path) -> Vec<String> {
+    let text = fs::read_to_string(trace).unwrap_or_default();
+    text.lines()
+        .filter_map(|line| {
+            let (_, command) = line.split_once("trace: built-in: git ")?;
+            command.split(' ').next()
+        })
+        .map(str::to_owned)
+        .collect()
+}
+
+#[test]
+fn hook_runs_git_once_and_not_for_other_files() {
+    let t = TempRepo::new();
+    enable(&t);
+    let draft = ".git/info/stop-slop/reviews/pr-1.md";
+    t.write("src/a.ts", ANY)
+        .write("notes.md", "# notes\n")
+        .write(draft, "# review\n");
+    let traces = tempfile::tempdir().expect("create a temp folder");
+    let traced = |file: &str, name: &str| {
+        let trace = traces.path().join(name);
+        let mut command = exe(t.path());
+        command.env("GIT_TRACE", &trace);
+        let out = feed(command, &hook_input(&t.path().join(file)));
+        (code(&out), git_commands(&trace))
+    };
+
+    assert_eq!(
+        traced("src/a.ts", "ts.txt"),
+        (2, vec!["rev-parse".to_owned()])
+    );
+    assert_eq!(traced("notes.md", "md.txt"), (0, Vec::new()));
+    assert_eq!(traced(draft, "draft.txt"), (0, Vec::new()));
 }

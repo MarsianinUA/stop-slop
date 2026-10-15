@@ -1,10 +1,9 @@
 use std::collections::BTreeSet;
-use std::env;
 
-use engine::{Engine, RuleState, RunConfig};
+use engine::RuleState;
 use kit::{Fact, Ruleset};
 use project::ProjectFacts;
-use repo::{Repo, RepoError};
+use repo::Repo;
 use state::State;
 
 use crate::error::{CliError, Exit};
@@ -13,11 +12,7 @@ use crate::output;
 /// Without `--json` the repo is not needed, so the list prints outside one too.
 pub(crate) fn run(json: bool) -> Result<Exit, CliError> {
     let text = if json {
-        let cwd = env::current_dir().map_err(|source| RepoError::Io {
-            path: ".".into(),
-            source,
-        })?;
-        output::rules_json(&states(&rules::RULESET, &Repo::open(&cwd)?)?)
+        output::rules_json(&states(&rules::RULESET, &crate::cwd_repo()?)?)
     } else {
         output::rules_text(&rules::RULESET)
     };
@@ -29,15 +24,8 @@ pub(crate) fn run(json: bool) -> Result<Exit, CliError> {
 /// when it holds for at least one `package.json` of the repo.
 fn states(set: &'static Ruleset, repo: &Repo) -> Result<Vec<RuleState>, CliError> {
     let config = State::open(repo.git_common_dir()).config()?;
-    let engine = Engine::new(
-        set,
-        RunConfig {
-            disabled: config.disabled,
-            options: config.rules,
-            // `ignore.json` hides findings, not rules.
-            ignored: BTreeSet::new(),
-        },
-    )?;
+    // `ignore.json` hides findings, not rules.
+    let engine = crate::new_engine(set, config, BTreeSet::new())?;
     let snapshot = repo.worktree();
     let packages: Vec<_> = snapshot
         .files()?

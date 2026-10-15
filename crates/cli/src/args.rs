@@ -11,6 +11,12 @@ use clap::{Args, Parser};
 pub(crate) enum Command {
     /// Checks the files of the branch.
     Check(CheckArgs),
+    /// Checks the file of a Claude Code hook given as JSON on stdin.
+    Hook,
+    /// Turns the hook on in this repository.
+    Enable,
+    /// Turns the hook off in this repository; exceptions and config stay.
+    Disable,
     /// Lists the rules.
     Rules {
         /// Prints JSON with the message, the agent hint and whether the rule is active here.

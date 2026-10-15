@@ -53,7 +53,7 @@ pub(crate) fn listed(mut paths: Vec<Utf8PathBuf>) -> Vec<ScopedFile> {
         .collect()
 }
 
-fn checked(path: &Utf8Path) -> bool {
+pub(crate) fn checked(path: &Utf8Path) -> bool {
     let name = path.as_str();
     GLOBS
         .iter()

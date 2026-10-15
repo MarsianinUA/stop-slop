@@ -1,13 +1,12 @@
 use std::collections::BTreeMap;
-use std::env;
 use std::panic::resume_unwind;
 use std::thread;
 
 use camino::{Utf8Path, Utf8PathBuf};
-use engine::{Engine, Finding, FixCount, LineRange, Mode, RunConfig, SourceFile};
+use engine::{Engine, Finding, FixCount, LineRange, Mode, SourceFile};
 use kit::{EnumIndex, Fact, Facts, Package};
 use project::ProjectFacts;
-use repo::{Repo, RepoError, Snapshot, WorkTree};
+use repo::{Repo, Snapshot, WorkTree};
 use scope::{Base, GhPrBase, Scope, ScopeRequest, ScopedFile, Skipped};
 use state::State;
 
@@ -41,27 +40,10 @@ pub(crate) fn run(args: CheckArgs) -> Result<Exit, CliError> {
 }
 
 fn check(args: CheckArgs) -> Result<Checked, CliError> {
-    let cwd = env::current_dir().map_err(|source| RepoError::Io {
-        path: ".".into(),
-        source,
-    })?;
-    let repo = Repo::open(&cwd)?;
+    let repo = crate::cwd_repo()?;
     let state = State::open(repo.git_common_dir());
-    let config = state.config()?;
-    let ignored = state
-        .ignores()?
-        .into_iter()
-        .map(|entry| (entry.file, entry.fingerprint))
-        .collect();
     // Before `scope`: a broken `config.toml` fails before the git calls of the diff.
-    let engine = Engine::new(
-        &rules::RULESET,
-        RunConfig {
-            disabled: config.disabled,
-            options: config.rules,
-            ignored,
-        },
-    )?;
+    let engine = crate::engine_for(&rules::RULESET, &state)?;
     let snapshot = match &args.rev {
         Some(rev) => repo.at_rev(rev)?,
         None => repo.worktree(),
@@ -184,7 +166,7 @@ fn request(args: CheckArgs) -> ScopeRequest {
 }
 
 /// The scope with its files taken out, the facts of the files and the files themselves.
-fn prepare(
+pub(crate) fn prepare(
     repo: &Repo,
     snapshot: &Snapshot,
     request: ScopeRequest,

@@ -1,8 +1,8 @@
 use std::panic::resume_unwind;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::thread;
 
-use camino::Utf8PathBuf;
+use camino::{Utf8Path, Utf8PathBuf};
 use repo::{LineRange, Oid, Repo, RepoError, Snapshot};
 
 mod base;
@@ -105,6 +105,11 @@ pub fn resolve(
         files: files::listed(paths),
         skipped: Vec::new(),
     })
+}
+
+/// `.ts`, `.tsx`, `.mts`, `.cts`, not a declaration file: the filter of `resolve`.
+pub fn is_checked(path: &Path) -> bool {
+    Utf8Path::from_path(path).is_some_and(files::checked)
 }
 
 fn both<A: Send, B>(spawned: impl FnOnce() -> A + Send, here: impl FnOnce() -> B) -> (A, B) {

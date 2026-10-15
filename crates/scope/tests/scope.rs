@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use repo::{LineRange, Oid, Repo, RepoError};
 use scope::{
     Base, BaseReason, PrBase, Scope, ScopeError, ScopeRequest, ScopedFile, SkipReason, Skipped,
-    resolve,
+    is_checked, resolve,
 };
 use testkit::TempRepo;
 
@@ -279,6 +279,18 @@ fn only_typescript_files_without_declarations_are_checked() {
     let listed = ["e.d.ts", "h.js", "a.ts"].map(PathBuf::from).to_vec();
     let scope = resolve(&repo, &repo.worktree(), &pr, ScopeRequest::Files(listed)).unwrap();
     assert_eq!(paths(&scope.files), ["a.ts"]);
+}
+
+#[test]
+fn is_checked_is_the_filter_of_resolve() {
+    let absolute = std::path::absolute(Path::new("src").join("a.ts")).unwrap();
+    assert!(is_checked(&absolute), "{}", absolute.display());
+    for path in ["a.ts", "a.tsx", "a.mts", "a.cts", "src/x/a.ts"] {
+        assert!(is_checked(Path::new(path)), "{path}");
+    }
+    for path in ["a.d.ts", "a.d.mts", "a.d.cts", "a.js", "notes.md", "ts"] {
+        assert!(!is_checked(Path::new(path)), "{path}");
+    }
 }
 
 #[test]
