@@ -415,6 +415,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8f42a60cbdf9a97f5d2305f08a87dc4e09308d1276d28c869c684d7777685682"
 
 [[package]]
+name = "json-strip-comments"
+version = "3.1.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "01ed659c5f428031b9c1fb7de6729af2eb491654d4bcd416a5b5b704986b9658"
+dependencies = [
+ "memchr",
+]
+
+[[package]]
 name = "kit"
 version = "0.1.0"
 dependencies = [
@@ -799,6 +808,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "project"
+version = "0.1.0"
+dependencies = [
+ "camino",
+ "json-strip-comments",
+ "kit",
+ "repo",
+ "serde_json",
+ "testkit",
+ "thiserror",
+]
+
+[[package]]
 name = "quote"
 version = "1.0.47"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -930,6 +952,19 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 3.0.9",
+]
+
+[[package]]
+name = "serde_json"
+version = "1.0.154"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e7e9cc8b1b85264074fbcc02a88680c4096b1e47df8f739dceb03bf482f04bd6"
+dependencies = [
+ "itoa",
+ "memchr",
+ "serde",
+ "serde_core",
+ "zmij",
 ]
 
 [[package]]

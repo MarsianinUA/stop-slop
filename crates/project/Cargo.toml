@@ -1,0 +1,16 @@
+[package]
+name = "project"
+version.workspace = true
+edition.workspace = true
+publish = false
+
+[dependencies]
+camino.workspace = true
+json-strip-comments.workspace = true
+kit = { path = "../kit" }
+repo = { path = "../repo" }
+serde_json.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+testkit = { path = "../testkit" }

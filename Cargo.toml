@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/catalog", "crates/engine", "crates/kit", "crates/repo", "crates/scope", "crates/testkit", "rules"]
+members = ["crates/catalog", "crates/engine", "crates/kit", "crates/project", "crates/repo", "crates/scope", "crates/testkit", "rules"]
 
 [workspace.package]
 version = "0.1.0"
@@ -8,9 +8,11 @@ edition = "2024"
 
 [workspace.dependencies]
 camino = "1"
+json-strip-comments = "3"
 libtest-mimic = "0.8"
 rayon = "1"
 serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 similar = "3"
 tempfile = "3"
 thiserror = "2"

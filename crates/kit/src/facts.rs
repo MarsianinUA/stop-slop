@@ -19,6 +19,8 @@ pub enum Fact {
 
 #[derive(Debug)]
 pub struct Package {
+    /// Keys of `dependencies`, `devDependencies`, `peerDependencies` and
+    /// `optionalDependencies`.
     pub dependencies: BTreeSet<String>,
     /// Packages of the same monorepo (`workspace:` dependencies).
     pub workspace: BTreeSet<String>,
