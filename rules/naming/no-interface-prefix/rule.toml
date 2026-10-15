@@ -1,0 +1,5 @@
+description = "An interface named with an `I` prefix, like `IUser`"
+kind = "error"
+fix = true
+source = ["personal"]
+message = "`{name}` carries an `I` prefix: the type checker already knows it is an interface, and the prefix leaks that detail into every use, so turning it into a type or a class later means renaming it everywhere. Name it `{suggestion}`."
