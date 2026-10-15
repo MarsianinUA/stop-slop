@@ -1,0 +1,5 @@
+description = "`value!`, a non-null assertion"
+kind = "error"
+files = "code"
+source = ["personal"]
+message = "`!` tells TypeScript the value is never null or undefined without checking it, so a wrong guess turns into a crash far from its cause. Check the value, or state why it cannot be missing in a `// SAFETY:` comment above the line or at its end."
