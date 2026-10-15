@@ -1,0 +1,5 @@
+description = "A value widened to `unknown`, then narrowed back with `as`"
+kind = "error"
+files = "code"
+source = ["anti-slop"]
+message = "`{name}` throws away a type the code already knew, then an assertion the compiler cannot check brings it back. Keep the precise type from the declaration to every use; if the cast must stay, state why in a `// SAFETY:` comment above the line or at its end."
