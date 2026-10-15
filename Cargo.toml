@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/catalog", "crates/engine", "crates/kit", "crates/project", "crates/repo", "crates/scope", "crates/state", "crates/testkit", "rules"]
+members = ["crates/catalog", "crates/cli", "crates/engine", "crates/kit", "crates/project", "crates/repo", "crates/scope", "crates/state", "crates/testkit", "rules"]
 
 [workspace.package]
 version = "0.1.0"
@@ -8,6 +8,7 @@ edition = "2024"
 
 [workspace.dependencies]
 camino = "1"
+clap = { version = "4", features = ["derive"] }
 json-strip-comments = "3"
 libtest-mimic = "0.8"
 rayon = "1"

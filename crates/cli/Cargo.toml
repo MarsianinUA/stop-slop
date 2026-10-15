@@ -1,0 +1,24 @@
+[package]
+name = "cli"
+version.workspace = true
+edition.workspace = true
+publish = false
+
+[[bin]]
+name = "stop-slop"
+path = "src/main.rs"
+
+[dependencies]
+clap.workspace = true
+engine = { path = "../engine" }
+kit = { path = "../kit" }
+project = { path = "../project" }
+repo = { path = "../repo" }
+rules = { path = "../../rules" }
+serde_json.workspace = true
+state = { path = "../state" }
+thiserror.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+testkit = { path = "../testkit" }
