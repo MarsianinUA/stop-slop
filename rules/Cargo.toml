@@ -27,4 +27,5 @@ harness = false
 catalog = { path = "../crates/catalog" }
 engine = { path = "../crates/engine" }
 libtest-mimic.workspace = true
+project = { path = "../crates/project" }
 similar.workspace = true

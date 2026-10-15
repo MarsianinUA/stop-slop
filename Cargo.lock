@@ -873,6 +873,7 @@ dependencies = [
  "engine",
  "kit",
  "libtest-mimic",
+ "project",
  "similar",
 ]
 

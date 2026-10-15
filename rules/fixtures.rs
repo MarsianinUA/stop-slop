@@ -178,8 +178,9 @@ fn run(def: &'static RuleDef, fixture: &Fixture, mode: Mode) -> Result<RunReport
     Ok(engine.run(vec![file], &facts, mode))
 }
 
-/// The facts the engine asks for, with the group condition met. A fixture header for a fact
-/// the engine does not load fails the case: the rule would see nothing in real runs.
+/// The facts the engine asks for, with the group condition met. The enum index comes from the
+/// fixture's own text. A fixture header for a fact the engine does not load fails the case:
+/// the rule would see nothing in real runs.
 fn facts(
     def: &RuleDef,
     engine: &Engine,
@@ -216,7 +217,11 @@ fn facts(
             workspace: fixture.workspace.iter().cloned().collect(),
         }),
         aliases: fixture.aliases.clone(),
-        enums: EnumIndex::new(Vec::new()),
+        enums: if needed.contains(&Fact::Enums) {
+            project::enum_index(&[(fixture.path.as_path(), fixture.text.as_str())])
+        } else {
+            EnumIndex::new(Vec::new())
+        },
     })
 }
 
