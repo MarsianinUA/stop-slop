@@ -224,12 +224,24 @@ fn finding_files(report: &Value) -> Vec<&str> {
 /// `main` with `src/keep.ts`; `feat` changes line 1 of it, keeps the `any` on line 2 and
 /// adds `src/new.ts` with a `TODO` without an owner.
 fn branch_repo() -> TempRepo {
+    branch_repo_with(&[])
+}
+
+/// `branch_repo` with `main_files` added to `main` in a commit of their own after `keep.ts`;
+/// `feat` does not touch them.
+fn branch_repo_with(main_files: &[(&str, &str)]) -> TempRepo {
     let t = TempRepo::new();
     t.write(
         "src/keep.ts",
         "export const a = 1;\nexport const b: any = 2;\n",
     )
     .commit("main");
+    if !main_files.is_empty() {
+        for (path, text) in main_files {
+            t.write(path, text);
+        }
+        t.commit("main files");
+    }
     t.branch("feat")
         .write(
             "src/keep.ts",
@@ -983,4 +995,183 @@ fn hook_runs_git_once_and_not_for_other_files() {
     );
     assert_eq!(traced("notes.md", "md.txt"), (0, Vec::new()));
     assert_eq!(traced(draft, "draft.txt"), (0, Vec::new()));
+}
+
+fn ignore_file(t: &TempRepo) -> Vec<IgnoreEntry> {
+    State::open(&t.path().join(".git"))
+        .ignores()
+        .expect("read ignore.json")
+}
+
+fn fingerprint(report: &Value, rule: &str, file: &str) -> String {
+    let finding = findings(report)
+        .iter()
+        .find(|finding| finding["rule"] == rule && finding["file"] == file);
+    let finding = finding.unwrap_or_else(|| panic!("no {rule} in {file}: {report}"));
+    finding["fingerprint"]
+        .as_str()
+        .expect("fingerprint")
+        .to_owned()
+}
+
+fn rules_of(report: &Value) -> Vec<&str> {
+    findings(report)
+        .iter()
+        .map(|finding| finding["rule"].as_str().expect("rule"))
+        .collect()
+}
+
+#[test]
+fn ignore_writes_an_entry_with_the_file_and_the_rule() {
+    let t = branch_repo();
+    enable(&t);
+    assert_eq!(hook_on(&t, "src/keep.ts").0, 2);
+    let args = ["check", "--base", "main", "--json"];
+    let fp = fingerprint(&check(t.path(), &args, 1), "no-any", "src/keep.ts");
+
+    let out = run(t.path(), &["ignore", &fp, "--reason", "boundary type"]);
+    assert_eq!(code(&out), 0, "{}", stderr(&out));
+    assert_eq!(stdout(&out), format!("ignored {fp} src/keep.ts\n"));
+    let [entry] = &ignore_file(&t)[..] else {
+        panic!("one entry: {:?}", ignore_file(&t));
+    };
+    assert_eq!(entry.fingerprint, fp);
+    assert_eq!(entry.rule, "no-any");
+    assert_eq!(entry.file, "src/keep.ts");
+    assert_eq!(entry.reason, "boundary type");
+    let added = &entry.added;
+    let is_date = added.len() == 10
+        && added.char_indices().all(|(i, c)| match i {
+            4 | 7 => c == '-',
+            _ => c.is_ascii_digit(),
+        });
+    assert!(is_date && added[..4] >= *"2026", "{added}");
+
+    assert_eq!(rules_of(&check(t.path(), &args, 1)), ["todo-owner"]);
+    assert_eq!(hook_on(&t, "src/keep.ts"), (0, String::new()));
+}
+
+#[test]
+fn ignore_writes_an_entry_per_file_and_replaces_it_again() {
+    let t = TempRepo::new();
+    t.write("src/m.ts", "export const m = 1;\n").commit("main");
+    t.branch("feat")
+        .write("src/one.ts", "// TODO fix\nexport const one = 1;\n")
+        .write("src/two.ts", "// TODO fix\nexport const two = 2;\n")
+        .commit("feat");
+    let args = ["check", "--base", "main", "--json"];
+    let fp = fingerprint(&check(t.path(), &args, 1), "todo-owner", "src/one.ts");
+    let entries = |t: &TempRepo| -> Vec<(String, String, String)> {
+        ignore_file(t)
+            .into_iter()
+            .map(|entry| (entry.file.into_string(), entry.rule, entry.reason))
+            .collect()
+    };
+    let expected = |reason: &str| {
+        ["src/one.ts", "src/two.ts"].map(|file| (file.into(), "todo-owner".into(), reason.into()))
+    };
+
+    let out = run(t.path(), &["ignore", &fp, "--reason", "r"]);
+    assert_eq!(code(&out), 0, "{}", stderr(&out));
+    assert_eq!(
+        stdout(&out),
+        format!("ignored {fp} src/one.ts\nignored {fp} src/two.ts\n")
+    );
+    assert_eq!(entries(&t), expected("r"));
+    assert!(findings(&check(t.path(), &args, 0)).is_empty());
+
+    let out = run(t.path(), &["ignore", &fp, "--reason", "second"]);
+    assert_eq!(code(&out), 0, "{}", stderr(&out));
+    assert_eq!(entries(&t), expected("second"));
+}
+
+/// The `any` of `src/old.ts` is inside a function, so its fingerprint differs from the one
+/// of `keep.ts`.
+fn old_repo() -> TempRepo {
+    branch_repo_with(&[(
+        "src/old.ts",
+        "export function legacy() { const x: any = 1; return x; }\n",
+    )])
+}
+
+#[test]
+fn ignore_of_an_unknown_fingerprint_fails() {
+    let t = branch_repo();
+    let out = run(t.path(), &["ignore", "no-any:000000", "--reason", "r"]);
+    assert_eq!(code(&out), 2);
+    assert!(stderr(&out).contains("no-any:000000"), "{}", stderr(&out));
+    assert!(!t.path().join(".git/info/stop-slop/ignore.json").exists());
+
+    let t = old_repo();
+    let fp = fingerprint(
+        &check(t.path(), &["check", "--all", "--json"], 1),
+        "no-any",
+        "src/old.ts",
+    );
+    let out = run(t.path(), &["ignore", &fp, "--reason", "r"]);
+    assert_eq!(code(&out), 2, "{}", stdout(&out));
+    assert!(stderr(&out).contains(&fp), "{}", stderr(&out));
+}
+
+#[test]
+fn ignore_needs_a_reason_and_a_repo() {
+    let t = branch_repo();
+    for args in [
+        &["ignore", "no-any:000000"][..],
+        &["ignore", "no-any:000000", "--reason", ""],
+    ] {
+        let out = run(t.path(), args);
+        assert_eq!(code(&out), 2, "{args:?}");
+        assert!(!stderr(&out).is_empty(), "{args:?}");
+    }
+
+    let out = run_outside(&["ignore", "x", "--reason", "r"]);
+    assert_eq!(code(&out), 2);
+    assert!(
+        stderr(&out).contains("not inside a git repository"),
+        "{}",
+        stderr(&out)
+    );
+}
+
+#[test]
+fn ignore_with_a_base_checks_the_files_from_it() {
+    let t = branch_repo();
+    let args = ["check", "--base", "main", "--json"];
+    let fp = fingerprint(&check(t.path(), &args, 1), "no-any", "src/keep.ts");
+    let out = run(
+        t.path(),
+        &["ignore", &fp, "--reason", "r", "--base", "main"],
+    );
+    assert_eq!(code(&out), 0, "{}", stderr(&out));
+    assert_eq!(ignore_file(&t).len(), 1);
+    let out = run(
+        t.path(),
+        &["ignore", &fp, "--reason", "r", "--base", "no-such"],
+    );
+    assert_eq!(code(&out), 2);
+    assert!(
+        stderr(&out).contains("base `no-such` is not a commit"),
+        "{}",
+        stderr(&out)
+    );
+
+    let t = old_repo();
+    let fp = fingerprint(
+        &check(t.path(), &["check", "--all", "--json"], 1),
+        "no-any",
+        "src/old.ts",
+    );
+    let out = run(t.path(), &["ignore", &fp, "--reason", "r"]);
+    assert_eq!(code(&out), 2, "{}", stdout(&out));
+    let out = run(
+        t.path(),
+        &["ignore", &fp, "--reason", "r", "--base", "main~1"],
+    );
+    assert_eq!(code(&out), 0, "{}", stderr(&out));
+    let files: Vec<String> = ignore_file(&t)
+        .into_iter()
+        .map(|entry| entry.file.into_string())
+        .collect();
+    assert_eq!(files, ["src/old.ts"]);
 }

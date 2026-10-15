@@ -5,6 +5,7 @@ use engine::{Finding, RuleState};
 use kit::serde::Serialize;
 use kit::{Files, FindingKind, RuleKind, Ruleset, Source};
 use scope::{Base, BaseReason, SkipReason};
+use state::IgnoreEntry;
 
 use crate::check::Checked;
 
@@ -196,6 +197,14 @@ pub(crate) fn hook_text(findings: &[Finding]) -> String {
     }
     if shown < findings.len() {
         let _ = writeln!(text, "stop-slop: {} more errors", findings.len() - shown);
+    }
+    text
+}
+
+pub(crate) fn ignore_text(entries: &[IgnoreEntry]) -> String {
+    let mut text = String::new();
+    for entry in entries {
+        let _ = writeln!(text, "ignored {} {}", entry.fingerprint, entry.file);
     }
     text
 }

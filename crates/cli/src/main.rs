@@ -2,6 +2,7 @@ mod args;
 mod check;
 mod error;
 mod hook;
+mod ignore;
 mod list;
 mod output;
 mod toggle;
@@ -24,6 +25,11 @@ fn main() -> ExitCode {
     let result = match Command::parse() {
         Command::Check(args) => check::run(args),
         Command::Hook => hook::run(),
+        Command::Ignore {
+            fingerprint,
+            reason,
+            base,
+        } => ignore::run(fingerprint, reason, base),
         Command::Enable => toggle::enable(),
         Command::Disable => toggle::disable(),
         Command::Rules { json } => list::run(json),

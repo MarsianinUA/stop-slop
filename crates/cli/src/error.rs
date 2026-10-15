@@ -17,6 +17,8 @@ pub(crate) enum CliError {
     /// `ConfigError` names the key, not the file.
     #[error(".git/info/stop-slop/config.toml: {0}")]
     Config(#[from] ConfigError),
+    #[error("fingerprint `{0}` is not among the findings of the branch")]
+    UnknownFingerprint(String),
     #[error("hook input: {0}")]
     HookInput(String),
 }

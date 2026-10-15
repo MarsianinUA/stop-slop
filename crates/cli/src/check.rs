@@ -44,6 +44,10 @@ fn check(args: CheckArgs) -> Result<Checked, CliError> {
     let state = State::open(repo.git_common_dir());
     // Before `scope`: a broken `config.toml` fails before the git calls of the diff.
     let engine = crate::engine_for(&rules::RULESET, &state)?;
+    scan(&repo, &engine, args)
+}
+
+pub(crate) fn scan(repo: &Repo, engine: &Engine, args: CheckArgs) -> Result<Checked, CliError> {
     let snapshot = match &args.rev {
         Some(rev) => repo.at_rev(rev)?,
         None => repo.worktree(),
@@ -60,7 +64,7 @@ fn check(args: CheckArgs) -> Result<Checked, CliError> {
     let (prepared, index) = thread::scope(|threads| {
         let index = enums_needed
             .then(|| threads.spawn(|| ProjectFacts::load(&snapshot, &[], &[Fact::Enums])));
-        let prepared = prepare(&repo, &snapshot, request(args), &needed);
+        let prepared = prepare(repo, &snapshot, request(args), &needed);
         let index = index.map(|index| index.join().unwrap_or_else(|panic| resume_unwind(panic)));
         (prepared, index)
     });
@@ -77,11 +81,11 @@ fn check(args: CheckArgs) -> Result<Checked, CliError> {
     if let Snapshot::WorkTree(tree) = &snapshot
         && fix
     {
-        fixed = write_fixes(&engine, tree, &mut sources, &joined)?;
+        fixed = write_fixes(engine, tree, &mut sources, &joined)?;
         if !fixed.is_empty()
             && let Some(base) = &scope.base
         {
-            scope.skipped = rescope(&repo, &snapshot, base, &mut sources)?;
+            scope.skipped = rescope(repo, &snapshot, base, &mut sources)?;
         }
     }
     let files = sources.iter().map(|source| source.path.clone()).collect();

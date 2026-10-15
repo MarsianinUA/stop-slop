@@ -1,5 +1,6 @@
 use std::path::PathBuf;
 
+use clap::builder::NonEmptyStringValueParser;
 use clap::{Args, Parser};
 
 #[derive(Debug, Parser)]
@@ -13,6 +14,17 @@ pub(crate) enum Command {
     Check(CheckArgs),
     /// Checks the file of a Claude Code hook given as JSON on stdin.
     Hook,
+    /// Adds an exception for a finding of the branch.
+    Ignore {
+        /// The fingerprint of the finding, as `check --json` prints it.
+        fingerprint: String,
+        /// Why the finding is fine here.
+        #[arg(long, value_parser = NonEmptyStringValueParser::new())]
+        reason: String,
+        /// The base branch or commit; searched when not given.
+        #[arg(long)]
+        base: Option<String>,
+    },
     /// Turns the hook on in this repository.
     Enable,
     /// Turns the hook off in this repository; exceptions and config stay.
@@ -25,7 +37,7 @@ pub(crate) enum Command {
     },
 }
 
-#[derive(Debug, Args)]
+#[derive(Debug, Default, Args)]
 pub(crate) struct CheckArgs {
     /// The base branch or commit; searched when not given.
     #[arg(long, conflicts_with_all = ["files", "all"])]
