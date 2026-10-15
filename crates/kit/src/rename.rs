@@ -377,12 +377,18 @@ fn is_taken(file: &File<'_>, symbol: SymbolId, name: &str) -> bool {
     let scoping = file.semantic.scoping();
     let home = scoping.symbol_scope_id(symbol);
     let inside = |scope| is_within(scoping, scope, home);
+    // A `var` written inside binds in the function scope above: `catch (e) { var error = e; }`
+    // renamed to `error` would assign the catch parameter instead.
     scoping
         .iter_bindings()
         .any(|(scope, bindings)| bindings.contains_key(name) && inside(scope))
         || file.semantic.nodes().iter().any(|node| {
-            matches!(node.kind(), AstKind::IdentifierReference(id) if id.name == name)
-                && inside(node.scope_id())
+            let named = match node.kind() {
+                AstKind::IdentifierReference(id) => id.name == name,
+                AstKind::BindingIdentifier(id) => id.name == name,
+                _ => false,
+            };
+            named && inside(node.scope_id())
         })
 }
 

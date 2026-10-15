@@ -1,0 +1,5 @@
+description = "A catch parameter not named `error`: `catch (err)`, `catch (e)`"
+kind = "error"
+fix = true
+source = ["direct"]
+message = "`{name}` names a caught error differently from the rest of the code: a reader scanning catch blocks looks for `error`, and `e` or `err` save nothing. Name it `error`; in a catch nested in another, name what failed, like `retryError`."

@@ -966,6 +966,11 @@ fn rename_refuses_what_may_change_the_code_or_reach_past_the_file() {
         ),
         ("const a = 1; console.log(a, name); export {};", "a", "name"),
         (
+            "export function f() { try { g(); } catch (e) { var error = e; } return error; }",
+            "e",
+            "error",
+        ),
+        (
             "const user_id = 1; const userID = 2; export {};",
             "user_id",
             "userId",
