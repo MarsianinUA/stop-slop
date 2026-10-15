@@ -4,6 +4,8 @@ mod facts;
 mod file;
 mod lines;
 mod rule;
+mod safety;
+mod ts_type;
 
 pub use cx::{Cx, Edit, Report, Reported};
 pub use def::{
@@ -13,7 +15,12 @@ pub use facts::{EnumIndex, EnumMember, Fact, Facts, Package, StaticFacts};
 pub use file::{File, Role, RoleDef, Roles, suffix_of};
 pub use lines::{LineIndex, Position};
 pub use rule::{DynRule, Rule, build};
+pub use safety::has_safety_comment;
 pub use serde;
+pub use ts_type::{
+    expression_assertion, is_const_assertion, is_known_value, is_open_key, lib_type,
+    type_assertion, unwrapped_type,
+};
 
 pub mod oxc {
     pub use oxc_allocator as allocator;
@@ -24,7 +31,10 @@ pub mod oxc {
 }
 
 pub mod prelude {
-    pub use crate::{Cx, Edit, Fact, File, Role, Rule};
+    pub use crate::{
+        Cx, Edit, Fact, File, Role, Rule, expression_assertion, has_safety_comment,
+        is_const_assertion, is_known_value, is_open_key, lib_type, type_assertion, unwrapped_type,
+    };
     pub use oxc_allocator::Allocator;
     pub use oxc_ast::{AstKind, AstType};
     pub use oxc_parser::Parser;

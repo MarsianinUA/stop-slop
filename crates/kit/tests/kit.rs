@@ -1,4 +1,6 @@
 use camino::Utf8Path;
+use kit::oxc::ast::ast::{Expression, TSType};
+use kit::oxc::parser::ParseOptions;
 use kit::oxc::semantic::SemanticBuilder;
 use kit::oxc::span::SourceType;
 use kit::prelude::*;
@@ -99,18 +101,6 @@ impl Rule for ReportTwice {
 
 #[test]
 fn a_bare_report_is_a_finding_and_arg_and_fix_add_to_it() {
-    let text = "let x = 1;";
-    let allocator = Allocator::default();
-    let parsed = Parser::new(&allocator, text, SourceType::ts()).parse();
-    let semantic = SemanticBuilder::new().build(&parsed.program).semantic;
-    let lines = LineIndex::new(text);
-    let file = File {
-        path: Utf8Path::new("src/a.ts"),
-        text,
-        lines: &lines,
-        semantic: &semantic,
-        role: None,
-    };
     let facts = StaticFacts {
         package: None,
         aliases: Vec::new(),
@@ -119,7 +109,9 @@ fn a_bare_report_is_a_finding_and_arg_and_fix_add_to_it() {
     let rule = build::<ReportTwice>("").unwrap();
     let mut out = Vec::new();
 
-    rule.on_file(&mut Cx::new(&file, &facts, &mut out));
+    with_file("let x = 1;", |file| {
+        rule.on_file(&mut Cx::new(file, &facts, &mut out));
+    });
 
     assert_eq!(rule.uses(), [Fact::Aliases]);
     let [bare, full] = out.as_slice() else {
@@ -179,4 +171,277 @@ fn line_index_counts_columns_in_chars_and_keeps_the_line_ending() {
     assert_eq!(empty.line_ending(), "\n");
     let start = empty.position(0);
     assert_eq!((start.line, start.column), (1, 1));
+}
+
+/// Parses `text` the way the engine does.
+fn with_file(text: &str, check: impl FnOnce(&File<'_>)) {
+    let allocator = Allocator::default();
+    let parsed = Parser::new(&allocator, text, SourceType::ts())
+        .with_options(ParseOptions {
+            preserve_parens: false,
+            ..ParseOptions::default()
+        })
+        .parse();
+    assert!(
+        parsed.diagnostics.is_empty(),
+        "{text}: {:?}",
+        parsed.diagnostics
+    );
+    let semantic = SemanticBuilder::new()
+        .with_build_nodes(true)
+        .build(&parsed.program)
+        .semantic;
+    let lines = LineIndex::new(text);
+    let file = File {
+        path: Utf8Path::new("src/a.ts"),
+        text,
+        lines: &lines,
+        semantic: &semantic,
+        role: None,
+    };
+    check(&file);
+}
+
+fn alias_type<'a>(file: &File<'a>, name: &str) -> &'a TSType<'a> {
+    file.semantic
+        .nodes()
+        .iter()
+        .find_map(|node| match node.kind() {
+            AstKind::TSTypeAliasDeclaration(alias) if alias.id.name == name => {
+                Some(&alias.type_annotation)
+            }
+            _ => None,
+        })
+        .unwrap_or_else(|| panic!("no type {name}"))
+}
+
+fn first_assertion<'a>(file: &File<'a>) -> (&'a Expression<'a>, &'a TSType<'a>) {
+    file.semantic
+        .nodes()
+        .iter()
+        .find_map(|node| type_assertion(node.kind()))
+        .unwrap()
+}
+
+fn source<'a>(file: &File<'a>, node: &impl GetSpan) -> &'a str {
+    node.span().source_text(file.text)
+}
+
+const SAFETY_CASES: &[(&str, bool)] = &[
+    ("// SAFETY: x\nvalue!;", true),
+    ("value!; // SAFETY: x", true),
+    ("/* SAFETY: x */\nvalue!;", true),
+    ("/**\n * SAFETY: x\n */\nvalue!;", true),
+    ("// SAFETY: a\n// b\nvalue!;", true),
+    ("// SAFETY: a\n// eslint-disable-next-line\nvalue!;", true),
+    ("/* SAFETY: x */ value!;", true),
+    ("function f() {\n  // SAFETY: x\n  return value!;\n}", true),
+    ("const user = {\n  a: 1,\n} as User; // SAFETY: x", true),
+    ("// SAFETY:\nvalue!;", false),
+    ("// SAFETY:   \nvalue!;", false),
+    ("// safety: x\nvalue!;", false),
+    ("// SAFETY: x\n\nvalue!;", false),
+    ("foo(); // SAFETY: x\nvalue!;", false),
+    ("// SAFETY: x\nconst total = first +\n  value!;", false),
+    ("const user = { // SAFETY: x\n  a: 1,\n} as User;", false),
+    ("value!;", false),
+];
+
+fn assert_safety_cases(line_ending: &str) {
+    for &(case, expected) in SAFETY_CASES {
+        let text = case.replace('\n', line_ending);
+        with_file(&text, |file| {
+            let span = file
+                .semantic
+                .nodes()
+                .iter()
+                .map(|node| node.kind())
+                .find(|kind| {
+                    matches!(
+                        kind,
+                        AstKind::TSNonNullExpression(_) | AstKind::TSAsExpression(_)
+                    )
+                })
+                .unwrap()
+                .span();
+            assert_eq!(has_safety_comment(file, span), expected, "{case:?}");
+        });
+    }
+}
+
+#[test]
+fn safety_comment_counts_right_above_the_line_or_at_its_end() {
+    assert_safety_cases("\n");
+}
+
+#[test]
+fn safety_comment_gives_the_same_answers_with_crlf() {
+    assert_safety_cases("\r\n");
+}
+
+#[test]
+fn type_assertion_finds_as_and_angle_brackets_and_follows_a_chain() {
+    for text in ["x as T;", "<T>x;"] {
+        with_file(text, |file| {
+            let (value, ty) = first_assertion(file);
+            assert_eq!(
+                (source(file, value), source(file, ty)),
+                ("x", "T"),
+                "{text}"
+            );
+        });
+    }
+    for text in ["x satisfies T;", "x!;"] {
+        with_file(text, |file| {
+            let found = file
+                .semantic
+                .nodes()
+                .iter()
+                .any(|node| type_assertion(node.kind()).is_some());
+            assert!(!found, "{text}");
+        });
+    }
+
+    for (text, is_const) in [
+        ("x as const;", true),
+        ("<const>x;", true),
+        ("x as T;", false),
+    ] {
+        with_file(text, |file| {
+            assert_eq!(
+                is_const_assertion(first_assertion(file).1),
+                is_const,
+                "{text}"
+            );
+        });
+    }
+
+    with_file("(x as unknown) as T;", |file| {
+        let (outer, ty) = first_assertion(file);
+        assert_eq!(source(file, ty), "T");
+        let (inner, inner_ty) = expression_assertion(outer).unwrap();
+        assert_eq!(
+            (source(file, inner), source(file, inner_ty)),
+            ("x", "unknown")
+        );
+        assert!(expression_assertion(inner).is_none());
+    });
+}
+
+#[test]
+fn lib_type_is_a_reference_the_file_does_not_declare_or_import() {
+    with_file("type A = Record<string, number>;", |file| {
+        let ty = alias_type(file, "A");
+        let record = lib_type(file, ty, "Record").unwrap();
+        assert_eq!(source(file, record), "Record<string, number>");
+        assert!(lib_type(file, ty, "Readonly").is_none());
+    });
+    for text in [
+        "import { Record } from './record';\ntype A = Record<string, number>;",
+        "type Record<K, V> = Map<K, V>;\ntype A = Record<string, number>;",
+        "type A<Record> = Record;",
+    ] {
+        with_file(text, |file| {
+            assert!(
+                lib_type(file, alias_type(file, "A"), "Record").is_none(),
+                "{text}"
+            );
+        });
+    }
+}
+
+#[test]
+fn unwrapped_type_drops_parentheses_readonly_and_lib_wrappers() {
+    for (text, unwrapped) in [
+        (
+            "type A = Readonly<Partial<(Record<string, unknown>)>>;",
+            "Record<string, unknown>",
+        ),
+        ("type A = readonly string[];", "string[]"),
+        ("type A<T> = NonNullable<Required<T>>;", "T"),
+        (
+            "type Readonly<T> = T;\ntype A = Readonly<{ a: 1 }>;",
+            "Readonly<{ a: 1 }>",
+        ),
+    ] {
+        with_file(text, |file| {
+            let ty = unwrapped_type(file, alias_type(file, "A"));
+            assert_eq!(source(file, ty), unwrapped, "{text}");
+        });
+    }
+}
+
+#[test]
+fn open_key_admits_any_string_number_or_symbol() {
+    for (text, open) in [
+        ("type K = string;", true),
+        ("type K = number;", true),
+        ("type K = symbol;", true),
+        ("type K = PropertyKey;", true),
+        ("type K = 'a' | string;", true),
+        ("type K = (string);", true),
+        ("type K = 'a' | 'b';", false),
+        ("type Keys = string;\ntype K = Keys;", false),
+        ("type PropertyKey = 'a';\ntype K = PropertyKey;", false),
+    ] {
+        with_file(text, |file| {
+            assert_eq!(is_open_key(file, alias_type(file, "K")), open, "{text}");
+        });
+    }
+}
+
+#[test]
+fn known_value_has_its_type_in_its_own_syntax() {
+    for (text, known) in [
+        ("let probe = { a: 1 };", true),
+        ("let probe = [1];", true),
+        ("let probe = () => 1;", true),
+        ("let probe = function () {};", true),
+        ("let probe = class {};", true),
+        ("let probe = new Map();", true),
+        ("let probe = 's';", true),
+        ("let probe = `t${x}`;", true),
+        ("let probe = 1;", true),
+        ("let probe = 1n;", true),
+        ("let probe = true;", true),
+        ("let probe = /a/;", true),
+        ("let probe = -1;", true),
+        ("let probe = !x;", true),
+        ("let probe = void 0;", false),
+        ("let probe = null;", false),
+        ("let probe = undefined;", false),
+        ("let probe = f();", false),
+        ("let probe = a.b;", false),
+        ("function f(param) {\n  let probe = param;\n}", false),
+        (
+            "import { imported } from './a';\nlet probe = imported;",
+            false,
+        ),
+        ("let probe = ({ a: 1 });", true),
+        ("const known = { a: 1 };\nlet probe = known as T;", true),
+        ("let probe = { a: 1 } satisfies T;", true),
+        ("const known = { a: 1 };\nlet probe = known!;", true),
+        ("const plain = { a: 1 };\nlet probe = plain;", true),
+        ("const typed: T = { a: 1 };\nlet probe = typed;", false),
+        ("let changing = { a: 1 };\nlet probe = changing;", false),
+        ("const { a } = obj;\nlet probe = a;", false),
+        ("const a = b;\nconst b = a;\nlet probe = a;", false),
+    ] {
+        with_file(text, |file| {
+            let init = file
+                .semantic
+                .nodes()
+                .iter()
+                .find_map(|node| match node.kind() {
+                    AstKind::VariableDeclarator(declarator)
+                        if declarator.id.get_identifier_name() == Some("probe".into()) =>
+                    {
+                        declarator.init.as_ref()
+                    }
+                    _ => None,
+                })
+                .unwrap();
+            assert_eq!(is_known_value(file, init), known, "{text}");
+        });
+    }
 }
