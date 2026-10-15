@@ -92,6 +92,7 @@ pub fn rename(file: &File<'_>, symbol: SymbolId, name: &str) -> Option<Vec<Edit>
         || is_decorated_class(file, symbol)
         || is_merged_type_parameter(file, symbol)
         || lets_runtime_name_out(file, symbol)
+        || lowers_jsx_tag(file, symbol, name)
         || is_taken(file, symbol, name)
         || has_similar_name(file, symbol, name)
     {
@@ -368,6 +369,23 @@ fn is_call_or_type(nodes: &AstNodes<'_>, reference: &Reference) -> bool {
         AstKind::TSTypeQuery(_) | AstKind::TSQualifiedName(_) => true,
         _ => false,
     }
+}
+
+/// A JSX tag names a component only while it starts with no lowercase letter: `<icon />` is an
+/// HTML element, so renaming the symbol of `<Icon />` to `icon` changes what renders.
+fn lowers_jsx_tag(file: &File<'_>, symbol: SymbolId, name: &str) -> bool {
+    let nodes = file.semantic.nodes();
+    name.starts_with(|ch: char| ch.is_ascii_lowercase())
+        && file
+            .semantic
+            .scoping()
+            .get_resolved_references(symbol)
+            .any(|reference| {
+                matches!(
+                    nodes.parent_kind(reference.node_id()),
+                    AstKind::JSXOpeningElement(_) | AstKind::JSXClosingElement(_)
+                )
+            })
 }
 
 /// `name` is bound in the symbol's scope or a scope inside it, or some reference there already

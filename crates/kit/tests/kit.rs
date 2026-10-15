@@ -175,8 +175,14 @@ fn line_index_counts_columns_in_chars_and_keeps_the_line_ending() {
 
 /// Parses `text` the way the engine does.
 fn with_file(text: &str, check: impl FnOnce(&File<'_>)) {
+    with_file_at("src/a.ts", text, check);
+}
+
+/// The same for a file at `path`: `src/a.tsx` parses JSX.
+fn with_file_at(path: &str, text: &str, check: impl FnOnce(&File<'_>)) {
     let allocator = Allocator::default();
-    let parsed = Parser::new(&allocator, text, SourceType::ts())
+    let source_type = SourceType::from_path(path).expect("a TS or JS path");
+    let parsed = Parser::new(&allocator, text, source_type)
         .with_options(ParseOptions {
             preserve_parens: false,
             ..ParseOptions::default()
@@ -193,7 +199,7 @@ fn with_file(text: &str, check: impl FnOnce(&File<'_>)) {
         .semantic;
     let lines = LineIndex::new(text);
     let file = File {
-        path: Utf8Path::new("src/a.ts"),
+        path: Utf8Path::new(path),
         text,
         lines: &lines,
         semantic: &semantic,
@@ -783,8 +789,12 @@ fn case_matches_its_style_and_apply_rewrites_into_it() {
 
 /// `text` after renaming its first symbol named `from` to `to`; `None` when `rename` refuses.
 fn renamed(text: &str, from: &str, to: &str) -> Option<String> {
+    renamed_at("src/a.ts", text, from, to)
+}
+
+fn renamed_at(path: &str, text: &str, from: &str, to: &str) -> Option<String> {
     let mut result = None;
-    with_file(text, |file| {
+    with_file_at(path, text, |file| {
         let scoping = file.semantic.scoping();
         let symbol = scoping
             .symbol_ids()
@@ -978,6 +988,12 @@ fn rename_refuses_what_may_change_the_code_or_reach_past_the_file() {
     ] {
         assert_eq!(renamed(text, from, to), None, "{text}: {from} -> {to}");
     }
+
+    // A lowercase tag is an HTML element; a capital keeps it a component.
+    let jsx = "import { icons } from './icons'; const Icon = icons.star; \
+               export const view = () => <Icon></Icon>;";
+    assert_eq!(renamed_at("src/a.tsx", jsx, "Icon", "icon"), None);
+    assert!(renamed_at("src/a.tsx", jsx, "Icon", "Glyph").is_some());
 }
 
 #[test]
