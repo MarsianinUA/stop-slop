@@ -1,0 +1,8 @@
+description = "An exported type, interface or enum in a file with runtime code"
+kind = "error"
+files = "code"
+source = ["personal"]
+message = "`{name}` is exported from a file that also runs code, so every module that needs the type depends on this implementation file and its imports, which invites import cycles, and nobody finds the type by file name. Move it to a types file next to this one: `*.types.ts`, `*.interface.ts` or `*.enum.ts`."
+
+[options]
+suffixes = ["config", "schema", "schemas"]

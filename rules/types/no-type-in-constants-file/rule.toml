@@ -1,0 +1,4 @@
+description = "A type or interface in a constants file"
+kind = "error"
+source = ["personal"]
+message = "`{name}` is a type in a constants file. A constants file holds values only: with types in it the file serves two roles, and a reader looking for the type does not open it. Move the type to a `*.types.ts` file, a type derived from a constant (`keyof typeof X`) too."
