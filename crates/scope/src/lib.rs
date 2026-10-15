@@ -1,3 +1,4 @@
+use std::io;
 use std::panic::resume_unwind;
 use std::path::{Path, PathBuf};
 use std::thread;
@@ -96,7 +97,7 @@ pub fn resolve(
         }
         ScopeRequest::Files(paths) => paths
             .iter()
-            .map(|path| repo.relativize(path))
+            .map(|path| listed_file(repo, path))
             .collect::<Result<_, _>>()?,
         ScopeRequest::All => snapshot.files()?,
     };
@@ -110,6 +111,19 @@ pub fn resolve(
 /// `.ts`, `.tsx`, `.mts`, `.cts`, not a declaration file: the filter of `resolve`.
 pub fn is_checked(path: &Path) -> bool {
     Utf8Path::from_path(path).is_some_and(files::checked)
+}
+
+/// A folder is an error, not walked: the filter would drop it, and nothing would be checked
+/// without a word.
+fn listed_file(repo: &Repo, path: &Path) -> Result<Utf8PathBuf, RepoError> {
+    let relative = repo.relativize(path)?;
+    if repo.root().join(&relative).is_dir() {
+        return Err(RepoError::Io {
+            path: path.to_owned(),
+            source: io::ErrorKind::IsADirectory.into(),
+        });
+    }
+    Ok(relative)
 }
 
 fn both<A: Send, B>(spawned: impl FnOnce() -> A + Send, here: impl FnOnce() -> B) -> (A, B) {

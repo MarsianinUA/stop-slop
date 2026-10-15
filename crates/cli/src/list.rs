@@ -16,16 +16,16 @@ pub(crate) fn run(json: bool) -> Result<Exit, CliError> {
     } else {
         output::rules_text(&rules::RULESET)
     };
-    output::print(&text);
+    output::print(&text)?;
     Ok(Exit::Clean)
 }
 
 /// The nearest `package.json` of a `package.json` is itself, so a group condition is active
 /// when it holds for at least one `package.json` of the repo.
 fn states(set: &'static Ruleset, repo: &Repo) -> Result<Vec<RuleState>, CliError> {
-    let config = State::open(repo.git_common_dir()).config()?;
+    let state = State::open(repo.git_common_dir());
     // `ignore.json` hides findings, not rules.
-    let engine = crate::new_engine(set, config, BTreeSet::new())?;
+    let engine = crate::new_engine(set, &state, BTreeSet::new())?;
     let snapshot = repo.worktree();
     let packages: Vec<_> = snapshot
         .files()?

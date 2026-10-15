@@ -31,7 +31,7 @@ pub(crate) fn run(args: CheckArgs) -> Result<Exit, CliError> {
     } else {
         output::check_text(&checked)
     };
-    output::print(&text);
+    output::print(&text)?;
     Ok(if checked.findings.is_empty() {
         Exit::Clean
     } else {
@@ -169,7 +169,7 @@ fn request(args: CheckArgs) -> ScopeRequest {
     }
 }
 
-/// The scope with its files taken out, the facts of the files and the files themselves.
+/// The files move out of the scope into the `SourceFile`s.
 pub(crate) fn prepare(
     repo: &Repo,
     snapshot: &Snapshot,

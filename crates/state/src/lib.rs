@@ -88,8 +88,14 @@ impl State {
         }
     }
 
+    /// For a message about the file: `Engine::new` checks the ids and keys of `config.toml`
+    /// without knowing where it lies.
+    pub fn config_path(&self) -> PathBuf {
+        self.dir.join("config.toml")
+    }
+
     pub fn config(&self) -> Result<Config, StateError> {
-        let path = self.dir.join("config.toml");
+        let path = self.config_path();
         let Some(text) = read(&path)? else {
             return Ok(Config::default());
         };

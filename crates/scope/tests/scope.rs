@@ -1,5 +1,6 @@
 use std::cell::RefCell;
 use std::fs;
+use std::io;
 use std::path::{Path, PathBuf};
 
 use repo::{LineRange, Oid, Repo, RepoError};
@@ -343,6 +344,18 @@ fn files_and_all_give_repo_paths_without_a_base() {
         matches!(error, ScopeError::Repo(RepoError::OutsideRepo(_))),
         "{error:?}"
     );
+
+    for folder in ["src", "."] {
+        let error = files(&at_root, vec!["src/a.ts".into(), folder.into()]).unwrap_err();
+        assert!(
+            matches!(
+                &error,
+                ScopeError::Repo(RepoError::Io { path, source })
+                    if path == Path::new(folder) && source.kind() == io::ErrorKind::IsADirectory
+            ),
+            "{error:?}"
+        );
+    }
 }
 
 #[test]

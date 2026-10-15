@@ -4,10 +4,12 @@ use std::io::{self, Write as _};
 use engine::{Finding, RuleState};
 use kit::serde::Serialize;
 use kit::{Files, FindingKind, RuleKind, Ruleset, Source};
+use repo::RepoError;
 use scope::{Base, BaseReason, SkipReason};
 use state::IgnoreEntry;
 
 use crate::check::Checked;
+use crate::error::CliError;
 
 #[derive(Serialize)]
 #[serde(crate = "kit::serde", rename_all = "camelCase")]
@@ -209,12 +211,25 @@ pub(crate) fn ignore_text(entries: &[IgnoreEntry]) -> String {
     text
 }
 
-/// A closed pipe (`| head`) is not a failure of the command: the exit code stays as it was.
-pub(crate) fn print(text: &str) {
-    let _ = io::stdout().lock().write_all(text.as_bytes());
+/// A closed pipe (`| head`) is the reader's choice and keeps the exit code. Any other error,
+/// such as a full disk, cuts the output short, so the command fails rather than exit 0 or 1
+/// with half a JSON.
+pub(crate) fn print(text: &str) -> Result<(), CliError> {
+    let mut stdout = io::stdout().lock();
+    match stdout
+        .write_all(text.as_bytes())
+        .and_then(|()| stdout.flush())
+    {
+        Err(source) if source.kind() != io::ErrorKind::BrokenPipe => Err(RepoError::Io {
+            path: "stdout".into(),
+            source,
+        }
+        .into()),
+        _ => Ok(()),
+    }
 }
 
-/// Same policy as `print`.
+/// An error writing stderr has nowhere to be reported.
 pub(crate) fn print_err(text: &str) {
     let _ = io::stderr().lock().write_all(text.as_bytes());
 }

@@ -17,7 +17,7 @@ pub(crate) fn run(
     let state = State::open(repo.git_common_dir());
     // Without the exceptions: an entry already made would hide its finding, and `ignore` of
     // it again, with a new reason, would fail. `add_ignore` replaces the entry.
-    let engine = crate::new_engine(&rules::RULESET, state.config()?, BTreeSet::new())?;
+    let engine = crate::new_engine(&rules::RULESET, &state, BTreeSet::new())?;
     let args = CheckArgs {
         base,
         ..CheckArgs::default()
@@ -48,7 +48,7 @@ pub(crate) fn run(
 
     let text = output::ignore_text(&entries);
     state.add_ignore(entries)?;
-    output::print(&text);
+    output::print(&text)?;
     Ok(Exit::Clean)
 }
 

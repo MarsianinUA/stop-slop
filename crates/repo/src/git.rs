@@ -71,13 +71,13 @@ pub(crate) fn unexpected(command: &str) -> RepoError {
 /// when a file's stat changed but not its content. A git started at that moment, ours in
 /// parallel or an IDE's, cannot open the index and fails; a moment later it would not.
 fn output(dir: &Path, args: &[&str], input: Option<&[u8]>) -> Result<Output, RepoError> {
-    let mut output = start(dir, args, input)?;
+    let mut output = run_once(dir, args, input)?;
     for pause in INDEX_RETRY_PAUSES {
         if output.status.success() || !index_busy(&output.stderr) {
             break;
         }
         thread::sleep(pause);
-        output = start(dir, args, input)?;
+        output = run_once(dir, args, input)?;
     }
     Ok(output)
 }
@@ -87,7 +87,7 @@ fn index_busy(stderr: &[u8]) -> bool {
     stderr.windows(BUSY.len()).any(|window| window == BUSY)
 }
 
-fn start(dir: &Path, args: &[&str], input: Option<&[u8]>) -> Result<Output, RepoError> {
+fn run_once(dir: &Path, args: &[&str], input: Option<&[u8]>) -> Result<Output, RepoError> {
     let mut command = Command::new("git");
     for name in CLEARED_ENV {
         command.env_remove(name);

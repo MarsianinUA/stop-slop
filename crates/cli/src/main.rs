@@ -51,23 +51,27 @@ fn cwd_repo() -> Result<Repo, CliError> {
 
 fn new_engine(
     set: &'static Ruleset,
-    config: state::Config,
+    state: &State,
     ignored: BTreeSet<(Utf8PathBuf, String)>,
 ) -> Result<Engine, CliError> {
+    let config = state.config()?;
     let config = RunConfig {
         disabled: config.disabled,
         options: config.rules,
         ignored,
     };
-    Ok(Engine::new(set, config)?)
+    Engine::new(set, config).map_err(|source| CliError::Config {
+        path: state.config_path(),
+        source,
+    })
 }
 
+/// With the exceptions of `ignore.json`.
 fn engine_for(set: &'static Ruleset, state: &State) -> Result<Engine, CliError> {
-    let config = state.config()?;
     let ignored = state
         .ignores()?
         .into_iter()
         .map(|entry| (entry.file, entry.fingerprint))
         .collect();
-    new_engine(set, config, ignored)
+    new_engine(set, state, ignored)
 }

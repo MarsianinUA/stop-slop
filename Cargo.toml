@@ -5,6 +5,7 @@ members = ["crates/catalog", "crates/cli", "crates/engine", "crates/kit", "crate
 [workspace.package]
 version = "0.1.0"
 edition = "2024"
+rust-version = "1.97"
 
 [workspace.dependencies]
 camino = "1"

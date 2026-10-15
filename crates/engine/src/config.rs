@@ -142,7 +142,11 @@ fn options(meta: &RuleMeta, overrides: Option<&toml::Table>) -> Result<String, C
 /// Names the option on the line the error points at; just the rule when it points at none.
 fn bad_option(meta: &RuleMeta, options: &str, error: &toml::de::Error) -> ConfigError {
     let option = error.span().and_then(|span| {
-        let line_start = options[..span.start].rfind('\n').map_or(0, |at| at + 1);
+        // Bytes: slicing the `str` would panic on a span that starts inside a character.
+        let line_start = options.as_bytes()[..span.start]
+            .iter()
+            .rposition(|&byte| byte == b'\n')
+            .map_or(0, |at| at + 1);
         let line = options[line_start..].lines().next()?;
         Some(line.split_once('=')?.0.trim())
     });

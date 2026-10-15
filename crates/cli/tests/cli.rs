@@ -120,6 +120,36 @@ fn rules_prints_a_line_per_rule() {
 }
 
 #[test]
+fn rules_keeps_the_exit_code_when_the_reader_closed_the_pipe() {
+    let t = TempRepo::new();
+    let (reader, writer) = std::io::pipe().expect("create a pipe");
+    drop(reader);
+    let out = exe(t.path())
+        .arg("rules")
+        .stdout(writer)
+        .output()
+        .expect("start stop-slop");
+    assert_eq!(code(&out), 0, "{}", stderr(&out));
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn rules_fails_when_stdout_cannot_be_written() {
+    let t = TempRepo::new();
+    let full = fs::File::options()
+        .write(true)
+        .open("/dev/full")
+        .expect("open /dev/full");
+    let out = exe(t.path())
+        .arg("rules")
+        .stdout(full)
+        .output()
+        .expect("start stop-slop");
+    assert_eq!(code(&out), 2);
+    assert!(stderr(&out).contains("stdout: "), "{}", stderr(&out));
+}
+
+#[test]
 fn rules_json_lists_every_rule() {
     let t = TempRepo::new();
     let out = run(t.path(), &["rules", "--json"]);
@@ -493,6 +523,7 @@ fn check_fails_with_the_cause() {
         ),
         (&["check", "--rev", "no-such", "--base", "main"], "no-such"),
         (&["check", "--files", "src/missing.ts"], "missing.ts"),
+        (&["check", "--files", "src"], "src: is a directory"),
     ] {
         let out = run(t.path(), args);
         assert_eq!(code(&out), 2, "{args:?}");
@@ -821,14 +852,20 @@ fn enable_and_disable_outside_a_repo_fail() {
     }
 }
 
-#[test]
-fn enable_in_a_linked_worktree_turns_the_hook_on_for_the_repo() {
-    let t = TempRepo::new();
-    t.write("src/a.ts", ANY).commit("main");
+/// A worktree of `t` on a new branch `side`; it lives as long as the returned temp folder.
+fn linked_worktree(t: &TempRepo) -> (tempfile::TempDir, PathBuf) {
     let trees = tempfile::tempdir().expect("create a temp folder");
     let tree = trees.path().join("tree");
     let tree_arg = tree.to_str().expect("a UTF-8 temp path");
     t.git(&["worktree", "add", "-q", tree_arg, "-b", "side"]);
+    (trees, tree)
+}
+
+#[test]
+fn enable_in_a_linked_worktree_turns_the_hook_on_for_the_repo() {
+    let t = TempRepo::new();
+    t.write("src/a.ts", ANY).commit("main");
+    let (_trees, tree) = linked_worktree(&t);
 
     let out = run(&tree, &["enable"]);
     assert_eq!(code(&out), 0, "{}", stderr(&out));
@@ -838,6 +875,29 @@ fn enable_in_a_linked_worktree_turns_the_hook_on_for_the_repo() {
     assert_eq!(hook_on(&t, "src/a.ts").0, 2);
     let out = hook(&tree, &hook_input(&tree.join("src").join("a.ts")));
     assert_eq!(code(&out), 2, "{}", stderr(&out));
+}
+
+#[test]
+fn config_error_in_a_linked_worktree_names_the_file_of_the_repo() {
+    let t = TempRepo::new();
+    t.write("src/a.ts", ANY).commit("main");
+    let (_trees, tree) = linked_worktree(&t);
+    write_config(&t, "disabled = [\"no-such\"]\n");
+
+    let out = run(&tree, &["check", "--all"]);
+    assert_eq!(code(&out), 2);
+    let text = stderr(&out);
+    let path = text
+        .strip_prefix("stop-slop: ")
+        .and_then(|rest| rest.split_once(": unknown rule `disabled[0]`"))
+        .map_or_else(|| panic!("{text}"), |(path, _)| path);
+    let canonical = |path: &Path| {
+        fs::canonicalize(path).unwrap_or_else(|error| panic!("{}: {error}", path.display()))
+    };
+    assert_eq!(
+        canonical(Path::new(path)),
+        canonical(&t.path().join(".git/info/stop-slop/config.toml"))
+    );
 }
 
 #[test]
@@ -907,6 +967,46 @@ fn hook_passes_what_it_does_not_check() {
     let out = run(t.path(), &["disable"]);
     assert_eq!(code(&out), 0, "{}", stderr(&out));
     assert_eq!(hook_on(&t, "src/a.ts"), (0, String::new()), "disabled");
+}
+
+#[test]
+fn hook_passes_a_folder_git_refuses_but_fails_without_git() {
+    let t = TempRepo::new();
+    enable(&t);
+    let in_git = ".git/info/stop-slop/reviews/x.ts";
+    t.write("src/a.ts", ANY).write(in_git, ANY);
+    assert_eq!(hook_on(&t, in_git), (0, String::new()), "inside .git");
+
+    let empty = tempfile::tempdir().expect("create a temp folder");
+    let no_config = empty.path().join("config");
+    fs::write(&no_config, "").expect("write an empty git config");
+    // `safe.directory` in the system or the user's git config could let the repo in.
+    let foreign = || {
+        let mut command = exe(t.path());
+        command
+            .env("GIT_TEST_ASSUME_DIFFERENT_OWNER", "1")
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_CONFIG_GLOBAL", &no_config);
+        command
+    };
+    let out = foreign()
+        .args(["check", "--all"])
+        .output()
+        .expect("start stop-slop");
+    assert_eq!(code(&out), 2);
+    assert!(
+        stderr(&out).contains("dubious ownership"),
+        "{}",
+        stderr(&out)
+    );
+    let out = feed(foreign(), &hook_input(&t.path().join("src/a.ts")));
+    assert_eq!((code(&out), stderr(&out)), (0, String::new()), "foreign");
+
+    let mut no_git = exe(t.path());
+    no_git.env("PATH", empty.path());
+    let out = feed(no_git, &hook_input(&t.path().join("src/a.ts")));
+    assert_eq!(code(&out), 2, "no git");
+    assert!(stderr(&out).contains("git"), "{}", stderr(&out));
 }
 
 #[test]

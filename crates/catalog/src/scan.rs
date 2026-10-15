@@ -261,7 +261,12 @@ fn read_toml<T: DeserializeOwned>(path: &Path) -> Result<T, Problem> {
         }
         match e.span() {
             Some(span) => {
-                let line = text[..span.start].matches('\n').count() + 1;
+                // Bytes: slicing the `str` would panic on a span that starts inside a character.
+                let line = text.as_bytes()[..span.start]
+                    .iter()
+                    .filter(|&&byte| byte == b'\n')
+                    .count()
+                    + 1;
                 Problem::BadToml(format!("line {line}: {message}"))
             }
             None => Problem::BadToml(message.to_string()),

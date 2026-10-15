@@ -116,6 +116,7 @@ fn broken_config_toml_gives_the_path_and_the_line() {
     let temp = TempDir::new().unwrap();
     let state = State::open(temp.path());
     let path = folder(&temp).join("config.toml");
+    assert_eq!(state.config_path(), path);
     let cases = [
         ("disabled = [\"a\"]\n\n[rules.x\n", 3, ""),
         ("\n\ndisabled = \"a\"\n", 3, ""),

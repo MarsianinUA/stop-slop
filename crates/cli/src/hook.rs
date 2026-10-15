@@ -60,9 +60,12 @@ fn errors(set: &'static Ruleset, file: &Path) -> Result<Vec<Finding>, CliError> 
     let dir = file
         .parent()
         .ok_or_else(|| CliError::HookInput(format!("`{}` has no folder", file.display())))?;
-    // The repo of the file, not of the cwd: Claude may edit a file of another repo.
+    // The repo of the file, not of the cwd: Claude may edit a file of another repo. A git that
+    // refuses the folder (inside `.git/`, dubious ownership) leaves the marker unread, so it
+    // counts as no marker; `enable` could not have run there either. A git that does not
+    // start is a failure.
     let repo = match Repo::open(dir) {
-        Err(RepoError::NotARepo) => return Ok(Vec::new()),
+        Err(RepoError::NotARepo | RepoError::Git { .. }) => return Ok(Vec::new()),
         repo => repo?,
     };
     let state = State::open(repo.git_common_dir());

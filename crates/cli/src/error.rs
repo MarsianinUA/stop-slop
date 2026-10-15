@@ -1,3 +1,5 @@
+use std::path::PathBuf;
+
 use engine::ConfigError;
 use project::ProjectError;
 use repo::RepoError;
@@ -15,8 +17,12 @@ pub(crate) enum CliError {
     #[error(transparent)]
     State(#[from] StateError),
     /// `ConfigError` names the key, not the file.
-    #[error(".git/info/stop-slop/config.toml: {0}")]
-    Config(#[from] ConfigError),
+    #[error("{}: {source}", .path.display())]
+    Config {
+        path: PathBuf,
+        #[source]
+        source: ConfigError,
+    },
     #[error("fingerprint `{0}` is not among the findings of the branch")]
     UnknownFingerprint(String),
     #[error("hook input: {0}")]
