@@ -1,3 +1,4 @@
+mod case;
 mod cx;
 mod def;
 mod exported;
@@ -6,10 +7,12 @@ mod file;
 mod import_kind;
 mod lines;
 mod own_type;
+mod rename;
 mod rule;
 mod safety;
 mod ts_type;
 
+pub use case::{Case, words};
 pub use cx::{Cx, Edit, Report, Reported};
 pub use def::{
     Build, Files, FindingKind, GroupDef, Impl, RuleDef, RuleKind, RuleMeta, Ruleset, Source,
@@ -20,6 +23,7 @@ pub use file::{File, Role, RoleDef, Roles, suffix_of};
 pub use import_kind::{ImportKind, import_kind};
 pub use lines::{LineIndex, Position};
 pub use own_type::is_own_type;
+pub use rename::{is_own_name, private_member, rename};
 pub use rule::{DynRule, Rule, build};
 pub use safety::has_safety_comment;
 pub use serde;
@@ -38,9 +42,10 @@ pub mod oxc {
 
 pub mod prelude {
     pub use crate::{
-        Cx, Edit, Fact, File, ImportKind, Role, Rule, expression_assertion, has_safety_comment,
-        import_kind, is_const_assertion, is_exported, is_exported_node, is_known_value,
-        is_open_key, is_own_type, lib_type, type_assertion, unwrapped_type,
+        Case, Cx, Edit, Fact, File, ImportKind, Role, Rule, expression_assertion,
+        has_safety_comment, import_kind, is_const_assertion, is_exported, is_exported_node,
+        is_known_value, is_open_key, is_own_name, is_own_type, lib_type, private_member, rename,
+        type_assertion, unwrapped_type, words,
     };
     pub use oxc_allocator::Allocator;
     pub use oxc_ast::{AstKind, AstType};

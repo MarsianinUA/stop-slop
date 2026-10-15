@@ -700,3 +700,367 @@ type Generic<T> = T;
         assert!(!is_own_type(file, &acme, alias_type(file, "Generic")), "T");
     });
 }
+
+#[test]
+fn words_split_at_separators_case_steps_and_acronym_ends() {
+    for (name, expected) in [
+        ("userId", &["user", "Id"][..]),
+        ("userID", &["user", "ID"]),
+        ("loadHTTPURL", &["load", "HTTPURL"]),
+        ("HTTPServer", &["HTTP", "Server"]),
+        ("user_id", &["user", "id"]),
+        ("MAX_RETRIES", &["MAX", "RETRIES"]),
+        ("CACHE_E2E_TIMEOUT_MS", &["CACHE", "E2E", "TIMEOUT", "MS"]),
+        ("order-item", &["order", "item"]),
+        ("_value", &["value"]),
+        ("IUser", &["I", "User"]),
+        ("v2Api", &["v2", "Api"]),
+        ("base64Encode", &["base64", "Encode"]),
+        ("ERC20Token", &["ERC20", "Token"]),
+        ("userIDs", &["user", "IDs"]),
+        ("URLsMap", &["URLs", "Map"]),
+        ("getXAxis", &["get", "X", "Axis"]),
+        ("orders$", &["orders$"]),
+        ("_", &[]),
+    ] {
+        assert_eq!(words(name), expected, "{name}");
+    }
+}
+
+#[test]
+fn case_matches_its_style_and_apply_rewrites_into_it() {
+    for (case, good, bad) in [
+        (
+            Case::Kebab,
+            &["order-item", "v2"][..],
+            &["orderItem", "order_item", "-a", "a--b", "a-", ""][..],
+        ),
+        (
+            Case::Camel,
+            &["userId", "userID", "orders$", "$scope", "x"],
+            &["UserId", "user_id"],
+        ),
+        (
+            Case::Pascal,
+            &["UserId", "HTTPServer", "T"],
+            &["userId", "Order_Row"],
+        ),
+        (
+            Case::Constant,
+            &["MAX_RETRIES", "E2E", "A"],
+            &["MAX__X", "MAX_", "Max"],
+        ),
+    ] {
+        for name in good {
+            assert!(case.matches(name), "{case:?} {name}");
+        }
+        for name in bad {
+            assert!(!case.matches(name), "{case:?} {name:?}");
+        }
+    }
+
+    for (case, name, expected) in [
+        (Case::Camel, "user_id", "userId"),
+        (Case::Camel, "MAX_RETRIES", "maxRetries"),
+        (Case::Camel, "userID", "userId"),
+        (Case::Camel, "userIDs", "userIds"),
+        (Case::Pascal, "order_row", "OrderRow"),
+        (Case::Pascal, "HTTPServer", "HttpServer"),
+        (Case::Constant, "pageSize", "PAGE_SIZE"),
+        (Case::Constant, "cacheE2eTimeoutMs", "CACHE_E2E_TIMEOUT_MS"),
+        (Case::Kebab, "OrderItem", "order-item"),
+    ] {
+        assert_eq!(
+            case.apply(name).as_deref(),
+            Some(expected),
+            "{case:?} {name}"
+        );
+    }
+    for case in [Case::Kebab, Case::Camel, Case::Pascal, Case::Constant] {
+        assert_eq!(case.apply("_"), None, "{case:?}");
+    }
+}
+
+/// `text` after renaming its first symbol named `from` to `to`; `None` when `rename` refuses.
+fn renamed(text: &str, from: &str, to: &str) -> Option<String> {
+    let mut result = None;
+    with_file(text, |file| {
+        let scoping = file.semantic.scoping();
+        let symbol = scoping
+            .symbol_ids()
+            .find(|&symbol| scoping.symbol_name(symbol) == from)
+            .unwrap_or_else(|| panic!("no {from} in {text}"));
+        result = rename(file, symbol, to).map(|mut edits| {
+            edits.sort_by_key(|edit| edit.span.start);
+            let mut out = text.to_string();
+            for edit in edits.iter().rev() {
+                out.replace_range(edit.span.start as usize..edit.span.end as usize, &edit.text);
+            }
+            out
+        });
+    });
+    result
+}
+
+#[test]
+fn rename_edits_every_declaration_and_reference_and_keeps_object_keys() {
+    for (text, from, to, expected) in [
+        (
+            "const value = 1; const box = { value }; const { value: copy } = box; export { box, copy };",
+            "value",
+            "amount",
+            "const amount = 1; const box = { value: amount }; const { value: copy } = box; export { box, copy };",
+        ),
+        (
+            "import { source } from './s'; const { value } = source; use(value);",
+            "value",
+            "amount",
+            "import { source } from './s'; const { value: amount } = source; use(amount);",
+        ),
+        (
+            "import { source } from './s'; const { value = 1 } = source; use(value);",
+            "value",
+            "amount",
+            "import { source } from './s'; const { value: amount = 1 } = source; use(amount);",
+        ),
+        (
+            "import { source } from './s'; let value; ({ value } = source);",
+            "value",
+            "amount",
+            "import { source } from './s'; let amount; ({ value: amount } = source);",
+        ),
+        (
+            "import { source } from './s'; let value; ({ value = 2 } = source);",
+            "value",
+            "amount",
+            "import { source } from './s'; let amount; ({ value: amount = 2 } = source);",
+        ),
+        (
+            "import { source } from './s'; let value; const amt = 1; ({ value = amt } = source);",
+            "amt",
+            "fallback",
+            "import { source } from './s'; let value; const fallback = 1; ({ value = fallback } = source);",
+        ),
+        (
+            "const amount_ = 1; const box = { amount: amount_ }; export { box };",
+            "amount_",
+            "amount",
+            "const amount = 1; const box = { amount }; export { box };",
+        ),
+        (
+            "import { box } from './b'; const { amount: amt } = box; use(amt);",
+            "amt",
+            "amount",
+            "import { box } from './b'; const { amount } = box; use(amount);",
+        ),
+        (
+            "import { box } from './b'; let amt; ({ amount: amt = 1 } = box);",
+            "amt",
+            "amount",
+            "import { box } from './b'; let amount; ({ amount = 1 } = box);",
+        ),
+        (
+            "function over(a: string): void; function over(a: number): void; function over(a: unknown) {} over(1); export {};",
+            "over",
+            "run",
+            "function run(a: string): void; function run(a: number): void; function run(a: unknown) {} run(1); export {};",
+        ),
+        (
+            "interface IUser { a: 1 } interface IUser { b: 2 } let user: IUser; export {};",
+            "IUser",
+            "User",
+            "interface User { a: 1 } interface User { b: 2 } let user: User; export {};",
+        ),
+        (
+            "export function f(p: number, q: typeof p) { return q; }",
+            "p",
+            "size",
+            "export function f(size: number, q: typeof size) { return q; }",
+        ),
+        (
+            "function f_g() {} f_g(); export {};",
+            "f_g",
+            "fG",
+            "function fG() {} fG(); export {};",
+        ),
+        (
+            "class Order_row {} const row: Order_row = new Order_row(); export { row };",
+            "Order_row",
+            "OrderRow",
+            "class OrderRow {} const row: OrderRow = new OrderRow(); export { row };",
+        ),
+        (
+            "const text = 1; use(text); export {};",
+            "text",
+            "string",
+            "const string = 1; use(string); export {};",
+        ),
+    ] {
+        assert_eq!(renamed(text, from, to).as_deref(), Some(expected), "{text}");
+    }
+}
+
+#[test]
+fn rename_refuses_what_may_change_the_code_or_reach_past_the_file() {
+    for (text, from, to) in [
+        ("const a = 1; use(a); export {};", "a", "a"),
+        ("const a = 1; use(a); export {};", "a", "1a"),
+        ("const a = 1; use(a); export {};", "a", "a-b"),
+        ("const a = 1; use(a); export {};", "a", "delete"),
+        ("const a = 1; use(a); export {};", "a", "arguments"),
+        ("type T = 1; let t: T; export {};", "T", "string"),
+        ("export const a = 1;", "a", "b"),
+        ("const a = 1; export { a };", "a", "b"),
+        ("const a = 1; export default a;", "a", "b"),
+        ("import { a } from './a'; use(a);", "a", "b"),
+        ("declare const a: number; export {};", "a", "b"),
+        (
+            "declare global { interface Shape {} } export {};",
+            "Shape",
+            "Form",
+        ),
+        (
+            "class C { constructor(private a: string) {} } new C('x'); export {};",
+            "a",
+            "b",
+        ),
+        ("@D() class A {} new A(); export {};", "A", "B"),
+        ("const a = 1; a;", "a", "b"),
+        ("const a = 1; eval('a'); export {};", "a", "b"),
+        ("function f() {} export const list = [f];", "f", "g"),
+        ("class A {} export const n = A.name;", "A", "B"),
+        (
+            "export const f = function named_fn() {};",
+            "named_fn",
+            "namedFn",
+        ),
+        (
+            "function g(cb = () => {}) { return [cb]; } export { g };",
+            "cb",
+            "callback",
+        ),
+        (
+            "import { x } from './x'; const { cb = () => {} } = x; export const l = [cb];",
+            "cb",
+            "callback",
+        ),
+        (
+            "let f_g; f_g = () => {}; export const l = [f_g];",
+            "f_g",
+            "fG",
+        ),
+        (
+            "class E_x extends Error { constructor() { super(); this.name = this.constructor.name; } } throw new E_x(); export {};",
+            "E_x",
+            "Ex",
+        ),
+        (
+            "interface X<t_v> { a: t_v } interface X<t_v> { b: t_v } export {};",
+            "t_v",
+            "TV",
+        ),
+        (
+            "const a = 1; function g() { const b = 2; return a + b; } export { g };",
+            "a",
+            "b",
+        ),
+        ("const a = 1; console.log(a, name); export {};", "a", "name"),
+        (
+            "const user_id = 1; const userID = 2; export {};",
+            "user_id",
+            "userId",
+        ),
+    ] {
+        assert_eq!(renamed(text, from, to), None, "{text}: {from} -> {to}");
+    }
+}
+
+#[test]
+fn own_name_is_a_symbol_the_file_declares_for_itself() {
+    let text = "import { imported } from './x';
+declare const ambient: number;
+declare function external(outside: string): void;
+const variable = 1;
+function func(parameter: number, ...rest: number[]) {}
+class Klass { constructor(private property: string) {} }
+try {} catch (caught) {}
+interface Shape {}
+type Alias = 1;
+enum Color { Red }
+function generic<T>() {}
+declare global { interface GlobalShape {} }
+namespace Space { const inner = 1; }";
+    with_file(text, |file| {
+        let scoping = file.semantic.scoping();
+        let names = |own: bool| {
+            let mut names: Vec<_> = scoping
+                .symbol_ids()
+                .filter(|&symbol| is_own_name(file, symbol) == own)
+                .map(|symbol| scoping.symbol_name(symbol))
+                .collect();
+            names.sort_unstable();
+            names
+        };
+        assert_eq!(
+            names(true),
+            [
+                "Alias",
+                "Color",
+                "Klass",
+                "Shape",
+                "T",
+                "caught",
+                "func",
+                "generic",
+                "inner",
+                "parameter",
+                "rest",
+                "variable",
+            ]
+        );
+        assert_eq!(
+            names(false),
+            [
+                "GlobalShape",
+                "Red",
+                "Space",
+                "ambient",
+                "external",
+                "imported",
+                "outside",
+                "property",
+            ]
+        );
+    });
+}
+
+#[test]
+fn private_member_is_a_private_or_hash_member_with_a_body() {
+    let text = "class A {
+  private a = 1;
+  #b = 2;
+  private get c() { return 1; }
+  private m(): void;
+  private m() {}
+  constructor(private d: string) {}
+  e = 1;
+  protected f = 1;
+  public g() {}
+  private ['h'] = 1;
+  private declare z: number;
+}
+declare class B { private i: number; }";
+    with_file(text, |file| {
+        let members: Vec<_> = file
+            .semantic
+            .nodes()
+            .iter()
+            .filter_map(|node| private_member(file, node))
+            .map(|(name, span)| (name, span.source_text(text)))
+            .collect();
+        assert_eq!(
+            members,
+            [("a", "a"), ("b", "#b"), ("c", "c"), ("m", "m"), ("d", "d")]
+        );
+    });
+}
