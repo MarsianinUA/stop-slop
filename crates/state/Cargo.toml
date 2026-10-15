@@ -1,0 +1,15 @@
+[package]
+name = "state"
+version.workspace = true
+edition.workspace = true
+publish = false
+
+[dependencies]
+camino = { workspace = true, features = ["serde1"] }
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+toml.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
