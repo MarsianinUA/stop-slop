@@ -575,6 +575,36 @@ fn check_skips_files_a_squash_merge_brought_into_the_base() {
     );
 }
 
+#[test]
+fn check_finds_a_raw_value_of_an_enum_from_outside_the_diff() {
+    let t = TempRepo::new();
+    t.write(
+        "src/source.enum.ts",
+        "export enum Source {\n  Dashboard = 'DASHBOARD',\n}\n",
+    )
+    .commit("main");
+    t.branch("feat")
+        .write(
+            "src/sync.ts",
+            "import { Source } from './source.enum';\n\n\
+             export const source: Source | string = 'DASHBOARD';\n",
+        )
+        // The file does not know the enum, so the same word is no finding.
+        .write("src/label.ts", "export const label = 'DASHBOARD';\n")
+        .commit("feat");
+
+    let report = check(t.path(), &["check", "--base", "main", "--json"], 1);
+    assert_eq!(report["files"], json!(["src/label.ts", "src/sync.ts"]));
+    assert_eq!(
+        places(&report),
+        [("no-enum-raw-value", "src/sync.ts", 3, 40, Some(true))]
+    );
+    let finding = &findings(&report)[0];
+    assert_eq!(finding["kind"], "candidate");
+    let message = finding["message"].as_str().expect("a message");
+    assert!(message.contains("`Source.Dashboard`"), "{message}");
+}
+
 const IO_FEAT: &str = "import { readFileSync } from 'fs'; export const r: any = readFileSync;\n\
                        export const a = 10;\nexport const b: any = 2;\n";
 const MAIN_FEAT: &str =

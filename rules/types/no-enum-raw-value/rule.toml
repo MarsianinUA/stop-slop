@@ -1,0 +1,7 @@
+description = "A raw string where the file has the enum member: `'DASHBOARD'` instead of `Source.Dashboard`"
+kind = "candidate"
+source = ["personal"]
+message = "`{raw}` repeats the value of {member} by hand: if the enum value changes, this string silently stops matching, and a search for the member skips this place. Use {member}."
+agent = """
+The string equals a value of an enum this file declares or imports. If it means that member (an argument, a property, a comparison, a test expectation), write the member and type the receiver as the enum. If it only happens to be the same word (an event name, a column name, a value of an outside API), ignore the finding with that reason.
+"""
