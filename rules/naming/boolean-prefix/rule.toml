@@ -1,0 +1,8 @@
+description = "A boolean whose name does not start with `is`, `has`, `can` or `should`"
+kind = "error"
+fix = true
+source = ["personal"]
+message = "`{name}` holds a boolean, but its name does not read as a yes-or-no question: a reader cannot tell a flag from a value or a count without looking up its type. Start it with `is`, `has`, `can` or `should`, like `{suggestion}`."
+
+[options]
+states = ["active", "allowed", "available", "busy", "cached", "claimed", "closed", "complete", "completed", "connected", "covered", "dirty", "disabled", "done", "empty", "enabled", "expired", "finished", "healthy", "hidden", "idle", "installed", "loaded", "loading", "locked", "open", "paused", "pending", "public", "ready", "recorded", "required", "resolved", "running", "settled", "stale", "started", "stopped", "usable", "valid", "visible"]
