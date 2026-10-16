@@ -1,6 +1,4 @@
-use kit::oxc::ast::ast::{
-    BindingIdentifier, BindingPattern, Expression, FormalParameter, TSType, UnaryOperator,
-};
+use kit::oxc::ast::ast::{BindingIdentifier, BindingPattern, Expression, FormalParameter, TSType};
 use kit::oxc::semantic::NodeId;
 use kit::prelude::*;
 
@@ -125,35 +123,6 @@ fn is_collection(file: &File<'_>, parameter: &FormalParameter<'_>) -> bool {
                 .into_iter()
                 .any(|name| lib_type(file, ty, name).is_some())
     })
-}
-
-/// The write when the reference is the root of a member chain that is assigned, updated or
-/// deleted: `x.a = ..`, `x[k] += ..`, `x.a.b++`, `delete x.a`.
-fn member_write(file: &File<'_>, id: NodeId) -> Option<Span> {
-    let nodes = file.semantic.nodes();
-    let mut current = outer_assertion(file, nodes.get_node(id));
-    let mut is_member = false;
-    loop {
-        let parent = nodes.parent_node(current.id());
-        let span = current.span();
-        if let Some(member) = parent.kind().as_member_expression_kind() {
-            // The key of `o[x]` is not the object that changes.
-            if member.object().span() != span {
-                return None;
-            }
-            is_member = true;
-            current = outer_assertion(file, parent);
-            continue;
-        }
-        let is_write = is_member
-            && match parent.kind() {
-                AstKind::AssignmentExpression(assignment) => assignment.left.span() == span,
-                AstKind::UpdateExpression(_) => true,
-                AstKind::UnaryExpression(unary) => unary.operator == UnaryOperator::Delete,
-                _ => false,
-            };
-        return is_write.then(|| parent.span());
-    }
 }
 
 /// The call when the reference is the target of the global `Object.assign(x, ..)`.

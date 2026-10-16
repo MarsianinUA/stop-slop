@@ -1,4 +1,4 @@
-use kit::oxc::ast::ast::{Expression, UnaryOperator};
+use kit::oxc::ast::ast::Expression;
 use kit::oxc::semantic::{NodeId, ScopeFlags};
 use kit::prelude::*;
 
@@ -55,7 +55,7 @@ fn is_changed(file: &File<'_>, binding: &TopBinding<'_>) -> bool {
         .get_resolved_references(symbol)
         .any(|reference| {
             let id = reference.node_id();
-            (is_member_write(file, id) || container && is_mutator_call(file, id))
+            (member_write(file, id).is_some() || container && is_mutator_call(file, id))
                 && at_run_time(file, id)
         })
 }
@@ -78,34 +78,6 @@ fn at_run_time(file: &File<'_>, id: NodeId) -> bool {
             matches!(kind, AstKind::PropertyDefinition(property)
                 if property.value.as_ref().is_some_and(|value| value.span().contains_inclusive(span)))
         })
-}
-
-/// The reference is the root of a member chain that is assigned, updated or deleted: `x.a = ..`,
-/// `x[k] += ..`, `x.a.b++`, `delete x.a`.
-fn is_member_write(file: &File<'_>, id: NodeId) -> bool {
-    let nodes = file.semantic.nodes();
-    let mut current = outer_assertion(file, nodes.get_node(id));
-    let mut is_member = false;
-    loop {
-        let parent = nodes.parent_node(current.id());
-        let span = current.span();
-        if let Some(member) = parent.kind().as_member_expression_kind() {
-            // The key of `o[x]` is not the object that changes.
-            if member.object().span() != span {
-                return false;
-            }
-            is_member = true;
-            current = outer_assertion(file, parent);
-            continue;
-        }
-        return is_member
-            && match parent.kind() {
-                AstKind::AssignmentExpression(assignment) => assignment.left.span() == span,
-                AstKind::UpdateExpression(_) => true,
-                AstKind::UnaryExpression(unary) => unary.operator == UnaryOperator::Delete,
-                _ => false,
-            };
-    }
 }
 
 /// `cache.set(..)`, `queue.push(..)`: the reference is the receiver of a mutator call.

@@ -15,7 +15,7 @@ mod rule;
 mod safety;
 mod ts_type;
 
-pub use callback::is_callback;
+pub use callback::{is_callback, is_signature_given};
 pub use case::{Case, words};
 pub use class_file::{
     TopBinding, TopClass, TopKind, start_after_decorators, top_bindings, top_classes,
@@ -29,7 +29,7 @@ pub use facts::{EnumIndex, EnumMember, Fact, Facts, Package, StaticFacts};
 pub use file::{File, Role, RoleDef, Roles, path_span, suffix_of};
 pub use import_kind::{ImportKind, import_kind};
 pub use lines::{LineIndex, Position};
-pub use member::{MemberUse, member_use};
+pub use member::{MemberUse, member_use, member_write};
 pub use own_type::is_own_type;
 pub use rename::{
     PRIVATE_MEMBER_NODES, is_ambient, is_jsx_tag, is_own_name, is_script_global, is_similar_name,
@@ -57,9 +57,9 @@ pub mod prelude {
         TopBinding, TopClass, TopKind, expression_assertion, has_safety_comment, import_kind,
         is_ambient, is_callback, is_const_assertion, is_exported, is_exported_node, is_global,
         is_jsx_tag, is_known_value, is_nullable, is_open_key, is_own_name, is_own_type,
-        is_script_global, is_similar_name, lib_type, member_use, outer_assertion, path_span,
-        private_member, related_symbols, rename, start_after_decorators, top_bindings, top_classes,
-        type_assertion, unwrapped_type, words,
+        is_script_global, is_signature_given, is_similar_name, lib_type, member_use, member_write,
+        outer_assertion, path_span, private_member, related_symbols, rename,
+        start_after_decorators, top_bindings, top_classes, type_assertion, unwrapped_type, words,
     };
     pub use oxc_allocator::Allocator;
     pub use oxc_ast::{AstKind, AstType};

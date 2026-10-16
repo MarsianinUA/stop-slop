@@ -1,6 +1,4 @@
-use kit::oxc::ast::ast::{
-    BindingPattern, FormalParameters, MethodDefinitionKind, PropertyKey, TSAccessibility,
-};
+use kit::oxc::ast::ast::{BindingPattern, FormalParameters, MethodDefinitionKind};
 use kit::prelude::*;
 
 #[derive(Deserialize)]
@@ -59,66 +57,4 @@ fn is_injected(file: &File<'_>, function: &AstNode<'_>, params: &FormalParameter
                 nodes.parent_kind(nodes.parent_id(method.id())),
                 AstKind::Class(class) if !class.decorators.is_empty()
             ))
-}
-
-/// Someone else sets the signature: the caller of a callback, the property of a setter, the base
-/// class of an `override`, the interface of a class that `implements` one (for its public
-/// members), the type of the variable or field that holds the function
-/// (`const handler: RequestHandler = (req, res, next) => ..`), the type it `satisfies` or is
-/// asserted to, the return type of the function that returns it
-/// (`function audit(): RequestHandler { return (req, res, next) => .. }`).
-fn is_signature_given(file: &File<'_>, function: &AstNode<'_>) -> bool {
-    if is_callback(file, function) {
-        return true;
-    }
-    let nodes = file.semantic.nodes();
-    let parent = nodes.parent_node(function.id());
-    match parent.kind() {
-        AstKind::VariableDeclarator(declarator) => declarator.type_annotation.is_some(),
-        AstKind::TSSatisfiesExpression(_)
-        | AstKind::TSAsExpression(_)
-        | AstKind::TSTypeAssertion(_) => true,
-        // The body of an arrow: `(prefix): RequestHandler => (req, res, next) => ..`.
-        AstKind::ArrowFunctionExpression(arrow) => arrow.return_type.is_some(),
-        AstKind::ReturnStatement(_) => nodes
-            .ancestor_kinds(parent.id())
-            .find_map(|kind| match kind {
-                AstKind::Function(outer) => Some(outer.return_type.is_some()),
-                AstKind::ArrowFunctionExpression(outer) => Some(outer.return_type.is_some()),
-                _ => None,
-            })
-            .unwrap_or(false),
-        AstKind::PropertyDefinition(field) => {
-            field.type_annotation.is_some()
-                || !field.r#static
-                    && is_public(field.accessibility, &field.key)
-                    && implements(file, parent)
-        }
-        AstKind::MethodDefinition(method) => {
-            method.kind == MethodDefinitionKind::Set
-                || method.r#override
-                || method.kind == MethodDefinitionKind::Method
-                    && !method.r#static
-                    && is_public(method.accessibility, &method.key)
-                    && implements(file, parent)
-        }
-        _ => false,
-    }
-}
-
-fn is_public(accessibility: Option<TSAccessibility>, key: &PropertyKey<'_>) -> bool {
-    !key.is_private_identifier()
-        && !matches!(
-            accessibility,
-            Some(TSAccessibility::Private | TSAccessibility::Protected)
-        )
-}
-
-/// member -> `ClassBody` -> `Class` with `implements`.
-fn implements(file: &File<'_>, member: &AstNode<'_>) -> bool {
-    let nodes = file.semantic.nodes();
-    matches!(
-        nodes.parent_kind(nodes.parent_id(member.id())),
-        AstKind::Class(class) if !class.implements.is_empty()
-    )
 }
