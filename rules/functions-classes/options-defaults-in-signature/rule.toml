@@ -1,0 +1,8 @@
+description = "An options key gets its default in the body (`options.x ?? 3`) instead of in the signature"
+kind = "candidate"
+files = "code"
+source = ["personal"]
+message = "`{name}.{key}` gets its default in the body: a reader looks through the body for what a missing key means, and each use may pick a different default. Destructure the options in the signature with the default there: `{ {key} = .. }: Options = {}`."
+agent = """
+The function reads a key of its options parameter with `??` or `||`, or destructures it with a default in the body. Move the defaults into the signature, `function retry(task: Task, { retries = 3, delayMs = 100 }: RetryOptions = {})`, and use the names in the body. Ignore the finding, with the reason, when the parameter is data rather than options (a row or DTO whose key may be missing, where `?? null` maps it for storage), or when `null` must fall back too, or, under `||`, a falsy value (`0`, `''`, `false`): a default in the signature replaces only `undefined`.
+"""
