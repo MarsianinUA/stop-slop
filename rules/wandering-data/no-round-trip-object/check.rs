@@ -1,8 +1,8 @@
 use kit::oxc::ast::ast::{
-    AssignmentOperator, AssignmentTarget, BindingPattern, CallExpression, Class, ClassElement,
-    Expression, FormalParameters, MethodDefinitionKind, ObjectPropertyKind, Statement,
+    AssignmentOperator, AssignmentTarget, BindingPattern, Expression, FormalParameters,
+    ObjectPropertyKind, Statement,
 };
-use kit::oxc::semantic::{NodeId, SymbolId};
+use kit::oxc::semantic::SymbolId;
 use kit::prelude::*;
 
 #[derive(Deserialize)]
@@ -71,12 +71,12 @@ fn returns_param(file: &File<'_>, function: &AstNode<'_>, param: SymbolId) -> bo
             }
             None => arrow
                 .get_function_body()
-                .is_some_and(|body| all_return(&body.statements, &mut results)),
+                .is_some_and(|body| body_returns(&body.statements, &mut results)),
         },
         AstKind::Function(function) => function
             .body
             .as_ref()
-            .is_some_and(|body| all_return(&body.statements, &mut results)),
+            .is_some_and(|body| body_returns(&body.statements, &mut results)),
         _ => false,
     };
     if !complete || results.is_empty() {
@@ -93,6 +93,15 @@ fn returns_param(file: &File<'_>, function: &AstNode<'_>, param: SymbolId) -> bo
             .scoping()
             .get_resolved_references(param)
             .any(|reference| member_write(file, reference.node_id()).is_some())
+}
+
+/// Collects the values of the `return` statements; false on a bare `return;` or when the body may
+/// run off its end, whose result is `undefined` too.
+fn body_returns<'a>(
+    statements: &'a [Statement<'a>],
+    results: &mut Vec<&'a Expression<'a>>,
+) -> bool {
+    all_return(statements, results) && ends(statements)
 }
 
 /// Collects the values of the `return` statements, outside nested functions; false on a bare
@@ -148,6 +157,71 @@ fn statement_returns<'a>(
     }
 }
 
+/// The statements never run off their end: the last one returns or throws, or is a block, an `if`
+/// with `else`, a `try` or a `switch` with `default` and no `break` that does so on every way out.
+/// A loop may run no times.
+fn ends(statements: &[Statement<'_>]) -> bool {
+    statements.last().is_some_and(ends_with)
+}
+
+fn ends_with(statement: &Statement<'_>) -> bool {
+    match statement {
+        Statement::ReturnStatement(_) | Statement::ThrowStatement(_) => true,
+        Statement::BlockStatement(block) => ends(&block.body),
+        Statement::IfStatement(statement) => {
+            ends_with(&statement.consequent) && statement.alternate.as_ref().is_some_and(ends_with)
+        }
+        Statement::TryStatement(statement) => {
+            statement
+                .finalizer
+                .as_ref()
+                .is_some_and(|finalizer| ends(&finalizer.body))
+                || ends(&statement.block.body)
+                    && statement
+                        .handler
+                        .as_ref()
+                        .is_none_or(|handler| ends(&handler.body.body))
+        }
+        // A case without its own end falls through to the next one.
+        Statement::SwitchStatement(statement) => {
+            statement.cases.iter().any(|case| case.is_default_case())
+                && statement
+                    .cases
+                    .last()
+                    .is_some_and(|case| ends(&case.consequent))
+                && !statement
+                    .cases
+                    .iter()
+                    .any(|case| case.consequent.iter().any(breaks))
+        }
+        _ => false,
+    }
+}
+
+/// A `break` that leaves the `switch` around it: not one inside a nested loop or `switch`.
+fn breaks(statement: &Statement<'_>) -> bool {
+    match statement {
+        Statement::BreakStatement(_) => true,
+        Statement::BlockStatement(block) => block.body.iter().any(breaks),
+        Statement::IfStatement(statement) => {
+            breaks(&statement.consequent) || statement.alternate.as_ref().is_some_and(breaks)
+        }
+        Statement::TryStatement(statement) => {
+            statement.block.body.iter().any(breaks)
+                || statement
+                    .handler
+                    .as_ref()
+                    .is_some_and(|handler| handler.body.body.iter().any(breaks))
+                || statement
+                    .finalizer
+                    .as_ref()
+                    .is_some_and(|finalizer| finalizer.body.iter().any(breaks))
+        }
+        Statement::LabeledStatement(statement) => breaks(&statement.body),
+        _ => false,
+    }
+}
+
 fn is_symbol(file: &File<'_>, expression: &Expression<'_>, symbol: SymbolId) -> bool {
     matches!(expression.get_inner_expression(), Expression::Identifier(id)
         if file.semantic.scoping().get_reference(id.reference_id()).symbol_id() == Some(symbol))
@@ -186,95 +260,4 @@ fn params_of<'a>(function: &AstNode<'a>) -> Option<&'a FormalParameters<'a>> {
         AstKind::ArrowFunctionExpression(arrow) => Some(&arrow.params),
         _ => None,
     }
-}
-
-/// The function of this file that the call runs: a function declared with a body, a `const`
-/// holding a function or an arrow, or `this.m(..)` - a method with a body or a function field of
-/// the class whose `this` the call sees. A binding that is written to may hold another function.
-fn local_callee<'a>(file: &File<'a>, call: &CallExpression<'a>) -> Option<&'a AstNode<'a>> {
-    let nodes = file.semantic.nodes();
-    let scoping = file.semantic.scoping();
-    match call.callee.get_inner_expression() {
-        Expression::Identifier(id) => {
-            let symbol = scoping.get_reference(id.reference_id()).symbol_id()?;
-            if scoping
-                .get_resolved_references(symbol)
-                .any(|reference| reference.is_write())
-            {
-                return None;
-            }
-            let declaration = scoping.symbol_declaration(symbol);
-            match nodes.kind(declaration) {
-                AstKind::Function(function) if function.body.is_some() => {
-                    Some(nodes.get_node(declaration))
-                }
-                AstKind::VariableDeclarator(declarator) => {
-                    function_value(file, declarator.init.as_ref()?)
-                }
-                _ => None,
-            }
-        }
-        Expression::StaticMemberExpression(member)
-            if matches!(member.object, Expression::ThisExpression(_)) =>
-        {
-            let name = member.property.name.as_str();
-            this_class(file, call.node_id.get())?
-                .body
-                .body
-                .iter()
-                .find_map(|element| match element {
-                    ClassElement::MethodDefinition(method)
-                        if !method.r#static
-                            && method.kind == MethodDefinitionKind::Method
-                            && method.value.body.is_some()
-                            && method.key.static_name().is_some_and(|key| key == name) =>
-                    {
-                        Some(nodes.get_node(method.value.node_id.get()))
-                    }
-                    ClassElement::PropertyDefinition(field)
-                        if !field.r#static
-                            && field.key.static_name().is_some_and(|key| key == name) =>
-                    {
-                        function_value(file, field.value.as_ref()?)
-                    }
-                    _ => None,
-                })
-        }
-        _ => None,
-    }
-}
-
-fn function_value<'a>(file: &File<'a>, value: &Expression<'a>) -> Option<&'a AstNode<'a>> {
-    let id = match value.get_inner_expression() {
-        Expression::ArrowFunctionExpression(arrow) => arrow.node_id.get(),
-        Expression::FunctionExpression(function) => function.node_id.get(),
-        _ => return None,
-    };
-    Some(file.semantic.nodes().get_node(id))
-}
-
-/// The class whose instance is `this` at the node: up through arrows to a non-static method or
-/// field. Any other function in between has its own `this`, also one inside a field's arrow.
-fn this_class<'a>(file: &File<'a>, node: NodeId) -> Option<&'a Class<'a>> {
-    let nodes = file.semantic.nodes();
-    for ancestor in nodes.ancestors(node) {
-        match ancestor.kind() {
-            AstKind::Function(_) => {
-                let is_member = match nodes.parent_kind(ancestor.id()) {
-                    AstKind::MethodDefinition(method) => !method.r#static,
-                    AstKind::PropertyDefinition(field) => !field.r#static,
-                    _ => false,
-                };
-                if !is_member {
-                    return None;
-                }
-            }
-            AstKind::MethodDefinition(method) if method.r#static => return None,
-            AstKind::PropertyDefinition(field) if field.r#static => return None,
-            AstKind::StaticBlock(_) => return None,
-            AstKind::Class(class) => return Some(class),
-            _ => {}
-        }
-    }
-    None
 }

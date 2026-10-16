@@ -275,13 +275,13 @@ pub(crate) fn is_identifier(name: &str) -> bool {
         && chars.all(|ch| ch.is_alphanumeric() || ch == '_' || ch == '$')
 }
 
+/// A file without `import` or `export` is a script: its top-level names are global to other
+/// files.
 pub fn is_script_global(file: &File<'_>, symbol: SymbolId) -> bool {
     let scoping = file.semantic.scoping();
     scoping.symbol_scope_id(symbol) == scoping.root_scope_id() && !is_module(file)
 }
 
-/// A file without `import` or `export` is a script: its top-level names are global to other
-/// files.
 pub(crate) fn is_module(file: &File<'_>) -> bool {
     file.semantic
         .nodes()

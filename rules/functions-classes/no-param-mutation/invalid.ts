@@ -44,3 +44,21 @@ export function merged(orders: Order[]): Order {
 export function keepAll(items: string[] | undefined, item: string): void {
   items?.push(item); // expect: no-param-mutation
 }
+
+export function lastTotal(order: Order, totals: number[]): void {
+  for (order.total of totals) { // expect: no-param-mutation
+    void totals;
+  }
+}
+
+export function swap(order: Order, pair: [number, string]): void {
+  [order.total, order.note] = pair; // expect: no-param-mutation
+}
+
+export function pick(order: Order, source: { note?: string }): void {
+  ({ note: order.note = '' } = source); // expect: no-param-mutation
+}
+
+export function forget(order?: Order): void {
+  delete order?.note; // expect: no-param-mutation
+}

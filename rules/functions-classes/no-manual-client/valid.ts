@@ -3,6 +3,8 @@ import { HttpClient } from './clients';
 
 declare function Injectable(): ClassDecorator;
 declare function Inject(token: string): ParameterDecorator;
+declare function UseInterceptors(...interceptors: object[]): MethodDecorator;
+declare class CacheClient {}
 declare class Logger {
   constructor(name: string);
   log(line: string): void;
@@ -25,6 +27,12 @@ export class OrderService {
 
   createClient(name: string): string {
     return `${name}:${this.http.timeoutMs}:${this.seen.size}`;
+  }
+
+  // The decorator runs once, when the class is defined.
+  @UseInterceptors(new CacheClient())
+  list(): string[] {
+    return [];
   }
 
   register(name: string): string {

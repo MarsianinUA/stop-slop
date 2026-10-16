@@ -82,3 +82,20 @@ export function step(key: string, keys: { up: string; down: string }): number {
   }
   return 0;
 }
+
+// A `let` may hold another object by the time the `switch` runs.
+let speeds = { fast: 'fast', slow: 'slow' };
+
+export function pace(speed: string): number {
+  switch (speed) {
+    case speeds.fast:
+      return 1;
+    case speeds.slow:
+      return 2;
+  }
+  return 0;
+}
+
+export function rename(): void {
+  speeds = { fast: 'quick', slow: 'calm' };
+}

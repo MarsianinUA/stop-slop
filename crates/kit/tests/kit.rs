@@ -1491,6 +1491,13 @@ fn add_import_merges_into_a_value_import_of_the_module() {
             &["HttpCode"],
             "import {\n  Controller,\n  Get,\n  HttpCode,\n} from '@nestjs/common';\nexport const x = [Controller, Get];\n",
         ),
+        // A `}` in a comment does not close the list.
+        (
+            "import {\n  monitorEventLoopDelay,\n  // see {@link x}\n} from 'node:perf_hooks';\nexport const x = monitorEventLoopDelay;\n",
+            "node:perf_hooks",
+            &["performance"],
+            "import {\n  monitorEventLoopDelay,\n  // see {@link x}\n  performance,\n} from 'node:perf_hooks';\nexport const x = monitorEventLoopDelay;\n",
+        ),
     ] {
         assert_eq!(
             imported(text, source, names).as_deref(),
@@ -1543,10 +1550,37 @@ fn add_import_puts_a_new_line_in_the_last_block_by_group() {
         ),
         // The block is `./tax` alone: `reflect-metadata` keeps its place.
         (
-            "import 'reflect-metadata';\nimport { tax } from './tax';\nexport const x = tax;\n",
+            "import 'reflect-metadata';\n\nimport { tax } from './tax';\nexport const x = tax;\n",
             "@nestjs/common",
             &["Injectable"],
-            "import 'reflect-metadata';\nimport { Injectable } from '@nestjs/common';\nimport { tax } from './tax';\nexport const x = tax;\n",
+            "import 'reflect-metadata';\n\nimport { Injectable } from '@nestjs/common';\nimport { tax } from './tax';\nexport const x = tax;\n",
+        ),
+        // `./metrics` right under `./telemetry` loads in that order: the block is `zod` alone.
+        (
+            "import './telemetry';\nimport { metrics } from './metrics';\n\nimport { z } from 'zod';\nexport const x = [metrics, z];\n",
+            "node:perf_hooks",
+            &["performance"],
+            "import './telemetry';\nimport { metrics } from './metrics';\n\nimport { performance } from 'node:perf_hooks';\nimport { z } from 'zod';\nexport const x = [metrics, z];\n",
+        ),
+        (
+            "// biome-ignore lint/style/useImportType: legacy\nimport { z } from 'zod';\nexport const x = z;\n",
+            "node:perf_hooks",
+            &["performance"],
+            "import { performance } from 'node:perf_hooks';\n// biome-ignore lint/style/useImportType: legacy\nimport { z } from 'zod';\nexport const x = z;\n",
+        ),
+        // A second list after the default would not parse.
+        (
+            "import ph, {} from 'node:perf_hooks';\nexport const x = ph;\n",
+            "node:perf_hooks",
+            &["performance"],
+            "import ph, {} from 'node:perf_hooks';\nimport { performance } from 'node:perf_hooks';\nexport const x = ph;\n",
+        ),
+        // The engine turns the `\n` of an edit into the file's line ending.
+        (
+            "import { z } from 'zod';\r\n\r\nimport { tax } from './tax';\r\nexport const x = [tax, z];\r\n",
+            "node:perf_hooks",
+            &["performance"],
+            "import { performance } from 'node:perf_hooks';\n\nimport { z } from 'zod';\r\n\r\nimport { tax } from './tax';\r\nexport const x = [tax, z];\r\n",
         ),
         (
             "// eslint-disable-next-line no-restricted-imports\nimport { z } from 'zod';\nexport const x = z;\n",
@@ -1582,6 +1616,12 @@ fn add_import_without_a_block_goes_after_the_imports_or_above_the_code() {
         (
             "import 'reflect-metadata';\n\nexport const a = 1;\n",
             "import 'reflect-metadata';\nimport { performance } from 'node:perf_hooks';\n\nexport const a = 1;\n",
+        ),
+        // `./tax` right under `reflect-metadata` keeps the load order, so the new module loads
+        // after both.
+        (
+            "import 'reflect-metadata';\nimport { tax } from './tax';\n\nexport const a = tax;\n",
+            "import 'reflect-metadata';\nimport { tax } from './tax';\nimport { performance } from 'node:perf_hooks';\n\nexport const a = tax;\n",
         ),
         // The doc comment stays with its function; the header stays on top.
         (
@@ -1633,4 +1673,368 @@ fn add_import_refuses_taken_names_and_scripts_and_skips_imported_ones() {
             "{name}"
         );
     }
+}
+
+/// The answers of `answer` for every function with a body, in source order.
+fn per_function(file: &File<'_>, answer: impl Fn(&AstNode<'_>) -> bool) -> Vec<bool> {
+    file.semantic
+        .nodes()
+        .iter()
+        .filter(|node| match node.kind() {
+            AstKind::ArrowFunctionExpression(_) => true,
+            AstKind::Function(function) => function.body.is_some(),
+            _ => false,
+        })
+        .map(answer)
+        .collect()
+}
+
+#[test]
+fn signature_is_given_through_branches_fallbacks_arrays_and_accessors() {
+    let text = "type Pick = (a: number, b: number) => number;
+interface Store { save(key: string): void }
+declare const flag: boolean;
+declare const custom: Pick | undefined;
+const one: Pick = flag ? (a, b) => a + b : (a, b) => a - b;
+const two: Pick = custom ?? ((a, b) => a * b);
+const three: Pick[] = [(a, b) => a / b];
+const free = flag ? (a: number) => a : (a: number) => -a;
+class Box implements Store {
+  accessor pick: Pick = (a, b) => a % b;
+  save(key: string): void { void key; }
+  private hide(key: string): void { void key; }
+}
+export { one, two, three, free, Box };";
+    with_file(text, |file| {
+        assert_eq!(
+            per_function(file, |node| is_signature_given(file, node)),
+            [true, true, true, true, false, false, true, true, false]
+        );
+    });
+}
+
+#[test]
+fn di_constructor_is_the_constructor_of_a_decorated_class() {
+    let text = "declare function Injectable(): ClassDecorator;
+@Injectable()
+export class A { constructor(x: number) { void x; } }
+export class B { constructor(x: number) { void x; } }";
+    with_file(text, |file| {
+        assert_eq!(
+            per_function(file, |node| is_di_constructor(file, node)),
+            [true, false]
+        );
+    });
+    let text = "export class C { a() {} private b() {} protected c() {} #d() {} }";
+    with_file(text, |file| {
+        let public: Vec<bool> = file
+            .semantic
+            .nodes()
+            .iter()
+            .filter_map(|node| match node.kind() {
+                AstKind::MethodDefinition(method) => {
+                    Some(is_public(method.accessibility, &method.key))
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(public, [true, false, false, false]);
+    });
+}
+
+#[test]
+fn local_callee_is_the_function_of_this_file_a_call_runs() {
+    let text = "function f() { return 1; }
+const g = () => 2;
+let h = () => 3;
+h = () => 4;
+declare function d(): number;
+export class K {
+  m() { return 5; }
+  n = () => 6;
+  static s() { return 7; }
+  static t(k: K) { return k.m(); }
+  run() {
+    function inner(this: K) { return this.m(); }
+    return [f(), g(), h(), d(), this.m(), this.n(), K.s(), (() => this.m())(), inner.call(this)];
+  }
+}";
+    with_file(text, |file| {
+        let callees: Vec<Option<&str>> = file
+            .semantic
+            .nodes()
+            .iter()
+            .filter_map(|node| match node.kind() {
+                AstKind::CallExpression(call) => Some(
+                    local_callee(file, call)
+                        .map(|callee| source(file, callee).lines().next().unwrap_or_default()),
+                ),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            callees,
+            [
+                // `k.m()` in a static method, `this.m()` in a function of its own.
+                None,
+                None,
+                Some("function f() { return 1; }"),
+                Some("() => 2"),
+                None,
+                None,
+                Some("() { return 5; }"),
+                Some("() => 6"),
+                None,
+                None,
+                Some("() { return 5; }"),
+                None,
+            ]
+        );
+    });
+}
+
+#[test]
+fn if_runs_are_the_tests_of_adjacent_ifs_and_their_else_ifs() {
+    let text = "export function f(a: number) {
+  if (a === 1) {} else if (a === 2) {}
+  if (a === 3) {}
+  const b = a;
+  if (b === 4) {} else { if (b === 5) {} }
+}";
+    with_file(text, |file| {
+        let body = file
+            .semantic
+            .nodes()
+            .iter()
+            .find(|node| matches!(node.kind(), AstKind::FunctionBody(_)))
+            .unwrap();
+        let runs: Vec<Vec<&str>> = if_runs(body.kind())
+            .map(|tests| tests.iter().map(|test| source(file, *test)).collect())
+            .collect();
+        assert_eq!(
+            runs,
+            [vec!["a === 1", "a === 2", "a === 3"], vec!["b === 4"]]
+        );
+    });
+}
+
+#[test]
+fn option_key_is_optional_in_the_visible_type_or_the_parameter_is_optional() {
+    let text = "interface Opts { retries?: number; label: string | null }
+export function f(a: Opts, b: Readonly<Opts>, c: Partial<{ x: number }>, g: Ext, d?: Ext, e: Ext = {}) {
+  return [a, b, c, g, d, e];
+}";
+    with_file(text, |file| {
+        let parameters: Vec<_> = file
+            .semantic
+            .nodes()
+            .iter()
+            .filter_map(|node| match node.kind() {
+                AstKind::FormalParameter(parameter) => Some(parameter),
+                _ => None,
+            })
+            .collect();
+        let keys: Vec<bool> = [
+            (0, "retries"),
+            (0, "label"),
+            (1, "retries"),
+            (2, "x"),
+            (3, "any"),
+            (4, "any"),
+            (5, "any"),
+        ]
+        .into_iter()
+        .map(|(index, key)| is_option_key(file, parameters[index], key))
+        .collect();
+        assert_eq!(keys, [true, false, true, true, false, true, true]);
+    });
+}
+
+#[test]
+fn member_write_and_mutator_call_find_what_changes_a_parameter() {
+    let text = "export function f(items: string[], o: { a: number; b?: string }, pair: [number, string], src: Record<string, number>) {
+  items.push('x');
+  items.map(String);
+  o.a = 1;
+  void o.a;
+  for (o.a of [1]) {}
+  [o.a, o.b] = pair;
+  ({ b: o.b = '' } = {});
+  ({ [o.b ?? '']: o.a } = src);
+  delete o?.b;
+}";
+    with_file(text, |file| {
+        let scoping = file.semantic.scoping();
+        let changes = |name: &str, find: &dyn Fn(kit::oxc::semantic::NodeId) -> Option<Span>| {
+            scoping
+                .get_resolved_references(symbol_named(file, name))
+                .map(|reference| find(reference.node_id()).map(|span| span.source_text(file.text)))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            changes("items", &|id| mutator_call(file, id)),
+            [Some("items.push('x')"), None]
+        );
+        assert_eq!(
+            changes("o", &|id| member_write(file, id)),
+            [
+                Some("o.a = 1"),
+                None,
+                Some("o.a"),
+                Some("[o.a, o.b] = pair"),
+                Some("[o.a, o.b] = pair"),
+                Some("{ b: o.b = '' } = {}"),
+                // The computed key is read.
+                None,
+                Some("{ [o.b ?? '']: o.a } = src"),
+                Some("delete o?.b"),
+            ]
+        );
+    });
+}
+
+#[test]
+fn import_blocks_leave_out_the_load_order_under_a_side_effect_import() {
+    let text = "import 'reflect-metadata';
+import { a } from './a';
+import { b } from './b';
+import { z } from 'zod';
+import './x';
+
+import { c } from './c';
+import type { T } from './t';
+export const k = 1;
+import { d } from 'node:fs';
+import './y';
+import type { U } from './u';
+import { e } from 'e';
+export const all = [a, b, z, c, d, e] as unknown as [T, U];";
+    let acme = acme_facts();
+    with_file(text, |file| {
+        let blocks: Vec<Vec<&str>> = import_blocks(file, &acme)
+            .iter()
+            .map(|block| {
+                block
+                    .iter()
+                    .map(|import| import.source.value.as_str())
+                    .collect()
+            })
+            .collect();
+        assert_eq!(
+            blocks,
+            [
+                vec!["zod"],
+                vec!["./c", "./t"],
+                vec!["node:fs"],
+                vec!["./u", "e"]
+            ]
+        );
+        let groups: Vec<u8> = ["node:fs", "fs", "zod", "@acme/db", "@/x", "./c"]
+            .into_iter()
+            .map(|source| import_group(file, &acme, source))
+            .collect();
+        assert_eq!(groups, [0, 0, 1, 2, 2, 3]);
+    });
+}
+
+#[test]
+fn module_source_package_name_and_own_kind() {
+    let text = "import a from 'a';
+export { b } from 'b';
+export * from 'c';
+const d = await import('d');
+type E = import('e').E;
+import f = require('f');
+const g = require('g');
+export const all = [a, d, f, g] as unknown as E;";
+    with_file(text, |file| {
+        let sources: Vec<&str> = file
+            .semantic
+            .nodes()
+            .iter()
+            .filter_map(|node| module_source(file, node.kind()))
+            .map(|source| source.value.as_str())
+            .collect();
+        assert_eq!(sources, ["a", "b", "c", "d", "e", "f", "g"]);
+    });
+    for (source, name) in [
+        ("@scope/name/sub", "@scope/name"),
+        ("name/sub", "name"),
+        ("name", "name"),
+    ] {
+        assert_eq!(package_name(source), name, "{source}");
+    }
+    for (kind, own) in [
+        (ImportKind::Node, false),
+        (ImportKind::External, false),
+        (ImportKind::Workspace, true),
+        (ImportKind::Alias, true),
+        (ImportKind::Relative, true),
+    ] {
+        assert_eq!(kind.is_own(), own, "{kind:?}");
+    }
+}
+
+#[test]
+fn line_helpers_find_line_starts_blank_lines_regions_and_line_tails() {
+    assert_eq!(line_start("ab\ncd", 4), 3);
+    assert_eq!(line_start("ab", 1), 0);
+    for (text, blank) in [
+        ("\n", false),
+        ("\n\n", true),
+        ("\r\n\r\n", true),
+        (" // note\n", false),
+        ("x\n  \ny", true),
+    ] {
+        assert_eq!(has_blank_line(text), blank, "{text:?}");
+    }
+    for (comment, region) in [
+        ("/* eslint-disable no-console */", true),
+        ("/* eslint-enable */", true),
+        ("// eslint-disable-next-line no-console", false),
+        ("// eslint-disable-line", false),
+        ("// oxlint-disable no-console", true),
+        ("// oxlint-disable-next-line no-console", false),
+        ("/* tslint:disable:max-line-length */", true),
+        ("// tslint:disable-next-line", false),
+        ("// tslint:enable-line", false),
+        ("// biome-ignore-start lint: legacy", true),
+        ("// biome-ignore-end lint: legacy", true),
+        ("// biome-ignore-all lint: generated", true),
+        ("// biome-ignore lint: legacy", false),
+        ("// #region output", true),
+        ("// a note", false),
+    ] {
+        assert_eq!(opens_region(comment), region, "{comment}");
+    }
+    for (text, tail) in [
+        ("a(); // note\nb();", Some((12, true))),
+        ("a() /* x */\nb();", Some((11, false))),
+        ("a(); b();", None),
+        ("a(); // biome-ignore lint/style: x\nb();", None),
+        ("a(); // @ts-expect-error\nb();", None),
+    ] {
+        with_file(text, |file| {
+            assert_eq!(line_tail(file, 3), tail, "{text}");
+        });
+    }
+}
+
+#[test]
+fn boolean_parameter_has_a_boolean_type_or_a_boolean_default() {
+    let text = "export function f(a: boolean, b: true | null, c: boolean[], d = false, e = 0, f?: string) {
+  return [a, b, c, d, e, f];
+}";
+    with_file(text, |file| {
+        let booleans: Vec<bool> = file
+            .semantic
+            .nodes()
+            .iter()
+            .filter_map(|node| match node.kind() {
+                AstKind::FormalParameter(parameter) => Some(is_boolean_parameter(parameter)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(booleans, [true, true, false, true, false, false]);
+    });
 }

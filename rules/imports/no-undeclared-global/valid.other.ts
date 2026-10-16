@@ -1,3 +1,4 @@
+// @dependency @types/node
 import { performance as clock } from 'node:perf_hooks';
 
 interface Timer {

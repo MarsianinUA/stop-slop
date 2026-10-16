@@ -6,24 +6,6 @@ use kit::prelude::*;
 #[serde(crate = "kit::serde", deny_unknown_fields)]
 pub struct Check {}
 
-/// Methods that change a `Map`, `Set`, `WeakMap`, `WeakSet` or array in place: the language's
-/// own, not a taste to configure.
-const MUTATORS: &[&str] = &[
-    "set",
-    "delete",
-    "clear",
-    "add",
-    "push",
-    "pop",
-    "shift",
-    "unshift",
-    "splice",
-    "sort",
-    "reverse",
-    "fill",
-    "copyWithin",
-];
-
 impl Rule for Check {
     fn on_file<'a>(&self, cx: &mut Cx<'_, 'a>) {
         let file = cx.file();
@@ -55,7 +37,7 @@ fn is_changed(file: &File<'_>, binding: &TopBinding<'_>) -> bool {
         .get_resolved_references(symbol)
         .any(|reference| {
             let id = reference.node_id();
-            (member_write(file, id).is_some() || container && is_mutator_call(file, id))
+            (member_write(file, id).is_some() || container && mutator_call(file, id).is_some())
                 && at_run_time(file, id)
         })
 }
@@ -80,25 +62,11 @@ fn at_run_time(file: &File<'_>, id: NodeId) -> bool {
         })
 }
 
-/// `cache.set(..)`, `queue.push(..)`: the reference is the receiver of a mutator call.
-fn is_mutator_call(file: &File<'_>, id: NodeId) -> bool {
-    let nodes = file.semantic.nodes();
-    let receiver = outer_assertion(file, nodes.get_node(id));
-    let AstKind::StaticMemberExpression(member) = nodes.parent_kind(receiver.id()) else {
-        return false;
-    };
-    MUTATORS.contains(&member.property.name.as_str())
-        && matches!(
-            nodes.parent_kind(nodes.parent_id(receiver.id())),
-            AstKind::CallExpression(call) if call.callee.span() == member.span
-        )
-}
-
 /// A new instance of a global collection class or an array literal: a value made to be filled.
 /// A plain object has no methods that change it in place: its `set` or `add` is the file's own.
 fn is_container(file: &File<'_>, init: &Expression<'_>) -> bool {
     match init.get_inner_expression() {
-        Expression::NewExpression(new) => ["Map", "Set", "WeakMap", "WeakSet", "Array"]
+        Expression::NewExpression(new) => COLLECTIONS
             .iter()
             .any(|name| is_global(file, new.callee.get_inner_expression(), name)),
         Expression::ArrayExpression(_) => true,

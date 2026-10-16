@@ -1,3 +1,4 @@
+// @dependency @types/node
 import { monitorEventLoopDelay } from 'node:perf_hooks';
 
 export function sample(): number {

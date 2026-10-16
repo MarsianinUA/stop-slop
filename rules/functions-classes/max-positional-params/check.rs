@@ -41,20 +41,14 @@ impl Rule for Check {
     }
 }
 
-/// A constructor that DI fills: the class has a decorator (`@Injectable()`), or a parameter is a
-/// property (`private readonly store: Store`) or has a decorator (`@Inject(TOKEN)`).
+/// A constructor that DI fills: the class has a decorator (`is_di_constructor`), or a parameter is
+/// a property (`private readonly store: Store`) or has a decorator (`@Inject(TOKEN)`).
 fn is_injected(file: &File<'_>, function: &AstNode<'_>, params: &FormalParameters<'_>) -> bool {
-    let nodes = file.semantic.nodes();
-    let method = nodes.parent_node(function.id());
-    matches!(method.kind(), AstKind::MethodDefinition(definition)
-        if definition.kind == MethodDefinitionKind::Constructor)
-        && (params
-            .items
-            .iter()
-            .any(|parameter| parameter.has_modifier() || !parameter.decorators.is_empty())
-            // method -> `ClassBody` -> `Class`.
-            || matches!(
-                nodes.parent_kind(nodes.parent_id(method.id())),
-                AstKind::Class(class) if !class.decorators.is_empty()
-            ))
+    is_di_constructor(file, function)
+        || matches!(file.semantic.nodes().parent_kind(function.id()),
+            AstKind::MethodDefinition(definition) if definition.kind == MethodDefinitionKind::Constructor)
+            && params
+                .items
+                .iter()
+                .any(|parameter| parameter.has_modifier() || !parameter.decorators.is_empty())
 }

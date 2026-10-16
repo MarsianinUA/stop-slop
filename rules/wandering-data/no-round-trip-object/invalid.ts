@@ -22,11 +22,21 @@ async function capped(order: Order): Promise<Order> {
   return order;
 }
 
-export async function settle(order: Order, coupon: string | null): Promise<Order> {
+function byKind(order: Order, kind: string): Order {
+  switch (kind) {
+    case 'gift':
+      return { ...order, total: 0 };
+    default:
+      return order;
+  }
+}
+
+export async function settle(order: Order, coupon: string | null, kind: string): Promise<Order> {
   order = withTotal(order, 0); // expect: no-round-trip-object
   order = withNote(order, coupon ?? ''); // expect: no-round-trip-object
   order = discount(order); // expect: no-round-trip-object
   order = await capped(order); // expect: no-round-trip-object
+  order = byKind(order, kind); // expect: no-round-trip-object
   return order;
 }
 

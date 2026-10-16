@@ -1,4 +1,5 @@
 // @alias @/*
+// @dependency @types/node
 import { readFile } from 'node:fs/promises';
 import { Injectable } from '@nestjs/common';
 

@@ -104,3 +104,19 @@ export class FieldStore implements Store {
     void [key, value, ttlMs];
   };
 }
+
+declare const descending: boolean;
+declare const custom: Compare | undefined;
+
+// The annotation types the function through a branch, a fallback or an array.
+export const pick: Compare = descending
+  ? (left, right, scale) => (right - left) * scale
+  : (left, right, scale) => (left - right) * scale;
+
+export const fallback: Compare = custom ?? ((left, right, scale) => (left - right) * scale);
+
+export const comparers: Compare[] = [(left, right, scale) => (left - right) * scale];
+
+export class Sorter {
+  accessor compare: Compare = (left, right, scale) => (left - right) * scale;
+}

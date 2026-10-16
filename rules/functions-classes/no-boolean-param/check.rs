@@ -1,6 +1,4 @@
-use kit::oxc::ast::ast::{
-    BindingPattern, Expression, FormalParameter, LogicalOperator, TSLiteral, TSType, UnaryOperator,
-};
+use kit::oxc::ast::ast::{BindingPattern, LogicalOperator, UnaryOperator};
 use kit::oxc::semantic::NodeId;
 use kit::prelude::*;
 
@@ -41,26 +39,6 @@ impl Rule for Check {
             }
         }
     }
-}
-
-/// Without a type, only a `true` / `false` default shows one.
-fn is_boolean_parameter(parameter: &FormalParameter<'_>) -> bool {
-    match &parameter.type_annotation {
-        Some(ty) => is_boolean_type(&ty.type_annotation),
-        None => matches!(
-            parameter.initializer.as_deref(),
-            Some(Expression::BooleanLiteral(_))
-        ),
-    }
-}
-
-/// `boolean`, `true`, `false`, or a union of them with `null` / `undefined`.
-fn is_boolean_type(ty: &TSType<'_>) -> bool {
-    is_nullable(ty, |ty| match ty {
-        TSType::TSBooleanKeyword(_) => true,
-        TSType::TSLiteralType(literal) => matches!(literal.literal, TSLiteral::BooleanLiteral(_)),
-        _ => false,
-    })
 }
 
 /// Through `!`, `&&`, `||` and type assertions the reference is the test of `if`, `?:` or a loop,

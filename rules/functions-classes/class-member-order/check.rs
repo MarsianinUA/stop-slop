@@ -203,18 +203,6 @@ fn reorder(file: &File<'_>, class: &Class<'_>) -> Option<Edit> {
     })
 }
 
-/// `eslint-disable` and `eslint-enable` bound the members between them, and `#region` and
-/// `#endregion` fold them; the `-line` and `-next-line` forms move with their member.
-fn opens_region(comment: &str) -> bool {
-    comment.contains("#region")
-        || comment.contains("#endregion")
-        || comment.contains("eslint-enable")
-        || comment
-            .split("eslint-disable")
-            .skip(1)
-            .any(|rest| !rest.starts_with("-line") && !rest.starts_with("-next-line"))
-}
-
 fn continues_expression(member: &str) -> bool {
     member.starts_with(['[', '*'])
         || ["in", "instanceof"].iter().any(|word| {

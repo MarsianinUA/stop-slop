@@ -45,3 +45,15 @@ export function notes(status: Status, chain: Chain, shape?: Shape): string[] {
   }
   return lines;
 }
+
+const Mode = { Fast: 'fast', Slow: 'slow' } as const;
+type Mode = (typeof Mode)[keyof typeof Mode];
+
+export function delay(mode: Mode): number {
+  switch (mode) { // expect: exhaustive-switch
+    case Mode.Fast:
+      return 10;
+    case Mode.Slow:
+      return 100;
+  }
+}

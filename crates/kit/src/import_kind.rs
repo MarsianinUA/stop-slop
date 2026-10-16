@@ -1,3 +1,6 @@
+use oxc_ast::AstKind;
+use oxc_ast::ast::{Argument, Expression, StringLiteral};
+
 use crate::{Facts, File};
 
 /// Where an import specifier points.
@@ -12,6 +15,16 @@ pub enum ImportKind {
     Alias,
     /// `./x`, `../x`, `.`, `..`, `/x`.
     Relative,
+}
+
+impl ImportKind {
+    /// A module of this project: a relative path, an alias or a workspace package.
+    pub fn is_own(self) -> bool {
+        matches!(
+            self,
+            ImportKind::Relative | ImportKind::Alias | ImportKind::Workspace
+        )
+    }
 }
 
 // `require('module').builtinModules` of Node 24.13.1, without the four that exist only with
@@ -120,13 +133,39 @@ pub fn import_kind(file: &File<'_>, facts: &dyn Facts, source: &str) -> ImportKi
 }
 
 /// `@scope/name/sub` -> `@scope/name`, `name/sub` -> `name`.
-fn package_name(source: &str) -> &str {
+pub fn package_name(source: &str) -> &str {
     let end = if source.starts_with('@') {
         source.match_indices('/').nth(1)
     } else {
         source.match_indices('/').next()
     };
     end.map_or(source, |(at, _)| &source[..at])
+}
+
+/// The literal that names the module of an import, a re-export, `import('x')`, `import('x').T`,
+/// `import x = require('x')` or a call of the global `require('x')`; its span takes the quotes.
+pub fn module_source<'a>(file: &File<'a>, kind: AstKind<'a>) -> Option<&'a StringLiteral<'a>> {
+    match kind {
+        AstKind::ImportDeclaration(import) => Some(&import.source),
+        AstKind::ExportFromDeclaration(export) => Some(&export.source),
+        AstKind::ExportAllDeclaration(export) => Some(&export.source),
+        AstKind::ImportExpression(import) => match &import.source {
+            Expression::StringLiteral(source) => Some(source),
+            _ => None,
+        },
+        AstKind::TSImportType(import) => Some(&import.source),
+        AstKind::TSExternalModuleReference(reference) => Some(&reference.expression),
+        AstKind::CallExpression(call) => match (&call.callee, call.arguments.as_slice()) {
+            (Expression::Identifier(callee), [Argument::StringLiteral(source)])
+                if callee.name == "require"
+                    && file.semantic.is_reference_to_global_variable(callee) =>
+            {
+                Some(source)
+            }
+            _ => None,
+        },
+        _ => None,
+    }
 }
 
 /// A lone `*` is the fallback tsconfig gives every package, so it matches nothing: else any npm

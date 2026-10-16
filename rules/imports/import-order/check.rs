@@ -1,4 +1,4 @@
-use kit::oxc::ast::ast::{ImportDeclaration, Statement};
+use kit::oxc::ast::ast::ImportDeclaration;
 use kit::prelude::*;
 
 #[derive(Deserialize)]
@@ -14,17 +14,10 @@ impl Rule for Check {
 
     fn on_file<'a>(&self, cx: &mut Cx<'_, 'a>) {
         let file = cx.file();
-        let program = file.semantic.nodes().program();
-        let runs = program
-            .body
-            .chunk_by(|a, b| with_bindings(a).is_some() && with_bindings(b).is_some());
-        for run in runs {
-            let Some(block) = run.iter().map(with_bindings).collect::<Option<Vec<_>>>() else {
-                continue;
-            };
+        for block in import_blocks(file, cx.facts()) {
             let groups: Vec<u8> = block
                 .iter()
-                .map(|import| group(import_kind(file, cx.facts(), &import.source.value)))
+                .map(|import| import_group(file, cx.facts(), &import.source.value))
                 .collect();
             if groups.is_sorted() {
                 continue;
@@ -65,40 +58,12 @@ impl Rule for Check {
     }
 }
 
-/// Same groups as `kit::add_import`.
-fn group(kind: ImportKind) -> u8 {
-    match kind {
-        ImportKind::Node => 0,
-        ImportKind::External => 1,
-        ImportKind::Workspace | ImportKind::Alias => 2,
-        ImportKind::Relative => 3,
-    }
-}
-
 fn group_name(group: u8) -> &'static str {
     match group {
         0 => "a Node built-in",
         1 => "an external package",
         2 => "a workspace package or alias",
         _ => "a relative path",
-    }
-}
-
-/// An import this rule sorts, as in `kit::add_import`. `import 'x'`, `import {} from 'x'` and
-/// `import defer` / `import source` load a module for its effect where they stand, so they keep
-/// their place and end a block.
-fn with_bindings<'a>(statement: &'a Statement<'a>) -> Option<&'a ImportDeclaration<'a>> {
-    match statement {
-        Statement::ImportDeclaration(import)
-            if import.phase.is_none()
-                && import
-                    .specifiers
-                    .as_ref()
-                    .is_some_and(|list| !list.is_empty()) =>
-        {
-            Some(import)
-        }
-        _ => None,
     }
 }
 
@@ -188,28 +153,8 @@ fn has_comment_above(file: &File<'_>, start: u32) -> bool {
         .next_back()
         .is_some_and(|comment| {
             let between = &text[comment.span.end as usize..start as usize];
-            let line = &text[..comment.span.start as usize];
-            let before = &line[line.rfind('\n').map_or(0, |index| index + 1)..];
+            let before =
+                &text[line_start(text, comment.span.start) as usize..comment.span.start as usize];
             between.trim().is_empty() && !has_blank_line(between) && before.trim().is_empty()
         })
-}
-
-/// `eslint-disable` and `eslint-enable` bound the imports between them, and `#region` and
-/// `#endregion` fold them; the `-line` and `-next-line` forms move with their import.
-fn opens_region(comment: &str) -> bool {
-    comment.contains("#region")
-        || comment.contains("#endregion")
-        || comment.contains("eslint-enable")
-        || comment
-            .split("eslint-disable")
-            .skip(1)
-            .any(|rest| !rest.starts_with("-line") && !rest.starts_with("-next-line"))
-}
-
-/// A line of `text` other than its first and last holds only spaces.
-fn has_blank_line(text: &str) -> bool {
-    let mut lines = text.split('\n');
-    lines.next();
-    lines.next_back();
-    lines.any(|line| line.trim().is_empty())
 }

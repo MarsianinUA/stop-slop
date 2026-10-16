@@ -1,6 +1,4 @@
-use kit::oxc::ast::ast::{
-    BindingPattern, Expression, FormalParameter, LogicalOperator, TSSignature, TSType, TSTypeName,
-};
+use kit::oxc::ast::ast::{BindingPattern, Expression, FormalParameter, LogicalOperator};
 use kit::prelude::*;
 
 #[derive(Deserialize)]
@@ -89,59 +87,6 @@ fn parameter<'a>(
     // parameter -> `FormalParameters` -> function.
     let function = nodes.parent_node(nodes.parent_id(declaration));
     (!is_callback(file, function)).then_some((binding.name.as_str(), parameter))
-}
-
-/// `Partial<..>` from lib, or `key?:` in the parameter's type literal or in the interface or type
-/// literal alias of this file it names; `key: T | null` is data, whose `?? 0` handles `null`.
-/// Where the type does not show the key (imported, not annotated, no such member), only an
-/// optional parameter (`options?: X`, `options: X = {}`) reads as options.
-fn is_option_key<'a>(file: &File<'a>, parameter: &'a FormalParameter<'a>, key: &str) -> bool {
-    let ty = parameter
-        .type_annotation
-        .as_ref()
-        .map(|annotation| &annotation.type_annotation);
-    if ty.is_some_and(|ty| lib_type(file, ty, "Partial").is_some()) {
-        return true;
-    }
-    ty.and_then(|ty| members(file, ty))
-        .and_then(|members| {
-            members.iter().find_map(|member| match member {
-                TSSignature::TSPropertySignature(property)
-                    if property.key.static_name().is_some_and(|name| name == key) =>
-                {
-                    Some(property.optional)
-                }
-                _ => None,
-            })
-        })
-        .unwrap_or(parameter.optional || parameter.initializer.is_some())
-}
-
-fn members<'a>(file: &File<'a>, ty: &'a TSType<'a>) -> Option<&'a [TSSignature<'a>]> {
-    let TSType::TSTypeReference(reference) = ty else {
-        return literal_members(ty);
-    };
-    let TSTypeName::IdentifierReference(id) = &reference.type_name else {
-        return None;
-    };
-    let scoping = file.semantic.scoping();
-    let symbol = scoping.get_reference(id.reference_id()).symbol_id()?;
-    match file
-        .semantic
-        .nodes()
-        .kind(scoping.symbol_declaration(symbol))
-    {
-        AstKind::TSInterfaceDeclaration(interface) => Some(&interface.body.body),
-        AstKind::TSTypeAliasDeclaration(alias) => literal_members(&alias.type_annotation),
-        _ => None,
-    }
-}
-
-fn literal_members<'a>(ty: &'a TSType<'a>) -> Option<&'a [TSSignature<'a>]> {
-    match ty {
-        TSType::TSTypeLiteral(literal) => Some(&literal.members),
-        _ => None,
-    }
 }
 
 /// `options ?? {}` or `options || {}` -> `options`.

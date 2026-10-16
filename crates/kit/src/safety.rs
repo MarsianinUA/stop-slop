@@ -1,7 +1,7 @@
 use oxc_ast::Comment;
 use oxc_span::Span;
 
-use crate::File;
+use crate::{File, line_start};
 
 /// True when a `// SAFETY: <reason>` comment explains the code at `span`: a comment that starts
 /// on the line where `span` ends, or one in the block of own-line comments right above the line
@@ -53,10 +53,4 @@ pub fn has_safety_comment(file: &File<'_>, span: Span) -> bool {
         }
         below = own_line;
     }
-}
-
-fn line_start(text: &str, offset: u32) -> u32 {
-    text[..offset as usize]
-        .rfind('\n')
-        .map_or(0, |at| at as u32 + 1)
 }

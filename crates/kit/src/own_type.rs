@@ -1,7 +1,7 @@
 use oxc_ast::AstKind;
 use oxc_ast::ast::{TSModuleReference, TSType, TSTypeName};
 
-use crate::{Facts, File, ImportKind, import_kind};
+use crate::{Facts, File, import_kind};
 
 /// A type of this project: a reference whose name the file declares (not a type parameter) or
 /// imports from a relative path, a tsconfig alias or a workspace package; also `Own['key']`,
@@ -11,7 +11,7 @@ pub fn is_own_type(file: &File<'_>, facts: &dyn Facts, ty: &TSType<'_>) -> bool 
     match ty {
         TSType::TSTypeReference(reference) => is_own_name(file, facts, &reference.type_name),
         TSType::TSIndexedAccessType(access) => is_own_type(file, facts, &access.object_type),
-        TSType::TSImportType(import) => is_own_import(file, facts, &import.source.value),
+        TSType::TSImportType(import) => import_kind(file, facts, &import.source.value).is_own(),
         TSType::TSUnionType(union) => union.types.iter().any(|t| is_own_type(file, facts, t)),
         TSType::TSIntersectionType(intersection) => intersection
             .types
@@ -40,23 +40,18 @@ fn is_own_name(file: &File<'_>, facts: &dyn Facts, name: &TSTypeName<'_>) -> boo
         AstKind::ImportSpecifier(_)
         | AstKind::ImportDefaultSpecifier(_)
         | AstKind::ImportNamespaceSpecifier(_) => match nodes.parent_kind(declaration) {
-            AstKind::ImportDeclaration(import) => is_own_import(file, facts, &import.source.value),
+            AstKind::ImportDeclaration(import) => {
+                import_kind(file, facts, &import.source.value).is_own()
+            }
             _ => false,
         },
         AstKind::TSImportEqualsDeclaration(equals) => match &equals.module_reference {
             TSModuleReference::ExternalModuleReference(reference) => {
-                is_own_import(file, facts, &reference.expression.value)
+                import_kind(file, facts, &reference.expression.value).is_own()
             }
             // `import A = N.B` counts as own even when `N` comes from a package: a rare form.
             _ => true,
         },
         _ => true,
     }
-}
-
-fn is_own_import(file: &File<'_>, facts: &dyn Facts, source: &str) -> bool {
-    matches!(
-        import_kind(file, facts, source),
-        ImportKind::Relative | ImportKind::Alias | ImportKind::Workspace
-    )
 }

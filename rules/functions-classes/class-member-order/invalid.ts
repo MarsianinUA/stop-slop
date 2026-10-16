@@ -100,6 +100,16 @@ export class Report {
   title = 'report'; // expect: class-member-order
 }
 
+export class Archive {
+  // biome-ignore-start lint/suspicious/noConsole: legacy output
+  render(): string {
+    return this.label;
+  }
+  // biome-ignore-end lint/suspicious/noConsole: legacy output
+
+  label = 'archive'; // expect: class-member-order
+}
+
 export class Draft { // eslint-disable-next-line class-methods-use-this
   render(): string {
     return this.body;

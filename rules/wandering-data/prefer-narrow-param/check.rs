@@ -1,8 +1,6 @@
 use std::borrow::Cow;
 
-use kit::oxc::ast::ast::{
-    BindingPattern, FormalParameter, MethodDefinitionKind, TSSignature, TSType, TSTypeName,
-};
+use kit::oxc::ast::ast::{BindingPattern, TSType};
 use kit::oxc::semantic::{NodeId, SymbolId};
 use kit::prelude::*;
 
@@ -121,70 +119,4 @@ fn fields_read<'a>(file: &File<'a>, reference: NodeId) -> Option<Vec<Cow<'a, str
         .iter()
         .map(|property| property.key.static_name())
         .collect()
-}
-
-/// The constructor of a decorated class (`@Injectable()`): DI fills its parameters.
-fn is_di_constructor(file: &File<'_>, function: &AstNode<'_>) -> bool {
-    let nodes = file.semantic.nodes();
-    let method = nodes.parent_node(function.id());
-    matches!(method.kind(), AstKind::MethodDefinition(definition)
-        if definition.kind == MethodDefinitionKind::Constructor)
-        // method -> `ClassBody` -> `Class`.
-        && matches!(
-            nodes.parent_kind(nodes.parent_id(method.id())),
-            AstKind::Class(class) if !class.decorators.is_empty()
-        )
-}
-
-/// `Partial<..>` from lib, or `key?:` in the parameter's type literal or in the interface or type
-/// literal alias of this file it names. Where the type does not show the key, only an optional
-/// parameter (`options?: X`, `options: X = {}`) reads as options.
-fn is_option_key<'a>(file: &File<'a>, parameter: &'a FormalParameter<'a>, key: &str) -> bool {
-    let ty = parameter
-        .type_annotation
-        .as_ref()
-        .map(|annotation| &annotation.type_annotation);
-    if ty.is_some_and(|ty| lib_type(file, ty, "Partial").is_some()) {
-        return true;
-    }
-    // Through `Readonly<..>`, as the rule sees the parameter's type.
-    ty.and_then(|ty| members(file, unwrapped_type(file, ty)))
-        .and_then(|members| {
-            members.iter().find_map(|member| match member {
-                TSSignature::TSPropertySignature(property)
-                    if property.key.static_name().is_some_and(|name| name == key) =>
-                {
-                    Some(property.optional)
-                }
-                _ => None,
-            })
-        })
-        .unwrap_or(parameter.optional || parameter.initializer.is_some())
-}
-
-fn members<'a>(file: &File<'a>, ty: &'a TSType<'a>) -> Option<&'a [TSSignature<'a>]> {
-    let TSType::TSTypeReference(reference) = ty else {
-        return literal_members(ty);
-    };
-    let TSTypeName::IdentifierReference(id) = &reference.type_name else {
-        return None;
-    };
-    let scoping = file.semantic.scoping();
-    let symbol = scoping.get_reference(id.reference_id()).symbol_id()?;
-    match file
-        .semantic
-        .nodes()
-        .kind(scoping.symbol_declaration(symbol))
-    {
-        AstKind::TSInterfaceDeclaration(interface) => Some(&interface.body.body),
-        AstKind::TSTypeAliasDeclaration(alias) => literal_members(&alias.type_annotation),
-        _ => None,
-    }
-}
-
-fn literal_members<'a>(ty: &'a TSType<'a>) -> Option<&'a [TSSignature<'a>]> {
-    match ty {
-        TSType::TSTypeLiteral(literal) => Some(&literal.members),
-        _ => None,
-    }
 }

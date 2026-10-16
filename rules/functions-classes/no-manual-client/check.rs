@@ -75,18 +75,19 @@ fn ends_with_word(list: &[String], name: &str) -> bool {
         .is_some_and(|word| list.iter().any(|item| item.eq_ignore_ascii_case(word)))
 }
 
-/// The class whose non-static member holds the node. A static member is a factory; code outside
-/// a member (a function of the file, a decorator of the class) is not the class's.
+/// The class whose non-static member holds the node. A static member is a factory; a decorator,
+/// of the class or of a member, runs once when the class is defined; code outside a member (a
+/// function of the file) is not the class's.
 fn owner_class<'a>(file: &File<'a>, node: &AstNode<'a>) -> Option<&'a Class<'a>> {
     let mut ancestors = file.semantic.nodes().ancestor_kinds(node.id());
-    let is_static = ancestors.find_map(|kind| match kind {
-        AstKind::MethodDefinition(member) => Some(member.r#static),
-        AstKind::PropertyDefinition(member) => Some(member.r#static),
-        AstKind::AccessorProperty(member) => Some(member.r#static),
-        AstKind::StaticBlock(_) => Some(true),
+    let per_instance = ancestors.find_map(|kind| match kind {
+        AstKind::MethodDefinition(member) => Some(!member.r#static),
+        AstKind::PropertyDefinition(member) => Some(!member.r#static),
+        AstKind::AccessorProperty(member) => Some(!member.r#static),
+        AstKind::StaticBlock(_) | AstKind::Decorator(_) => Some(false),
         _ => None,
     })?;
-    if is_static {
+    if !per_instance {
         return None;
     }
     ancestors.find_map(|kind| match kind {

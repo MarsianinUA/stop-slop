@@ -42,3 +42,8 @@ export function backoff(attempt: number, options?: { baseMs?: number }): number 
   const { baseMs = 100 } = options ?? {}; // expect: options-defaults-in-signature
   return baseMs * 2 ** attempt;
 }
+
+export function poll(task: () => void, options: Readonly<RetryOptions>): number {
+  task();
+  return options.delayMs ?? 500; // expect: options-defaults-in-signature
+}

@@ -50,3 +50,33 @@ export class Basket {
     return this.order;
   }
 }
+
+// Each may run off its end, and then the result is `undefined`.
+function firstPaid(order: Order | void, totals: number[]): Order | void {
+  for (const total of totals) {
+    return { id: 'paid', ...order, total };
+  }
+}
+
+function positive(order: Order | void, total: number): Order | void {
+  if (total > 0) {
+    return { id: 'positive', ...order, total };
+  }
+}
+
+function gift(order: Order | void, kind: string): Order | void {
+  switch (kind) {
+    case 'gift':
+      return { id: 'gift', ...order, total: 0 };
+    default:
+      break;
+  }
+}
+
+export function settle(order: Order, totals: number[], kind: string): Order | void {
+  let current: Order | void = order;
+  current = firstPaid(current, totals);
+  current = positive(current, totals.length);
+  current = gift(current, kind);
+  return current;
+}

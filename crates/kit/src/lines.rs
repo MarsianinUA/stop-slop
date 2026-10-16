@@ -68,7 +68,7 @@ impl LineIndex {
 /// The end of the spaces, `;` and comments after `at` on its line, and whether a `;` is among
 /// them; `None` when other code follows there, not a line break, the end of the text or a `}`
 /// that closes the block, or when a comment there speaks of the next line
-/// (`// @ts-expect-error`), which would lose its node.
+/// (`// @ts-expect-error`, `speaks_of_next_line`), which would lose its node.
 pub fn line_tail(file: &File<'_>, mut at: u32) -> Option<(u32, bool)> {
     let text = file.text;
     let comments = file.semantic.comments();
@@ -83,10 +83,7 @@ pub fn line_tail(file: &File<'_>, mut at: u32) -> Option<(u32, bool)> {
         } else if let Ok(index) = comments.binary_search_by_key(&next, |comment| comment.span.start)
         {
             let comment = comments[index].span;
-            if ["-next-line", "@ts-expect-error", "@ts-ignore"]
-                .iter()
-                .any(|directive| comment.source_text(text).contains(directive))
-            {
+            if speaks_of_next_line(comment.source_text(text)) {
                 return None;
             }
             at = comment.end;
@@ -96,4 +93,62 @@ pub fn line_tail(file: &File<'_>, mut at: u32) -> Option<(u32, bool)> {
             return None;
         }
     }
+}
+
+/// A directive about the line or node under the comment: `eslint-disable-next-line` and the like,
+/// `@ts-expect-error`, `@ts-ignore`, `biome-ignore <rule>: ..`.
+pub(crate) fn speaks_of_next_line(comment: &str) -> bool {
+    [
+        "-next-line",
+        "@ts-expect-error",
+        "@ts-ignore",
+        "biome-ignore ",
+    ]
+    .iter()
+    .any(|directive| comment.contains(directive))
+}
+
+/// A comment whose place decides what it covers beyond its own line and the next: a lint range
+/// (`eslint-disable` / `eslint-enable`, the same of oxlint and tslint, `biome-ignore-start` /
+/// `-end`), a file-wide `biome-ignore-all`, or a `#region` / `#endregion` fold. Code moved across
+/// it changes sides; the `-line` and `-next-line` forms move with their code.
+pub fn opens_region(comment: &str) -> bool {
+    let ranges = [
+        "eslint-disable",
+        "eslint-enable",
+        "oxlint-disable",
+        "oxlint-enable",
+        "tslint:disable",
+        "tslint:enable",
+    ];
+    [
+        "#region",
+        "#endregion",
+        "biome-ignore-start",
+        "biome-ignore-end",
+        "biome-ignore-all",
+    ]
+    .iter()
+    .any(|marker| comment.contains(marker))
+        || ranges.iter().any(|directive| {
+            comment
+                .split(directive)
+                .skip(1)
+                .any(|rest| !rest.starts_with("-line") && !rest.starts_with("-next-line"))
+        })
+}
+
+pub fn line_start(text: &str, at: u32) -> u32 {
+    text[..at as usize]
+        .rfind('\n')
+        .map_or(0, |index| index as u32 + 1)
+}
+
+/// A line of `text` other than its first and last holds only spaces: `text` is the stretch
+/// between two pieces of code, so its first and last lines belong to them.
+pub fn has_blank_line(text: &str) -> bool {
+    let mut lines = text.split('\n');
+    lines.next();
+    lines.next_back();
+    lines.any(|line| line.trim().is_empty())
 }

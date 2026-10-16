@@ -18,10 +18,15 @@ import './polyfill';
 import { parse } from './parse';
 export { format } from './format';
 import { Module } from '@nestjs/common';
+import './telemetry';
+import { metrics } from './metrics';
+import { trace } from './trace';
+
+import { Injectable } from '@nestjs/common';
 
 export class Orders extends EventEmitter {
   describe(row: Row, clock: Clock, stats: Stats): string {
-    void [readFile, fs, Module];
+    void [readFile, fs, Module, metrics, trace, Injectable];
     return money(tax(round(row.total))) + clock.now() + stats.size + parse(z.string().parse(row.id));
   }
 

@@ -1,7 +1,6 @@
 use kit::oxc::ast::ast::{
     ClassBody, ClassElement, Expression, FormalParameters, Function, MethodDefinition,
-    MethodDefinitionKind, PropertyDefinition, PropertyKey, TSAccessibility, TSTypeAnnotation,
-    UnaryOperator,
+    MethodDefinitionKind, PropertyDefinition, TSTypeAnnotation, UnaryOperator,
 };
 use kit::prelude::*;
 
@@ -168,13 +167,6 @@ fn field_signature<'a>(
         return_type,
         needs_return: true,
     })
-}
-
-fn is_public(accessibility: Option<TSAccessibility>, key: &PropertyKey<'_>) -> bool {
-    !matches!(
-        accessibility,
-        Some(TSAccessibility::Private | TSAccessibility::Protected)
-    ) && !key.is_private_identifier()
 }
 
 /// The class of a class member: member -> `ClassBody` -> `Class`.

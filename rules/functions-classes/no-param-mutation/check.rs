@@ -6,24 +6,6 @@ use kit::prelude::*;
 #[serde(crate = "kit::serde", deny_unknown_fields)]
 pub struct Check {}
 
-/// Methods that change a `Map`, `Set`, `WeakMap`, `WeakSet` or array in place: the language's
-/// own, not a taste to configure.
-const MUTATORS: &[&str] = &[
-    "set",
-    "delete",
-    "clear",
-    "add",
-    "push",
-    "pop",
-    "shift",
-    "unshift",
-    "splice",
-    "sort",
-    "reverse",
-    "fill",
-    "copyWithin",
-];
-
 impl Rule for Check {
     const NODES: &'static [AstType] = &[AstType::Function, AstType::ArrowFunctionExpression];
 
@@ -108,7 +90,8 @@ fn is_reduce_callback(file: &File<'_>, function: &AstNode<'_>) -> bool {
 }
 
 /// The parameter's own annotation is an array, a tuple or a lib `Array`, `Map`, `Set`, `WeakMap`
-/// or `WeakSet`, also with `null` / `undefined` (`string[] | undefined`). Another type's `add` or `set` (`queue.add(job)`) may not change anything.
+/// or `WeakSet`, also with `null` / `undefined` (`string[] | undefined`). Another type's `add` or
+/// `set` (`queue.add(job)`) may not change anything.
 fn is_collection(file: &File<'_>, parameter: &FormalParameter<'_>) -> bool {
     let BindingPattern::BindingIdentifier(_) = parameter.pattern else {
         return false;
@@ -119,7 +102,7 @@ fn is_collection(file: &File<'_>, parameter: &FormalParameter<'_>) -> bool {
     is_nullable(&annotation.type_annotation, |ty| {
         let ty = unwrapped_type(file, ty);
         matches!(ty, TSType::TSArrayType(_) | TSType::TSTupleType(_))
-            || ["Array", "Map", "Set", "WeakMap", "WeakSet"]
+            || COLLECTIONS
                 .into_iter()
                 .any(|name| lib_type(file, ty, name).is_some())
     })
@@ -143,22 +126,4 @@ fn assign_target(file: &File<'_>, id: NodeId) -> Option<Span> {
         Expression::StaticMemberExpression(member)
             if member.property.name == "assign" && is_global(file, &member.object, "Object"))
     .then_some(call.span)
-}
-
-/// The call when the reference is the receiver of a mutator: `items.push(..)`, `seen.add(..)`.
-fn mutator_call(file: &File<'_>, id: NodeId) -> Option<Span> {
-    let nodes = file.semantic.nodes();
-    let receiver = outer_assertion(file, nodes.get_node(id));
-    let AstKind::StaticMemberExpression(member) = nodes.parent_kind(receiver.id()) else {
-        return None;
-    };
-    match nodes.parent_kind(nodes.parent_id(receiver.id())) {
-        AstKind::CallExpression(call)
-            if call.callee.span() == member.span
-                && MUTATORS.contains(&member.property.name.as_str()) =>
-        {
-            Some(call.span)
-        }
-        _ => None,
-    }
 }

@@ -1,8 +1,7 @@
 use std::collections::HashSet;
 
 use kit::oxc::ast::ast::{
-    BindingPattern, Expression, FormalParameter, MethodDefinitionKind, TSLiteral, TSType,
-    TSTypeAnnotation, UnaryOperator,
+    BindingPattern, Expression, MethodDefinitionKind, TSType, TSTypeAnnotation, UnaryOperator,
 };
 use kit::oxc::semantic::{SymbolFlags, SymbolId};
 use kit::prelude::*;
@@ -174,26 +173,6 @@ fn is_boolean_member(file: &File<'_>, node: &AstNode<'_>) -> bool {
         }
         _ => false,
     }
-}
-
-/// Without a type, only a `true` / `false` default shows one.
-fn is_boolean_parameter(parameter: &FormalParameter<'_>) -> bool {
-    match &parameter.type_annotation {
-        Some(ty) => is_boolean_type(&ty.type_annotation),
-        None => matches!(
-            parameter.initializer.as_deref(),
-            Some(Expression::BooleanLiteral(_))
-        ),
-    }
-}
-
-/// `boolean`, `true`, `false`, or a union of them with `null` / `undefined`.
-fn is_boolean_type(ty: &TSType<'_>) -> bool {
-    is_nullable(ty, |ty| match ty {
-        TSType::TSBooleanKeyword(_) => true,
-        TSType::TSLiteralType(literal) => matches!(literal.literal, TSLiteral::BooleanLiteral(_)),
-        _ => false,
-    })
 }
 
 /// Only what the syntax shows: a call other than `Boolean(x)` and a few global `is*` checks

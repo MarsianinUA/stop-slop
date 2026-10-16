@@ -3,11 +3,12 @@ use oxc_ast::ast::{ImportDeclaration, ImportDeclarationSpecifier, Statement};
 use oxc_semantic::SymbolId;
 use oxc_span::{GetSpan, Span};
 
+use crate::lines::speaks_of_next_line;
 use crate::rename::{RESERVED, is_identifier, is_module};
-use crate::{Edit, Facts, File, ImportKind, import_kind, line_tail};
-
-/// A comment with one of these speaks of the line under it.
-const NEXT_LINE: [&str; 3] = ["-next-line", "@ts-expect-error", "@ts-ignore"];
+use crate::{
+    Edit, Facts, File, ImportKind, has_blank_line, import_blocks, import_group, import_kind,
+    line_start, line_tail,
+};
 
 /// TypeScript reads these only in the comments before the first statement.
 const FILE_PRAGMAS: [&str; 5] = ["<reference", "<amd-", "@ts-nocheck", "@ts-check", "@jsx"];
@@ -96,8 +97,9 @@ fn merged(file: &File<'_>, facts: &dyn Facts, source: &str, names: &[&str]) -> O
                 ImportDeclarationSpecifier::ImportSpecifier(specifier) => Some(specifier.span),
                 _ => None,
             });
+        let from = import.source.span.start;
         if let Some(last) = last_named {
-            let close = last.end + text[last.end as usize..].find('}')? as u32;
+            let close = outside_comments(file, last.end, from, '}')?;
             if !text[last.end as usize..close as usize].contains('\n') {
                 return Some(vec![Edit {
                     span: Span::empty(last.end),
@@ -109,11 +111,29 @@ fn merged(file: &File<'_>, facts: &dyn Facts, source: &str, names: &[&str]) -> O
         let [ImportDeclarationSpecifier::ImportDefaultSpecifier(default)] = specifiers else {
             return None;
         };
+        // `import ph, {} from`: a second list after it would not parse.
+        if outside_comments(file, default.span.end, from, '{').is_some() {
+            return None;
+        }
         Some(vec![Edit {
             span: Span::empty(default.span.end),
             text: format!(", {{ {} }}", names.join(", ")),
         }])
     })
+}
+
+/// The first `ch` in `from..to` that is not inside a comment: `import { a, // see {@link b}`.
+fn outside_comments(file: &File<'_>, from: u32, to: u32, ch: char) -> Option<u32> {
+    let mut at = from;
+    for comment in file.semantic.comments_range(from..to) {
+        if let Some(index) = file.text[at as usize..comment.span.start as usize].find(ch) {
+            return Some(at + index as u32);
+        }
+        at = comment.span.end;
+    }
+    file.text[at as usize..to as usize]
+        .find(ch)
+        .map(|index| at + index as u32)
 }
 
 /// The names as lines of a list with one specifier a line, above its `}` with the indent of the
@@ -155,13 +175,13 @@ fn merged_lines(file: &File<'_>, last: Span, close: u32, names: &[&str]) -> Vec<
     edits
 }
 
-/// A new import line. In the last block of imports with bindings it goes after the last import
-/// of a group not after its own, else above the first import, so `import-order` finds it in
-/// place. Without a block it goes after the last import, else above the first statement.
+/// A new import line. In the last block `import-order` sorts (`import_blocks`) it goes after the
+/// last import of a group not after its own, else above the first import, so `import-order` finds
+/// it in place. Without a block it goes after the last import, else above the first statement.
 fn new_line(file: &File<'_>, facts: &dyn Facts, source: &str, names: &[&str]) -> Edit {
     let text = file.text;
     let program = file.semantic.nodes().program();
-    let own = group(import_kind(file, facts, source));
+    let own = import_group(file, facts, source);
     let line = |neighbour: Option<&ImportDeclaration<'_>>| {
         let (quote, semicolon) = neighbour.map_or(('\'', true), |import| {
             (
@@ -174,15 +194,10 @@ fn new_line(file: &File<'_>, facts: &dyn Facts, source: &str, names: &[&str]) ->
         format!("import {{ {names} }} from {quote}{source}{quote}{semicolon}")
     };
 
-    let block = program
-        .body
-        .chunk_by(|a, b| with_bindings(a).is_some() && with_bindings(b).is_some())
-        .rev()
-        .find_map(|run| run.iter().map(with_bindings).collect::<Option<Vec<_>>>());
-    if let Some(block) = block {
+    if let Some(block) = import_blocks(file, facts).pop() {
         let groups: Vec<u8> = block
             .iter()
-            .map(|import| group(import_kind(file, facts, &import.source.value)))
+            .map(|import| import_group(file, facts, &import.source.value))
             .collect();
         let spaced = block.windows(2).any(|pair| {
             has_blank_line(&text[pair[0].span.end as usize..pair[1].span.start as usize])
@@ -194,11 +209,7 @@ fn new_line(file: &File<'_>, facts: &dyn Facts, source: &str, names: &[&str]) ->
                 text: format!("\n{}{}", blank(groups[index]), line(Some(block[index]))),
             },
             None => Edit {
-                span: Span::empty(line_above(file, block[0].span.start, |comment| {
-                    NEXT_LINE
-                        .iter()
-                        .any(|directive| comment.contains(directive))
-                })),
+                span: Span::empty(line_above(file, block[0].span.start, speaks_of_next_line)),
                 text: format!("{}\n{}", line(Some(block[0])), blank(groups[0])),
             },
         };
@@ -224,33 +235,6 @@ fn new_line(file: &File<'_>, facts: &dyn Facts, source: &str, names: &[&str]) ->
             })),
             text: format!("{}\n\n", line(None)),
         },
-    }
-}
-
-/// Same groups as the `import-order` rule.
-fn group(kind: ImportKind) -> u8 {
-    match kind {
-        ImportKind::Node => 0,
-        ImportKind::External => 1,
-        ImportKind::Workspace | ImportKind::Alias => 2,
-        ImportKind::Relative => 3,
-    }
-}
-
-/// An import `import-order` sorts. `import 'x'`, `import {} from 'x'` and `import defer` /
-/// `import source` keep their place and end a block.
-fn with_bindings<'a>(statement: &'a Statement<'a>) -> Option<&'a ImportDeclaration<'a>> {
-    match statement {
-        Statement::ImportDeclaration(import)
-            if import.phase.is_none()
-                && import
-                    .specifiers
-                    .as_ref()
-                    .is_some_and(|list| !list.is_empty()) =>
-        {
-            Some(import)
-        }
-        _ => None,
     }
 }
 
@@ -283,18 +267,4 @@ fn line_above(file: &File<'_>, start: u32, lift: impl Fn(&str) -> bool) -> u32 {
         at = line;
     }
     at
-}
-
-/// A line of `text` other than its first and last holds only spaces.
-fn has_blank_line(text: &str) -> bool {
-    let mut lines = text.split('\n');
-    lines.next();
-    lines.next_back();
-    lines.any(|line| line.trim().is_empty())
-}
-
-fn line_start(text: &str, at: u32) -> u32 {
-    text[..at as usize]
-        .rfind('\n')
-        .map_or(0, |index| index as u32 + 1)
 }

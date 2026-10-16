@@ -1,5 +1,7 @@
 use oxc_ast::AstKind;
-use oxc_ast::ast::{MethodDefinitionKind, PropertyKey, TSAccessibility};
+use oxc_ast::ast::{
+    AccessorProperty, Class, MethodDefinitionKind, PropertyDefinition, PropertyKey, TSAccessibility,
+};
 use oxc_semantic::AstNode;
 use oxc_span::GetSpan;
 
@@ -27,13 +29,15 @@ pub fn is_callback(file: &File<'_>, function: &AstNode<'_>) -> bool {
 /// members), the type of the variable or field that holds the function
 /// (`const handler: RequestHandler = (req, res, next) => ..`), the type it `satisfies` or is
 /// asserted to, the return type of the function that returns it
-/// (`function audit(): RequestHandler { return (req, res, next) => .. }`).
+/// (`function audit(): RequestHandler { return (req, res, next) => .. }`). The function may sit in
+/// a branch of `?:`, an operand of `??` / `||` / `&&` or an array element of that value.
 pub fn is_signature_given(file: &File<'_>, function: &AstNode<'_>) -> bool {
-    if is_callback(file, function) {
+    let nodes = file.semantic.nodes();
+    let value = held_value(file, function);
+    if is_callback(file, value) {
         return true;
     }
-    let nodes = file.semantic.nodes();
-    let parent = nodes.parent_node(function.id());
+    let parent = nodes.parent_node(value.id());
     match parent.kind() {
         AstKind::VariableDeclarator(declarator) => declarator.type_annotation.is_some(),
         AstKind::TSSatisfiesExpression(_)
@@ -49,11 +53,22 @@ pub fn is_signature_given(file: &File<'_>, function: &AstNode<'_>) -> bool {
                 _ => None,
             })
             .unwrap_or(false),
-        AstKind::PropertyDefinition(field) => {
-            field.type_annotation.is_some()
-                || !field.r#static
-                    && is_public(field.accessibility, &field.key)
-                    && implements(file, parent)
+        AstKind::PropertyDefinition(PropertyDefinition {
+            type_annotation,
+            r#static,
+            accessibility,
+            key,
+            ..
+        })
+        | AstKind::AccessorProperty(AccessorProperty {
+            type_annotation,
+            r#static,
+            accessibility,
+            key,
+            ..
+        }) => {
+            type_annotation.is_some()
+                || !r#static && is_public(*accessibility, key) && implements(file, parent)
         }
         AstKind::MethodDefinition(method) => {
             method.kind == MethodDefinitionKind::Set
@@ -67,7 +82,26 @@ pub fn is_signature_given(file: &File<'_>, function: &AstNode<'_>) -> bool {
     }
 }
 
-fn is_public(accessibility: Option<TSAccessibility>, key: &PropertyKey<'_>) -> bool {
+/// The value the function makes up: up through the branches of `?:`, the operands of `??`, `||`,
+/// `&&` and the elements of an array literal.
+fn held_value<'a>(file: &File<'a>, function: &'a AstNode<'a>) -> &'a AstNode<'a> {
+    let nodes = file.semantic.nodes();
+    let mut value = function;
+    loop {
+        let parent = nodes.parent_node(value.id());
+        let is_part = match parent.kind() {
+            AstKind::ConditionalExpression(conditional) => conditional.test.span() != value.span(),
+            AstKind::LogicalExpression(_) | AstKind::ArrayExpression(_) => true,
+            _ => false,
+        };
+        if !is_part {
+            return value;
+        }
+        value = parent;
+    }
+}
+
+pub fn is_public(accessibility: Option<TSAccessibility>, key: &PropertyKey<'_>) -> bool {
     !key.is_private_identifier()
         && !matches!(
             accessibility,
@@ -75,11 +109,24 @@ fn is_public(accessibility: Option<TSAccessibility>, key: &PropertyKey<'_>) -> b
         )
 }
 
-/// member -> `ClassBody` -> `Class` with `implements`.
-fn implements(file: &File<'_>, member: &AstNode<'_>) -> bool {
+/// The constructor of a decorated class (`@Injectable()`): DI fills its parameters.
+pub fn is_di_constructor(file: &File<'_>, function: &AstNode<'_>) -> bool {
     let nodes = file.semantic.nodes();
-    matches!(
-        nodes.parent_kind(nodes.parent_id(member.id())),
-        AstKind::Class(class) if !class.implements.is_empty()
-    )
+    let method = nodes.parent_node(function.id());
+    matches!(method.kind(), AstKind::MethodDefinition(definition)
+        if definition.kind == MethodDefinitionKind::Constructor)
+        && member_class(file, method).is_some_and(|class| !class.decorators.is_empty())
+}
+
+fn implements(file: &File<'_>, member: &AstNode<'_>) -> bool {
+    member_class(file, member).is_some_and(|class| !class.implements.is_empty())
+}
+
+/// member -> `ClassBody` -> `Class`.
+fn member_class<'a>(file: &File<'a>, member: &AstNode<'a>) -> Option<&'a Class<'a>> {
+    let nodes = file.semantic.nodes();
+    match nodes.parent_kind(nodes.parent_id(member.id())) {
+        AstKind::Class(class) => Some(class),
+        _ => None,
+    }
 }
