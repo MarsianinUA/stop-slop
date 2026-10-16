@@ -1,0 +1,5 @@
+description = "Class members out of the order fields, constructor, methods"
+kind = "error"
+fix = true
+source = ["personal"]
+message = "`{name}` is {member} after {after}: a reader opens a class expecting its state first, then how it is built, then what it does, and has to search for a member out of place. Order the members: fields, constructor, methods."
