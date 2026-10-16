@@ -1,0 +1,11 @@
+description = "Three or more `if` branches in a row that compare one value"
+kind = "candidate"
+files = "code"
+source = ["direct"]
+message = "`{name}` is compared in {count} branches in a row: every new value adds a branch, and a reader scans them all to find one case. Use a `switch` over an enum (with a `never` check) or a `Map` from value to result."
+agent = """
+An `if` / `else if` chain or a run of `if` statements compares one value with `===` against three or more values. Replace it with a `switch` over the enum, with a `default` that checks `never`, or with a `Map` / object lookup. Ignore the finding, with the reason, when the branches only look alike but test different things, or when each branch is a guard with its own work and early exit that a `switch` would make harder to read.
+"""
+
+[options]
+min = 3

@@ -1,0 +1,8 @@
+description = "A chain of `instanceof` checks on one value"
+kind = "candidate"
+files = "code"
+source = ["personal"]
+message = "`{name}` is checked against `{classes}` one class after another: each new class adds a branch here, and what a class does lives outside the class. Give the classes a shared method and call it once, or dispatch through a `Map` from class to handler."
+agent = """
+One value is tested with `instanceof` against two or more classes in an `if` / `else if` chain, a run of `if` statements or a `?:` chain. When the classes are your own, move each branch into a method of its class and call it once (polymorphism). When the classes come from a library (framework errors in an exception filter) and the branches stay few and short, ignore the finding with that reason.
+"""
