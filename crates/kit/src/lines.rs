@@ -1,3 +1,5 @@
+use crate::File;
+
 #[derive(Debug)]
 pub struct Position {
     pub line: u32,
@@ -60,5 +62,38 @@ impl LineIndex {
     /// The first line ending of the text; `"\n"` when there is none.
     pub fn line_ending(&self) -> &'static str {
         self.line_ending
+    }
+}
+
+/// The end of the spaces, `;` and comments after `at` on its line, and whether a `;` is among
+/// them; `None` when other code follows there, not a line break, the end of the text or a `}`
+/// that closes the block, or when a comment there speaks of the next line
+/// (`// @ts-expect-error`), which would lose its node.
+pub fn line_tail(file: &File<'_>, mut at: u32) -> Option<(u32, bool)> {
+    let text = file.text;
+    let comments = file.semantic.comments();
+    let mut semicolon = false;
+    loop {
+        let rest = &text[at as usize..];
+        let next = at + (rest.len() - rest.trim_start_matches([' ', '\t']).len()) as u32;
+        let rest = &text[next as usize..];
+        if rest.starts_with(';') {
+            semicolon = true;
+            at = next + 1;
+        } else if let Ok(index) = comments.binary_search_by_key(&next, |comment| comment.span.start)
+        {
+            let comment = comments[index].span;
+            if ["-next-line", "@ts-expect-error", "@ts-ignore"]
+                .iter()
+                .any(|directive| comment.source_text(text).contains(directive))
+            {
+                return None;
+            }
+            at = comment.end;
+        } else if rest.is_empty() || rest.starts_with(['\n', '\r', '}']) {
+            return Some((at, semicolon));
+        } else {
+            return None;
+        }
     }
 }

@@ -1,3 +1,4 @@
+mod add_import;
 mod callback;
 mod case;
 mod class_file;
@@ -15,6 +16,7 @@ mod rule;
 mod safety;
 mod ts_type;
 
+pub use add_import::add_import;
 pub use callback::{is_callback, is_signature_given};
 pub use case::{Case, words};
 pub use class_file::{
@@ -28,7 +30,7 @@ pub use exported::{is_exported, is_exported_node};
 pub use facts::{EnumIndex, EnumMember, Fact, Facts, Package, StaticFacts};
 pub use file::{File, Role, RoleDef, Roles, path_span, suffix_of};
 pub use import_kind::{ImportKind, import_kind};
-pub use lines::{LineIndex, Position};
+pub use lines::{LineIndex, Position, line_tail};
 pub use member::{MemberUse, member_use, member_write};
 pub use own_type::is_own_type;
 pub use rename::{
@@ -54,11 +56,11 @@ pub mod oxc {
 pub mod prelude {
     pub use crate::{
         Case, Cx, Edit, Fact, File, ImportKind, MemberUse, PRIVATE_MEMBER_NODES, Role, Rule,
-        TopBinding, TopClass, TopKind, expression_assertion, has_safety_comment, import_kind,
-        is_ambient, is_callback, is_const_assertion, is_exported, is_exported_node, is_global,
-        is_jsx_tag, is_known_value, is_nullable, is_open_key, is_own_name, is_own_type,
-        is_script_global, is_signature_given, is_similar_name, lib_type, member_use, member_write,
-        outer_assertion, path_span, private_member, related_symbols, rename,
+        TopBinding, TopClass, TopKind, add_import, expression_assertion, has_safety_comment,
+        import_kind, is_ambient, is_callback, is_const_assertion, is_exported, is_exported_node,
+        is_global, is_jsx_tag, is_known_value, is_nullable, is_open_key, is_own_name, is_own_type,
+        is_script_global, is_signature_given, is_similar_name, lib_type, line_tail, member_use,
+        member_write, outer_assertion, path_span, private_member, related_symbols, rename,
         start_after_decorators, top_bindings, top_classes, type_assertion, unwrapped_type, words,
     };
     pub use oxc_allocator::Allocator;

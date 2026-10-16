@@ -1425,3 +1425,212 @@ if (n) { const u = 1; }";
         assert!(bindings[0].symbols.is_empty());
     });
 }
+
+/// `text` after importing `names` from `source` with `acme_facts`; `None` when `add_import`
+/// refuses.
+fn imported(text: &str, source: &str, names: &[&str]) -> Option<String> {
+    let acme = acme_facts();
+    let mut result = None;
+    with_file(text, |file| {
+        result = add_import(file, &acme, source, names).map(|mut edits| {
+            edits.sort_by_key(|edit| edit.span.start);
+            let mut out = text.to_string();
+            for edit in edits.iter().rev() {
+                out.replace_range(edit.span.start as usize..edit.span.end as usize, &edit.text);
+            }
+            out
+        });
+    });
+    result
+}
+
+#[test]
+fn add_import_merges_into_a_value_import_of_the_module() {
+    for (text, source, names, expected) in [
+        (
+            "import { a } from 'node:perf_hooks';\nexport const x = a;\n",
+            "node:perf_hooks",
+            &["performance"][..],
+            "import { a, performance } from 'node:perf_hooks';\nexport const x = a;\n",
+        ),
+        // The same builtin; `node-protocol` adds `node:`.
+        (
+            "import { a } from 'perf_hooks';\nexport const x = a;\n",
+            "node:perf_hooks",
+            &["performance"],
+            "import { a, performance } from 'perf_hooks';\nexport const x = a;\n",
+        ),
+        (
+            "import ph from 'node:perf_hooks';\nexport const x = ph;\n",
+            "node:perf_hooks",
+            &["performance"],
+            "import ph, { performance } from 'node:perf_hooks';\nexport const x = ph;\n",
+        ),
+        (
+            "import { Controller, HttpStatus } from '@nestjs/common';\nexport const x = [Controller, HttpStatus];\n",
+            "@nestjs/common",
+            &["HttpCode", "HttpStatus"],
+            "import { Controller, HttpStatus, HttpCode } from '@nestjs/common';\nexport const x = [Controller, HttpStatus];\n",
+        ),
+        (
+            "import { Controller } from '@nestjs/common';\nexport const x = Controller;\n",
+            "@nestjs/common",
+            &["HttpCode", "HttpCode"],
+            "import { Controller, HttpCode } from '@nestjs/common';\nexport const x = Controller;\n",
+        ),
+        // Without a trailing comma; the comment stays with `Get`.
+        (
+            "import {\n  Controller,\n  Get // legacy\n} from '@nestjs/common';\nexport const x = [Controller, Get];\n",
+            "@nestjs/common",
+            &["HttpCode", "HttpStatus"],
+            "import {\n  Controller,\n  Get, // legacy\n  HttpCode,\n  HttpStatus\n} from '@nestjs/common';\nexport const x = [Controller, Get];\n",
+        ),
+        (
+            "import {\n  Controller,\n  Get,\n} from '@nestjs/common';\nexport const x = [Controller, Get];\n",
+            "@nestjs/common",
+            &["HttpCode"],
+            "import {\n  Controller,\n  Get,\n  HttpCode,\n} from '@nestjs/common';\nexport const x = [Controller, Get];\n",
+        ),
+    ] {
+        assert_eq!(
+            imported(text, source, names).as_deref(),
+            Some(expected),
+            "{text}"
+        );
+    }
+}
+
+#[test]
+fn add_import_puts_a_new_line_in_the_last_block_by_group() {
+    for (text, source, names, expected) in [
+        // `import * as` and `import type` take no names.
+        (
+            "import * as ph from 'node:perf_hooks';\nexport const x = ph;\n",
+            "node:perf_hooks",
+            &["performance"][..],
+            "import * as ph from 'node:perf_hooks';\nimport { performance } from 'node:perf_hooks';\nexport const x = ph;\n",
+        ),
+        (
+            "import type { EventLoopUtilization } from 'node:perf_hooks';\nexport type U = EventLoopUtilization;\n",
+            "node:perf_hooks",
+            &["performance"],
+            "import type { EventLoopUtilization } from 'node:perf_hooks';\nimport { performance } from 'node:perf_hooks';\nexport type U = EventLoopUtilization;\n",
+        ),
+        (
+            "import { readFile } from 'node:fs/promises';\nimport { z } from 'zod';\nexport const x = [readFile, z];\n",
+            "node:perf_hooks",
+            &["performance"],
+            "import { readFile } from 'node:fs/promises';\nimport { performance } from 'node:perf_hooks';\nimport { z } from 'zod';\nexport const x = [readFile, z];\n",
+        ),
+        // A block spaced by blank lines gets one between groups.
+        (
+            "import { z } from 'zod';\n\nimport { tax } from './tax';\nexport const x = [tax, z];\n",
+            "node:perf_hooks",
+            &["performance"],
+            "import { performance } from 'node:perf_hooks';\n\nimport { z } from 'zod';\n\nimport { tax } from './tax';\nexport const x = [tax, z];\n",
+        ),
+        (
+            "import { z } from 'zod';\nimport { tax } from './tax';\nexport const x = [tax, z];\n",
+            "node:perf_hooks",
+            &["performance"],
+            "import { performance } from 'node:perf_hooks';\nimport { z } from 'zod';\nimport { tax } from './tax';\nexport const x = [tax, z];\n",
+        ),
+        (
+            "import { readFile } from 'node:fs/promises';\n\nimport { tax } from './tax';\nexport const x = [tax, readFile];\n",
+            "zod",
+            &["z"],
+            "import { readFile } from 'node:fs/promises';\n\nimport { z } from 'zod';\n\nimport { tax } from './tax';\nexport const x = [tax, readFile];\n",
+        ),
+        // The block is `./tax` alone: `reflect-metadata` keeps its place.
+        (
+            "import 'reflect-metadata';\nimport { tax } from './tax';\nexport const x = tax;\n",
+            "@nestjs/common",
+            &["Injectable"],
+            "import 'reflect-metadata';\nimport { Injectable } from '@nestjs/common';\nimport { tax } from './tax';\nexport const x = tax;\n",
+        ),
+        (
+            "// eslint-disable-next-line no-restricted-imports\nimport { z } from 'zod';\nexport const x = z;\n",
+            "node:perf_hooks",
+            &["performance"],
+            "import { performance } from 'node:perf_hooks';\n// eslint-disable-next-line no-restricted-imports\nimport { z } from 'zod';\nexport const x = z;\n",
+        ),
+        (
+            "import { z } from \"zod\"\nexport const x = z\n",
+            "node:perf_hooks",
+            &["performance"],
+            "import { performance } from \"node:perf_hooks\"\nimport { z } from \"zod\"\nexport const x = z\n",
+        ),
+        // Workspace and alias are one group.
+        (
+            "import { z } from 'zod';\n\nimport { db } from '@acme/db';\n\nimport { tax } from './tax';\nexport const x = [z, db, tax];\n",
+            "@/clock",
+            &["Clock"],
+            "import { z } from 'zod';\n\nimport { db } from '@acme/db';\nimport { Clock } from '@/clock';\n\nimport { tax } from './tax';\nexport const x = [z, db, tax];\n",
+        ),
+    ] {
+        assert_eq!(
+            imported(text, source, names).as_deref(),
+            Some(expected),
+            "{text}"
+        );
+    }
+}
+
+#[test]
+fn add_import_without_a_block_goes_after_the_imports_or_above_the_code() {
+    for (text, expected) in [
+        (
+            "import 'reflect-metadata';\n\nexport const a = 1;\n",
+            "import 'reflect-metadata';\nimport { performance } from 'node:perf_hooks';\n\nexport const a = 1;\n",
+        ),
+        // The doc comment stays with its function; the header stays on top.
+        (
+            "// Copyright.\n\n/** Doc. */\nexport function f(): void {}\n",
+            "// Copyright.\n\nimport { performance } from 'node:perf_hooks';\n\n/** Doc. */\nexport function f(): void {}\n",
+        ),
+        // TypeScript reads a pragma only above the first statement.
+        (
+            "// @ts-nocheck\nexport const a = 1;\n",
+            "// @ts-nocheck\nimport { performance } from 'node:perf_hooks';\n\nexport const a = 1;\n",
+        ),
+    ] {
+        assert_eq!(
+            imported(text, "node:perf_hooks", &["performance"]).as_deref(),
+            Some(expected),
+            "{text}"
+        );
+    }
+}
+
+#[test]
+fn add_import_refuses_taken_names_and_scripts_and_skips_imported_ones() {
+    let text = "import { performance } from 'node:perf_hooks';\nexport const x = performance;\n";
+    assert_eq!(
+        imported(text, "node:perf_hooks", &["performance"]).as_deref(),
+        Some(text)
+    );
+
+    for text in [
+        "const performance = 1;\nexport { performance };\n",
+        "import { performance } from './perf';\nexport const x = performance;\n",
+        // A script: the import would make its global names local.
+        "const x = 1;\n",
+    ] {
+        assert_eq!(
+            imported(text, "node:perf_hooks", &["performance"]),
+            None,
+            "{text}"
+        );
+    }
+    for name in ["default", "not-a-name"] {
+        assert_eq!(
+            imported(
+                "import { z } from 'zod';\nexport const x = z;\n",
+                "zod",
+                &[name]
+            ),
+            None,
+            "{name}"
+        );
+    }
+}

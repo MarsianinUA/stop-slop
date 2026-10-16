@@ -11,7 +11,7 @@ use oxc_span::{GetSpan, Span};
 use crate::{Edit, File, is_exported};
 
 /// Reserved words of strict mode and globals a binding must not shadow.
-const RESERVED: &[&str] = &[
+pub(crate) const RESERVED: &[&str] = &[
     "break",
     "case",
     "catch",
@@ -267,7 +267,7 @@ fn declares(kind: AstKind<'_>) -> bool {
     }
 }
 
-fn is_identifier(name: &str) -> bool {
+pub(crate) fn is_identifier(name: &str) -> bool {
     let mut chars = name.chars();
     chars
         .next()
@@ -275,18 +275,20 @@ fn is_identifier(name: &str) -> bool {
         && chars.all(|ch| ch.is_alphanumeric() || ch == '_' || ch == '$')
 }
 
-/// A file without `import` or `export` is a script: its top-level names are global to other
-/// files.
 pub fn is_script_global(file: &File<'_>, symbol: SymbolId) -> bool {
     let scoping = file.semantic.scoping();
-    scoping.symbol_scope_id(symbol) == scoping.root_scope_id()
-        && !file
-            .semantic
-            .nodes()
-            .program()
-            .body
-            .iter()
-            .any(Statement::is_module_declaration)
+    scoping.symbol_scope_id(symbol) == scoping.root_scope_id() && !is_module(file)
+}
+
+/// A file without `import` or `export` is a script: its top-level names are global to other
+/// files.
+pub(crate) fn is_module(file: &File<'_>) -> bool {
+    file.semantic
+        .nodes()
+        .program()
+        .body
+        .iter()
+        .any(Statement::is_module_declaration)
 }
 
 /// Direct `eval` looks names up at run time. oxc marks every scope around one, the root too.
