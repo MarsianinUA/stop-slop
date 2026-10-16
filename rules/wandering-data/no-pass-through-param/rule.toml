@@ -1,0 +1,12 @@
+description = "A function only hands a parameter on, and the next function of the file hands it on again: `a(order)` -> `b(order)` -> `c(order)`"
+kind = "candidate"
+files = "code"
+source = ["personal"]
+message = "`{name}` is never read here: this function only hands it on, and `{next}` hands it on again. Each signature on the way carries a value it does not use, so a change to it ripples through all of them, and a reader has to follow the calls to find who needs it. Pass it straight to the code that reads it, or let that code take it from its owner, and drop the parameter from the functions in between."
+agent = """
+The parameter is never read in this function: every use passes it to a function of this project (a function or method of this file, a function imported from the project, a method of an injected dependency), and one of them, a function of this file, also only passes it on. Fix: call the step that reads the value from the place that has it, or let that step get it from its owner (an injected dependency, a field), and drop the parameter from the functions in between. Ignore the finding, with the reason, for a value threaded down on purpose so that the inner function stays pure and testable (an injected `env`, a clock, a policy). Context that legitimately crosses layers (a database transaction or executor, a request or metrics context, a logger, a connection handle) is not a finding: when the project's own context type or name is caught, add it to `types` or `names` of this rule in `config.toml` instead of ignoring each finding.
+"""
+
+[options]
+names = ["tx", "trx", "transaction", "queryRunner", "entityManager", "signal", "ctx", "context", "logger", "socket", "connection"]
+types = ["AbortSignal", "EntityManager", "QueryRunner", "Prisma.TransactionClient", "Knex.Transaction", "Logger", "PinoLogger", "ExecutionContext", "ArgumentsHost"]
