@@ -1,0 +1,5 @@
+description = "A function at the top level of a file with a class"
+kind = "error"
+files = "code"
+source = ["personal"]
+message = "`{name}` is a loose function in the file of class `{class}`: a reader of the class cannot tell whether it is part of the class or a shared helper, and whoever needs it has to import the class's file with all its imports. Make it a method of the class, or move it to a `*.util.ts` or `*.helper.ts` file; if the class is the odd one out (an error class in a file of functions), move the class instead."

@@ -1,0 +1,4 @@
+description = "A class in a functions file (`*.util.ts`, `*.mapper.ts`, `*.config.ts`, `*.schema.ts`) or a constants file"
+kind = "error"
+source = ["direct"]
+message = "`{name}` is a class in a {role} file: the file name promises plain {role}, so a reader looking for the class does not open it, and the file now serves two roles. Move the class to a file of its own role (`*.service.ts`, `*.client.ts`, an error in `errors/`), or make it the functions or values it wraps."
