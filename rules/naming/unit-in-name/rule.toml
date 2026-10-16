@@ -1,0 +1,11 @@
+description = "A numeric `timeout`, `delay`, `ttl`, `interval` or `size` without a unit: `timeoutMs`, `sizeBytes`"
+kind = "candidate"
+source = ["direct"]
+message = "`{name}` is a number without its unit: is the {quantity} in milliseconds or seconds, bytes or items? A wrong guess is off by a factor of 1000 and still type-checks. Put the unit in the name, like `timeoutMs` or `sizeBytes`."
+agent = """
+The name ends with a quantity (`timeout`, `delay`, `ttl`, `interval`, `size`) and has no unit word. Add the unit (`Ms`, `Seconds`, `Bytes`). If the number counts items (`pageSize`, `batchSize`), or an interface it implements fixes the name, ignore the finding with that reason.
+"""
+
+[options]
+quantities = ["timeout", "delay", "ttl", "interval", "size"]
+units = ["ms", "millis", "milliseconds", "sec", "secs", "second", "seconds", "mins", "minute", "minutes", "hour", "hours", "day", "days", "ns", "us", "micros", "byte", "bytes", "kb", "mb", "gb", "kib", "mib", "bit", "bits", "char", "chars", "px"]

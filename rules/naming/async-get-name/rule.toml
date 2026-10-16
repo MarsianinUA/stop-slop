@@ -1,0 +1,7 @@
+description = "An async `get*` that awaits outside work, where `fetch*` or `load*` names the boundary"
+kind = "candidate"
+source = ["personal"]
+message = "`{name}` waits on outside work, but `get` reads like a cheap read of something already in memory: a caller cannot see the cost and may call it in a loop. Name the boundary: `fetch*` or `load*` for a read, `sync*` for a sync."
+agent = """
+The function is async (or returns a `Promise`), awaits something, and its name starts with `get`. If it waits on I/O (a database, an HTTP call, a cache, a queue, a file), rename it to `fetch*` or `load*`, and update the callers of an exported one. If it only awaits in-memory work, or an interface or framework it implements fixes the name, ignore the finding with that reason.
+"""
