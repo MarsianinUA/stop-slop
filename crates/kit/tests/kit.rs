@@ -1085,3 +1085,98 @@ declare class B { private i: number; }";
         );
     });
 }
+
+#[test]
+fn top_classes_are_class_declarations_and_whole_class_values_of_variables() {
+    let text = "declare function Dec(): ClassDecorator;
+declare function mixin<T>(base: T): T;
+@Dec() export class A {}
+export abstract class B {}
+export default class {}
+export const C = class {};
+const D = class Named {};
+declare class E {}
+export function f() { return class Inner {}; }
+const G = mixin(class {});
+export const list = [class {}];
+let L = class {};
+export @Dec() /* class */ class H {}";
+    with_file(text, |file| {
+        let classes: Vec<_> = top_classes(file)
+            .iter()
+            .map(|class| (class.name, class.head.source_text(text)))
+            .collect();
+        assert_eq!(
+            classes,
+            [
+                ("A", "class A"),
+                ("B", "abstract class B"),
+                ("default", "class"),
+                ("C", "C"),
+                ("Named", "class Named"),
+                ("H", "class H"),
+            ]
+        );
+    });
+
+    let text = "export default abstract /* class */ class {}";
+    with_file(text, |file| {
+        let heads: Vec<_> = top_classes(file)
+            .iter()
+            .map(|class| class.head.source_text(text))
+            .collect();
+        assert_eq!(heads, ["abstract /* class */ class"]);
+    });
+}
+
+#[test]
+fn top_bindings_are_functions_with_a_body_and_variables_outside_declare_and_blocks() {
+    let text = "function f() {}
+function g(a: string): void; function g(a: unknown): void {}
+declare function h(): void;
+export const i = () => 1;
+const j = (function () {}) as unknown;
+export default function () {}
+const K = 1, { l, m } = { l: 1, m: 2 };
+let n = 1;
+var o;
+let p = () => 1;
+const Q = class {};
+declare const r: number;
+namespace S { export const t = 1; }
+if (n) { const u = 1; }";
+    with_file(text, |file| {
+        let bindings: Vec<_> = top_bindings(file)
+            .iter()
+            .map(|binding| {
+                (
+                    binding.span.source_text(text),
+                    binding.kind,
+                    binding.symbols.len(),
+                    binding.init.is_some(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            bindings,
+            [
+                ("f", TopKind::Function, 1, false),
+                ("g", TopKind::Function, 1, false),
+                ("i", TopKind::Function, 1, true),
+                ("j", TopKind::Function, 1, true),
+                ("function ()", TopKind::Function, 0, false),
+                ("K", TopKind::Constant, 1, true),
+                ("{ l, m }", TopKind::Constant, 2, true),
+                ("n", TopKind::Variable, 1, true),
+                ("o", TopKind::Variable, 1, false),
+                ("p", TopKind::Variable, 1, true),
+            ]
+        );
+    });
+
+    with_file("export default (function named() {});", |file| {
+        let bindings = top_bindings(file);
+        assert_eq!(bindings.len(), 1);
+        assert!(bindings[0].symbols.is_empty());
+    });
+}

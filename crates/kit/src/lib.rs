@@ -1,4 +1,5 @@
 mod case;
+mod class_file;
 mod cx;
 mod def;
 mod exported;
@@ -13,6 +14,7 @@ mod safety;
 mod ts_type;
 
 pub use case::{Case, words};
+pub use class_file::{TopBinding, TopClass, TopKind, top_bindings, top_classes};
 pub use cx::{Cx, Edit, Report, Reported};
 pub use def::{
     Build, Files, FindingKind, GroupDef, Impl, RuleDef, RuleKind, RuleMeta, Ruleset, Source,
@@ -42,10 +44,10 @@ pub mod oxc {
 
 pub mod prelude {
     pub use crate::{
-        Case, Cx, Edit, Fact, File, ImportKind, Role, Rule, expression_assertion,
-        has_safety_comment, import_kind, is_const_assertion, is_exported, is_exported_node,
-        is_known_value, is_open_key, is_own_name, is_own_type, lib_type, private_member, rename,
-        type_assertion, unwrapped_type, words,
+        Case, Cx, Edit, Fact, File, ImportKind, Role, Rule, TopBinding, TopClass, TopKind,
+        expression_assertion, has_safety_comment, import_kind, is_const_assertion, is_exported,
+        is_exported_node, is_known_value, is_open_key, is_own_name, is_own_type, lib_type,
+        private_member, rename, top_bindings, top_classes, type_assertion, unwrapped_type, words,
     };
     pub use oxc_allocator::Allocator;
     pub use oxc_ast::{AstKind, AstType};
