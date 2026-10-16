@@ -1,0 +1,5 @@
+description = "A native `Proxy`: `new Proxy(..)` or `Proxy.revocable(..)`"
+kind = "error"
+files = "code"
+source = ["direct"]
+message = "A native `Proxy` makes V8 drop its fast paths for every property access through it, and its traps hide what reading or writing a property does. Write a class that implements the interface and forwards the calls it needs."

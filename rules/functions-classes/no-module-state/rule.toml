@@ -1,0 +1,5 @@
+description = "Module state: a top-level `let` or `var`, or a top-level constant that code changes (`cache.set(..)`)"
+kind = "error"
+files = "code"
+source = ["direct"]
+message = "`{name}` is module state: one value for every caller, request and test in the process, changed from inside functions, so a call's result depends on what ran before it and tests leak into each other. Keep it in an instance (a field of a provider) and pass it in, or make it a constant nobody changes."

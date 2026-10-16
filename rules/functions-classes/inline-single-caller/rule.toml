@@ -1,0 +1,8 @@
+description = "A private function or method called once, as a step of its caller"
+kind = "candidate"
+files = "code"
+source = ["direct"]
+message = "`{name}` is private and called once, on line {line}: a reader jumps there and back to follow one step, and its state changes are not seen where they happen. Inline it into its caller, unless its name gives a concept the caller would otherwise have to rebuild."
+agent = """
+The function or private method has one call, as a step of the caller (a statement, a variable's value or a `return`). Inline it when its name only labels that step (`prepare`, `handleRows`, `doSync`): the caller then reads top to bottom. Keep it, and ignore the finding with the reason, when its name gives a concept the caller would otherwise rebuild (a parse, a format, a rule such as `isEligible`), when it is pure and reads as one idea, or when inlining would make the caller hold more than about four things at once.
+"""

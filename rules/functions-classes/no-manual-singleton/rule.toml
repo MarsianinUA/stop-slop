@@ -1,0 +1,4 @@
+description = "A hand-made singleton: a static field that keeps the class's own instance and a static method that hands it out (`static instance` + `getInstance()`)"
+kind = "error"
+source = ["direct"]
+message = "`{class}.{field}` keeps the one instance of `{class}` and `{method}` hands it out: that is global state - every caller shares it, a test cannot swap it, and the class's dependencies are hidden. The module cache already gives one instance: export it from the module, or register the class as a provider and inject it."
