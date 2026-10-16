@@ -84,7 +84,7 @@ fn at_run_time(file: &File<'_>, id: NodeId) -> bool {
 /// `x[k] += ..`, `x.a.b++`, `delete x.a`.
 fn is_member_write(file: &File<'_>, id: NodeId) -> bool {
     let nodes = file.semantic.nodes();
-    let mut current = outer(file, id);
+    let mut current = outer_assertion(file, nodes.get_node(id));
     let mut is_member = false;
     loop {
         let parent = nodes.parent_node(current.id());
@@ -95,7 +95,7 @@ fn is_member_write(file: &File<'_>, id: NodeId) -> bool {
                 return false;
             }
             is_member = true;
-            current = outer(file, parent.id());
+            current = outer_assertion(file, parent);
             continue;
         }
         return is_member
@@ -111,7 +111,7 @@ fn is_member_write(file: &File<'_>, id: NodeId) -> bool {
 /// `cache.set(..)`, `queue.push(..)`: the reference is the receiver of a mutator call.
 fn is_mutator_call(file: &File<'_>, id: NodeId) -> bool {
     let nodes = file.semantic.nodes();
-    let receiver = outer(file, id);
+    let receiver = outer_assertion(file, nodes.get_node(id));
     let AstKind::StaticMemberExpression(member) = nodes.parent_kind(receiver.id()) else {
         return false;
     };
@@ -122,36 +122,14 @@ fn is_mutator_call(file: &File<'_>, id: NodeId) -> bool {
         )
 }
 
-/// The node with the type wrappers around it.
-fn outer<'a, 'f>(file: &'f File<'a>, id: NodeId) -> &'f AstNode<'a> {
-    let nodes = file.semantic.nodes();
-    let mut node = nodes.get_node(id);
-    loop {
-        let parent = nodes.parent_node(node.id());
-        if !matches!(
-            parent.kind(),
-            AstKind::TSNonNullExpression(_)
-                | AstKind::TSAsExpression(_)
-                | AstKind::TSSatisfiesExpression(_)
-                | AstKind::TSTypeAssertion(_)
-        ) {
-            return node;
-        }
-        node = parent;
-    }
-}
-
-/// A new instance of a global collection class, an array or an object literal: a value made to
-/// be filled.
+/// A new instance of a global collection class or an array literal: a value made to be filled.
+/// A plain object has no methods that change it in place: its `set` or `add` is the file's own.
 fn is_container(file: &File<'_>, init: &Expression<'_>) -> bool {
     match init.get_inner_expression() {
-        Expression::NewExpression(new) => matches!(
-            new.callee.get_inner_expression(),
-            Expression::Identifier(id)
-                if ["Map", "Set", "WeakMap", "WeakSet", "Array"].contains(&id.name.as_str())
-                    && file.semantic.is_reference_to_global_variable(id)
-        ),
-        Expression::ArrayExpression(_) | Expression::ObjectExpression(_) => true,
+        Expression::NewExpression(new) => ["Map", "Set", "WeakMap", "WeakSet", "Array"]
+            .iter()
+            .any(|name| is_global(file, new.callee.get_inner_expression(), name)),
+        Expression::ArrayExpression(_) => true,
         _ => false,
     }
 }

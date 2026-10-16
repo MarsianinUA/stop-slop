@@ -4,7 +4,7 @@ use kit::oxc::ast::ast::{
     BindingPattern, Expression, FormalParameter, MethodDefinitionKind, TSLiteral, TSType,
     TSTypeAnnotation, UnaryOperator,
 };
-use kit::oxc::semantic::{ScopeId, Scoping, SymbolFlags, SymbolId};
+use kit::oxc::semantic::{SymbolFlags, SymbolId};
 use kit::prelude::*;
 
 #[derive(Deserialize)]
@@ -25,23 +25,19 @@ enum Boolean {
 }
 
 impl Rule for Check {
-    const NODES: &'static [AstType] = &[
-        AstType::PropertyDefinition,
-        AstType::MethodDefinition,
-        AstType::AccessorProperty,
-        AstType::FormalParameter,
-    ];
+    const NODES: &'static [AstType] = PRIVATE_MEMBER_NODES;
 
     fn on_node<'a>(&self, node: &AstNode<'a>, cx: &mut Cx<'_, 'a>) {
         let file = cx.file();
         let Some((name, span)) = private_member(file, node) else {
             return;
         };
-        // A member is not a symbol: `this.x` here and `obj['x']` elsewhere are out of reach.
         if needs_prefix(name) && is_boolean_member(file, node) {
+            // With its `#`, as the reader sees it.
+            let shown = span.source_text(file.text);
             cx.report(span)
-                .arg("name", name)
-                .arg("suggestion", with_is(name));
+                .arg("name", shown)
+                .arg("suggestion", shown.replacen(name, &with_is(name), 1));
         }
     }
 
@@ -193,21 +189,11 @@ fn is_boolean_parameter(parameter: &FormalParameter<'_>) -> bool {
 
 /// `boolean`, `true`, `false`, or a union of them with `null` / `undefined`.
 fn is_boolean_type(ty: &TSType<'_>) -> bool {
-    let is_boolean = |ty: &TSType<'_>| match ty {
+    is_nullable(ty, |ty| match ty {
         TSType::TSBooleanKeyword(_) => true,
         TSType::TSLiteralType(literal) => matches!(literal.literal, TSLiteral::BooleanLiteral(_)),
         _ => false,
-    };
-    match ty {
-        TSType::TSUnionType(union) => {
-            union.types.iter().any(is_boolean)
-                && union.types.iter().all(|ty| {
-                    is_boolean(ty)
-                        || matches!(ty, TSType::TSNullKeyword(_) | TSType::TSUndefinedKeyword(_))
-                })
-        }
-        _ => is_boolean(ty),
-    }
+    })
 }
 
 /// Only what the syntax shows: a call other than `Boolean(x)` and a few global `is*` checks
@@ -259,41 +245,22 @@ fn is_boolean(file: &File<'_>, expression: &Expression<'_>, seen: &mut HashSet<S
     }
 }
 
-fn is_global(file: &File<'_>, expression: &Expression<'_>, name: &str) -> bool {
-    matches!(expression, Expression::Identifier(id)
-        if id.name == name && file.semantic.is_reference_to_global_variable(id))
-}
-
 /// A value in a related scope that may take this fix's name too in the same pass: one named
 /// `isNot<Word>`, written in CONSTANT_CASE exactly when this name is, which `no-negative-boolean`
 /// may rename to `is<Antonym>`; or one whose name differs from this one only in `_`, `-`, `$`
 /// and case (`Ready` next to `ready`, both `isReady`).
 fn has_clashing_neighbour(file: &File<'_>, symbol: SymbolId) -> bool {
     let scoping = file.semantic.scoping();
-    let home = scoping.symbol_scope_id(symbol);
     let name = scoping.symbol_name(symbol);
     let is_constant = |name: &str| Case::Constant.matches(name.trim_start_matches('_'));
     let constant = is_constant(name);
-    scoping.symbol_ids().any(|other| {
+    related_symbols(file, symbol).any(|other| {
         let other_name = scoping.symbol_name(other);
         other_name != name
             && scoping.symbol_flags(other).intersects(SymbolFlags::Value)
-            && is_related(scoping, scoping.symbol_scope_id(other), home)
-            && (loose(other_name).eq(loose(name))
+            && (is_similar_name(other_name, name)
                 || matches!(words(other_name).as_slice(), [is, not, _]
                     if is.eq_ignore_ascii_case("is") && not.eq_ignore_ascii_case("not"))
                     && is_constant(other_name) == constant)
     })
-}
-
-fn loose(name: &str) -> impl Iterator<Item = char> + '_ {
-    name.chars()
-        .filter(|ch| !matches!(ch, '_' | '-' | '$'))
-        .flat_map(char::to_lowercase)
-}
-
-/// One scope is the other or nested in it.
-fn is_related(scoping: &Scoping, a: ScopeId, b: ScopeId) -> bool {
-    scoping.scope_ancestors(a).any(|scope| scope == b)
-        || scoping.scope_ancestors(b).any(|scope| scope == a)
 }

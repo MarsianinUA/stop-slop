@@ -15,22 +15,31 @@ impl Rule for Check {
         let BindingPattern::BindingIdentifier(id) = &parameter.pattern else {
             return;
         };
+        let Some(symbol) = id.symbol_id.get() else {
+            return;
+        };
         let name = id.name.as_str();
+        let file = cx.file();
         // `retryError` in a nested catch names what failed, as the message advises.
         let names_failure = name
             .strip_suffix("Error")
             .is_some_and(|what| !what.is_empty());
-        if name == "error" || names_failure {
+        // On a parameter nothing reads, `_` marks it unused on purpose for ESLint's
+        // `caughtErrorsIgnorePattern`, as in `no-underscore-prefix`: `catch (_error) {}`.
+        let unused = name.starts_with('_')
+            && file
+                .semantic
+                .scoping()
+                .get_resolved_reference_ids(symbol)
+                .is_empty();
+        if name == "error" || names_failure || unused {
             return;
         }
-        let file = cx.file();
         let clause = file.semantic.nodes().parent_node(node.id());
         let edits = if is_nested(file, clause) {
             None
         } else {
-            id.symbol_id
-                .get()
-                .and_then(|symbol| rename(file, symbol, "error"))
+            rename(file, symbol, "error")
         };
         cx.report(id.span)
             .arg("name", name)

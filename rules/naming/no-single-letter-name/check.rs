@@ -6,19 +6,16 @@ use kit::prelude::*;
 pub struct Check {}
 
 impl Rule for Check {
-    const NODES: &'static [AstType] = &[
-        AstType::PropertyDefinition,
-        AstType::MethodDefinition,
-        AstType::AccessorProperty,
-        AstType::FormalParameter,
-    ];
+    const NODES: &'static [AstType] = PRIVATE_MEMBER_NODES;
 
     fn on_node<'a>(&self, node: &AstNode<'a>, cx: &mut Cx<'_, 'a>) {
-        let Some((name, span)) = private_member(cx.file(), node) else {
+        let file = cx.file();
+        let Some((name, span)) = private_member(file, node) else {
             return;
         };
         if is_one_letter(name) {
-            cx.report(span).arg("name", name);
+            // With its `#`, as the reader sees it.
+            cx.report(span).arg("name", span.source_text(file.text));
         }
     }
 
@@ -67,27 +64,18 @@ fn is_one_letter(name: &str) -> bool {
     chars.next().is_some_and(char::is_alphabetic) && chars.next().is_none()
 }
 
-/// A function or arrow handed to someone else to call (an argument of a call or `new`, a JSX
-/// attribute, an object property), on one line, or an arrow with an expression body: a formatter
-/// wraps a long one (`sort((a, b) =>\n  a.x - b.x)`), not its author.
+/// A callback on one line, or an arrow with an expression body: a formatter wraps a long one
+/// (`sort((a, b) =>\n  a.x - b.x)`), not its author.
 fn is_short_callback(file: &File<'_>, function: NodeId) -> bool {
     let nodes = file.semantic.nodes();
-    let (span, is_expression_body) = match nodes.kind(function) {
-        AstKind::ArrowFunctionExpression(arrow) => (arrow.span, arrow.is_expression()),
-        AstKind::Function(function) if function.is_expression() => (function.span, false),
+    let function = nodes.get_node(function);
+    let is_expression_body = match function.kind() {
+        AstKind::ArrowFunctionExpression(arrow) => arrow.is_expression(),
+        AstKind::Function(value) if value.is_expression() => false,
         _ => return false,
     };
-    let is_handed_over = match nodes.parent_kind(function) {
-        AstKind::CallExpression(call) => call.arguments.iter().any(|arg| arg.span() == span),
-        AstKind::NewExpression(call) => call.arguments.iter().any(|arg| arg.span() == span),
-        AstKind::JSXExpressionContainer(_) => matches!(
-            nodes.parent_kind(nodes.parent_id(function)),
-            AstKind::JSXAttribute(_)
-        ),
-        AstKind::ObjectProperty(property) => property.value.span() == span,
-        _ => false,
-    };
-    is_handed_over && (is_expression_body || !span.source_text(file.text).contains('\n'))
+    is_callback(file, function)
+        && (is_expression_body || !function.span().source_text(file.text).contains('\n'))
 }
 
 /// Where each `{ a }` or `{ a = 1 }` binding starts: the key gives the name.

@@ -1,5 +1,6 @@
 use camino::Utf8Path;
 use oxc_semantic::Semantic;
+use oxc_span::{GetSpan, Span};
 
 use crate::LineIndex;
 
@@ -59,4 +60,18 @@ impl Roles {
 /// `a.ts` and dotfiles like `.types.ts` -> `None`.
 pub fn suffix_of(path: &Utf8Path) -> Option<&str> {
     Utf8Path::new(path.file_stem()?).extension()
+}
+
+/// Where a finding about the file's path sits: an empty span where the code starts. The path has
+/// no text in the file; a fixture's `// expect:` mark can reach that line, and a hunk that adds
+/// the file covers it.
+pub fn path_span(file: &File<'_>) -> Span {
+    let program = file.semantic.nodes().program();
+    let start = program
+        .directives
+        .first()
+        .map(|directive| directive.span.start)
+        .or_else(|| program.body.first().map(|statement| statement.span().start))
+        .unwrap_or(0);
+    Span::empty(start)
 }

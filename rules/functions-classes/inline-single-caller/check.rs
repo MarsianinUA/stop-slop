@@ -1,6 +1,5 @@
 use std::borrow::Cow;
 
-use kit::oxc::ast::MemberExpressionKind;
 use kit::oxc::ast::ast::{
     BindingPattern, Expression, Function, MethodDefinitionKind, TSType, TSTypeAnnotation,
 };
@@ -73,36 +72,15 @@ impl Rule for Check {
                     });
                 }
                 // `const { step } = this` takes the method without a member expression.
-                AstKind::BindingProperty(property) => {
-                    uses.extend(Use::new(node, property.key.static_name()))
-                }
-                AstKind::AssignmentTargetPropertyProperty(property) => {
-                    uses.extend(Use::new(node, property.name.static_name()));
-                }
-                AstKind::AssignmentTargetPropertyIdentifier(property) => {
-                    uses.extend(Use::new(node, Some(property.binding.name.as_str().into())));
-                }
-                kind => {
-                    let Some(member) = kind.as_member_expression_kind() else {
-                        continue;
-                    };
-                    let name = match &member {
-                        MemberExpressionKind::PrivateField(member) => {
-                            Some(member.field.span.source_text(file.text).into())
-                        }
-                        _ => member.static_property_name().map(Cow::from),
-                    };
-                    match name {
-                        None if matches!(
-                            member.object().get_inner_expression(),
-                            Expression::ThisExpression(_)
-                        ) =>
-                        {
-                            dynamic.push(node.span());
-                        }
-                        name => uses.extend(Use::new(node, name)),
-                    }
-                }
+                _ => match member_use(file, node) {
+                    Some(MemberUse::Name(name)) => uses.push(Use {
+                        name,
+                        span: node.span(),
+                        id: node.id(),
+                    }),
+                    Some(MemberUse::Any) => dynamic.push(node.span()),
+                    None => {}
+                },
             }
         }
 
@@ -114,7 +92,11 @@ impl Rule for Check {
             let Some(line) = step_call(file, reference.node_id(), function) else {
                 continue;
             };
-            if is_own_name(file, symbol) && !is_exported(file, symbol) {
+            // A top-level function of a script is global: other files may call it.
+            if is_own_name(file, symbol)
+                && !is_exported(file, symbol)
+                && !is_script_global(file, symbol)
+            {
                 cx.report(scoping.symbol_span(symbol))
                     .arg("name", scoping.symbol_name(symbol))
                     .arg("line", line);
@@ -151,23 +133,12 @@ struct Method<'a> {
     class: Span,
 }
 
-/// A member reached by name: `this.m`, `C.m`, `other.m`, `this.#m`, `this['m']`, or a key in a
-/// destructuring pattern. The type of the object is not seen: inside the class any of them may
-/// reach its private method (`other.total()` on another instance).
+/// A member reached by name (`this.m`, `other.m`, a destructured key): inside the class any of
+/// them may reach its private method (`other.total()` on another instance).
 struct Use<'a> {
     name: Cow<'a, str>,
     span: Span,
     id: NodeId,
-}
-
-impl<'a> Use<'a> {
-    fn new(node: &AstNode<'a>, name: Option<Cow<'a, str>>) -> Option<Self> {
-        Some(Use {
-            name: name?,
-            span: node.span(),
-            id: node.id(),
-        })
-    }
 }
 
 /// Inlining a generator loses its iterator, and a type guard or `asserts` its narrowing.
@@ -217,21 +188,4 @@ fn step_call(file: &File<'_>, id: NodeId, function: Span) -> Option<u32> {
         return None;
     }
     Some(file.lines.position(call.span().start).line)
-}
-
-/// A function handed to someone else to call: an argument of a call or `new`, the value of a JSX
-/// attribute or of an object property (as in `no-single-letter-name`).
-fn is_callback(file: &File<'_>, function: &AstNode<'_>) -> bool {
-    let nodes = file.semantic.nodes();
-    let span = function.span();
-    match nodes.parent_kind(function.id()) {
-        AstKind::CallExpression(outer) => outer.callee.span() != span,
-        AstKind::NewExpression(outer) => outer.callee.span() != span,
-        AstKind::JSXExpressionContainer(_) => matches!(
-            nodes.parent_kind(nodes.parent_id(function.id())),
-            AstKind::JSXAttribute(_)
-        ),
-        AstKind::ObjectProperty(property) => property.value.span() == span,
-        _ => false,
-    }
 }

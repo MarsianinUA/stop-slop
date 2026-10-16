@@ -57,3 +57,6 @@ export class Cart {
 
 const shared_label = 'cart';
 export { shared_label };
+
+const RUN_E2E_TIMEOUT_MS = 1000;
+export const limits = [RUN_E2E_TIMEOUT_MS];

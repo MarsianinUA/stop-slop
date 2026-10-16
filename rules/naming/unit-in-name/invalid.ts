@@ -21,3 +21,11 @@ export class Cache {
 export const maxDelay = 5000 as const; // expect: unit-in-name
 
 export const MIN_TIMEOUT = 1000; // expect: unit-in-name
+
+export function remaining(deadline: Date, now: Date): number {
+  const timeout = deadline.getTime() - now.getTime(); // expect: unit-in-name
+  const backoffDelay = -now.getTimezoneOffset(); // expect: unit-in-name
+  return timeout + backoffDelay;
+}
+
+export const MAX_SIZE = 1 << 20; // expect: unit-in-name

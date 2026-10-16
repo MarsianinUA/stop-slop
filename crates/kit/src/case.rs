@@ -74,7 +74,8 @@ fn capitalize(word: &str) -> String {
 /// Split at `_` and `-`, before a capital that follows a lowercase letter or a digit, and before
 /// the last capital of a run that a lowercase letter follows (`HTTPServer` -> `HTTP`, `Server`).
 /// A plural `s` stays with its acronym (`userIDs` -> `user`, `IDs`); a part with no lowercase
-/// letter is one word (`E2E`, `MAX`); digits stay with the word before them.
+/// letter is one word (`E2E`, `MAX`); digits stay with the word before them, inside a run of
+/// capitals too (`runE2ETimeoutMs` -> `run`, `E2E`, `Timeout`, `Ms`).
 pub fn words(name: &str) -> Vec<&str> {
     let mut words = Vec::new();
     for part in name.split(['_', '-']).filter(|part| !part.is_empty()) {
@@ -93,12 +94,20 @@ pub fn words(name: &str) -> Vec<&str> {
                 && chars
                     .get(i + 2)
                     .is_none_or(|&(_, ch)| ch.is_uppercase() || ch.is_ascii_digit());
+            let in_capitals = before.is_uppercase()
+                || (before.is_ascii_digit()
+                    && chars[..i]
+                        .iter()
+                        .rev()
+                        .map(|&(_, ch)| ch)
+                        .find(|ch| !ch.is_ascii_digit())
+                        .is_some_and(char::is_uppercase));
             let starts_word = ch.is_uppercase()
-                && (before.is_lowercase()
-                    || before.is_ascii_digit()
-                    || (before.is_uppercase()
-                        && after.is_some_and(char::is_lowercase)
-                        && !plural_s));
+                && if in_capitals {
+                    after.is_some_and(char::is_lowercase) && !plural_s
+                } else {
+                    before.is_lowercase() || before.is_ascii_digit()
+                };
             if starts_word {
                 words.push(&part[start..at]);
                 start = at;

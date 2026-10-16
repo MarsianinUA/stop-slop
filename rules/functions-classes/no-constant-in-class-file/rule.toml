@@ -2,4 +2,4 @@ description = "A constant at the top level of a file with a class"
 kind = "error"
 files = "code"
 source = ["personal"]
-message = "`{name}` is a constant loose at the top of the file of class `{class}`: a value only the class uses belongs to the class, and a shared value belongs in a file of its role, so a reader knows where to look and nothing imports a class's file for a value. Make it a field (`private static readonly`, `private readonly`), or move it to a `*.constants.ts`, `*.config.ts` or `*.provider.ts` file."
+message = "`{name}` is a constant loose at the top of the file of {classes}: a value only the class uses belongs to the class, and a shared value belongs in a file of its role, so a reader knows where to look and nothing imports a class's file for a value. Make it a field (`private static readonly`, `private readonly`), or move it to a `*.constants.ts`, `*.config.ts` or `*.provider.ts` file."

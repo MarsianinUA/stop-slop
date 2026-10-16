@@ -1,6 +1,7 @@
 use std::collections::BTreeMap;
 
-use kit::oxc::semantic::{ScopeId, Scoping, SymbolFlags, SymbolId};
+use kit::oxc::ast::ast::{Expression, TSType, TSTypeAnnotation, TSTypeName};
+use kit::oxc::semantic::{SymbolFlags, SymbolId};
 use kit::prelude::*;
 
 #[derive(Deserialize)]
@@ -20,20 +21,20 @@ const NEGATIONS: &[(&str, &[&str])] = &[
 ];
 
 impl Rule for Check {
-    const NODES: &'static [AstType] = &[
-        AstType::PropertyDefinition,
-        AstType::MethodDefinition,
-        AstType::AccessorProperty,
-        AstType::FormalParameter,
-    ];
+    const NODES: &'static [AstType] = PRIVATE_MEMBER_NODES;
 
     fn on_node<'a>(&self, node: &AstNode<'a>, cx: &mut Cx<'_, 'a>) {
-        let Some((name, span)) = private_member(cx.file(), node) else {
+        let file = cx.file();
+        let Some((name, span)) = private_member(file, node) else {
             return;
         };
-        // A member is not a symbol: `this.x` here and `obj['x']` elsewhere are out of reach.
-        if is_negative(name) {
-            cx.report(span).arg("name", name);
+        let return_type = match node.kind() {
+            AstKind::MethodDefinition(method) => method.value.return_type.as_deref(),
+            _ => None,
+        };
+        if is_negative(name) && !guards_type_named(name, return_type) {
+            // With its `#`, as the reader sees it.
+            cx.report(span).arg("name", span.source_text(file.text));
         }
     }
 
@@ -45,16 +46,37 @@ impl Rule for Check {
             let name = scoping.symbol_name(symbol);
             // A class `IsNotFoundError` or a type is not a boolean, and a destructured name
             // (`const { isNotValid } = props`) comes from its key.
-            let is_value = match nodes.kind(scoping.symbol_declaration(symbol)) {
-                AstKind::VariableDeclarator(declarator) => declarator.id.is_binding_identifier(),
-                AstKind::FormalParameter(parameter) => parameter.pattern.is_binding_identifier(),
-                AstKind::FormalParameterRest(parameter) => {
-                    parameter.rest.argument.is_binding_identifier()
+            let (is_value, return_type) = match nodes.kind(scoping.symbol_declaration(symbol)) {
+                AstKind::VariableDeclarator(declarator) => (
+                    declarator.id.is_binding_identifier(),
+                    match declarator
+                        .init
+                        .as_ref()
+                        .map(Expression::get_inner_expression)
+                    {
+                        Some(Expression::ArrowFunctionExpression(arrow)) => {
+                            arrow.return_type.as_deref()
+                        }
+                        Some(Expression::FunctionExpression(function)) => {
+                            function.return_type.as_deref()
+                        }
+                        _ => None,
+                    },
+                ),
+                AstKind::FormalParameter(parameter) => {
+                    (parameter.pattern.is_binding_identifier(), None)
                 }
-                AstKind::Function(_) => true,
-                _ => false,
+                AstKind::FormalParameterRest(parameter) => {
+                    (parameter.rest.argument.is_binding_identifier(), None)
+                }
+                AstKind::Function(function) => (true, function.return_type.as_deref()),
+                _ => (false, None),
             };
-            if !is_value || !is_negative(name) || !is_own_name(file, symbol) {
+            if !is_value
+                || !is_negative(name)
+                || guards_type_named(name, return_type)
+                || !is_own_name(file, symbol)
+            {
                 continue;
             }
             let edits = self
@@ -106,18 +128,16 @@ impl Check {
     /// `isDifferent`).
     fn has_clashing_neighbour(&self, file: &File<'_>, symbol: SymbolId, positive: &str) -> bool {
         let scoping = file.semantic.scoping();
-        let home = scoping.symbol_scope_id(symbol);
         let name = scoping.symbol_name(symbol);
-        let unprefixed: String = loose(&words(positive)[1..].concat()).collect();
-        scoping.symbol_ids().any(|other| {
+        let unprefixed = words(positive)[1..].concat();
+        related_symbols(file, symbol).any(|other| {
             let other_name = scoping.symbol_name(other);
             other_name != name
                 && scoping.symbol_flags(other).intersects(SymbolFlags::Value)
-                && is_related(scoping, scoping.symbol_scope_id(other), home)
-                && (loose(other_name).eq(unprefixed.chars())
+                && (is_similar_name(other_name, &unprefixed)
                     || self
                         .positive(other_name)
-                        .is_some_and(|other| loose(&other).eq(loose(positive))))
+                        .is_some_and(|other| is_similar_name(&other, positive)))
         })
     }
 }
@@ -135,14 +155,23 @@ fn is_negative(name: &str) -> bool {
     })
 }
 
-fn loose(name: &str) -> impl Iterator<Item = char> + '_ {
-    name.chars()
-        .filter(|ch| !matches!(ch, '_' | '-' | '$'))
-        .flat_map(char::to_lowercase)
-}
-
-/// One scope is the other or nested in it.
-fn is_related(scoping: &Scoping, a: ScopeId, b: ScopeId) -> bool {
-    scoping.scope_ancestors(a).any(|scope| scope == b)
-        || scoping.scope_ancestors(b).any(|scope| scope == a)
+/// A type guard named `is` + the type it checks asks about that type, not a negation:
+/// `isNotFoundError(error): error is NotFoundError`.
+fn guards_type_named(name: &str, return_type: Option<&TSTypeAnnotation<'_>>) -> bool {
+    let Some(TSType::TSTypePredicate(predicate)) = return_type.map(|ty| &ty.type_annotation) else {
+        return false;
+    };
+    let Some(TSType::TSTypeReference(reference)) = predicate
+        .type_annotation
+        .as_ref()
+        .map(|ty| &ty.type_annotation)
+    else {
+        return false;
+    };
+    let type_name = match &reference.type_name {
+        TSTypeName::IdentifierReference(id) => id.name.as_str(),
+        TSTypeName::QualifiedName(name) => name.right.name.as_str(),
+        _ => return false,
+    };
+    name.strip_prefix("is") == Some(type_name)
 }

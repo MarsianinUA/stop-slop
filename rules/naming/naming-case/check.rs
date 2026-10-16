@@ -1,6 +1,7 @@
 use kit::Reported;
 use kit::oxc::ast::ast::{
-    BindingPattern, Expression, UnaryOperator, VariableDeclarationKind, VariableDeclarator,
+    BinaryOperator, BindingPattern, Expression, UnaryOperator, VariableDeclarationKind,
+    VariableDeclarator,
 };
 use kit::oxc::semantic::SymbolId;
 use kit::prelude::*;
@@ -14,38 +15,38 @@ const PASCAL: &[Case] = &[Case::Pascal];
 const CAMEL: &[Case] = &[Case::Camel];
 const CONSTANT: &[Case] = &[Case::Constant];
 const CAMEL_OR_CONSTANT: &[Case] = &[Case::Camel, Case::Constant];
-/// A function may be a decorator factory (`Roles()`) or a component; a parameter or a call
-/// result may be a class (`build(Target)`, `const MockLogger = jest.fn()`).
+/// A function may be a decorator factory (`Roles()`) or a component; a parameter, a call result
+/// or a value built with `new` may be a class (`build(Target)`, `const MockLogger = jest.fn()`).
 const CAMEL_OR_PASCAL: &[Case] = &[Case::Camel, Case::Pascal];
 /// The key decides a destructured name (a class, an enum member, a constant), and a module
 /// `const` may be an instance, a schema, a DI token or an enum-like object.
 const ANY: &[Case] = &[Case::Camel, Case::Pascal, Case::Constant];
 
 impl Rule for Check {
-    const NODES: &'static [AstType] = &[
-        AstType::PropertyDefinition,
-        AstType::MethodDefinition,
-        AstType::AccessorProperty,
-        AstType::FormalParameter,
-    ];
+    const NODES: &'static [AstType] = PRIVATE_MEMBER_NODES;
 
     fn on_node<'a>(&self, node: &AstNode<'a>, cx: &mut Cx<'_, 'a>) {
-        let Some((name, span)) = private_member(cx.file(), node) else {
+        let file = cx.file();
+        let Some((name, span)) = private_member(file, node) else {
             return;
         };
         let cases: &[Case] = match node.kind() {
-            AstKind::PropertyDefinition(property)
-                if property.r#static
-                    && property.readonly
-                    && property.value.as_ref().is_some_and(is_literal) =>
-            {
+            // The field `no-constant-in-class-file` moves a module constant to.
+            AstKind::PropertyDefinition(property) if property.r#static && property.readonly => {
                 CAMEL_OR_CONSTANT
             }
             _ => CAMEL,
         };
-        // A member is not a symbol: `this.x` here and `obj['x']` elsewhere are out of reach.
         if let Some(suggestion) = suggestion(name, cases) {
-            report(cx, span, name, cases, &suggestion);
+            // With its `#`, as the reader sees it.
+            let shown = span.source_text(file.text);
+            report(
+                cx,
+                span,
+                shown,
+                cases,
+                &shown.replacen(name, &suggestion, 1),
+            );
         }
     }
 
@@ -124,24 +125,36 @@ fn expected(file: &File<'_>, symbol: SymbolId) -> Option<&'static [Case]> {
         AstKind::VariableDeclarator(declarator) => variable_cases(file, symbol, declarator),
         _ => return None,
     };
+    // `<icon />` is an HTML element, so the symbol of a JSX tag needs the capital.
     Some(if is_jsx_tag(file, symbol) {
         PASCAL
+    } else if cases == CAMEL && is_used_as_class(file, symbol) {
+        CAMEL_OR_PASCAL
     } else {
         cases
     })
 }
 
-/// `<Icon />` needs the capital: `<icon />` is an HTML element, not the symbol.
-fn is_jsx_tag(file: &File<'_>, symbol: SymbolId) -> bool {
+/// `new Model()`, `extends Model`, `x instanceof Model`: the value is a class, as in
+/// `const Model = isAdmin ? Admin : Guest`.
+fn is_used_as_class(file: &File<'_>, symbol: SymbolId) -> bool {
     let nodes = file.semantic.nodes();
     file.semantic
         .scoping()
         .get_resolved_references(symbol)
         .any(|reference| {
-            matches!(
-                nodes.parent_kind(reference.node_id()),
-                AstKind::JSXOpeningElement(_) | AstKind::JSXClosingElement(_)
-            )
+            let span = nodes.get_node(reference.node_id()).span();
+            match nodes.parent_kind(reference.node_id()) {
+                AstKind::NewExpression(new) => new.callee.span() == span,
+                AstKind::Class(class) => class
+                    .heritage
+                    .as_ref()
+                    .is_some_and(|base| base.expression.span() == span),
+                AstKind::BinaryExpression(binary) => {
+                    binary.operator == BinaryOperator::Instanceof && binary.right.span() == span
+                }
+                _ => false,
+            }
         })
 }
 

@@ -723,6 +723,8 @@ fn words_split_at_separators_case_steps_and_acronym_ends() {
         ("v2Api", &["v2", "Api"]),
         ("base64Encode", &["base64", "Encode"]),
         ("ERC20Token", &["ERC20", "Token"]),
+        ("runE2ETimeoutMs", &["run", "E2E", "Timeout", "Ms"]),
+        ("peerP2PLimit", &["peer", "P2P", "Limit"]),
         ("userIDs", &["user", "IDs"]),
         ("URLsMap", &["URLs", "Map"]),
         ("getXAxis", &["get", "X", "Axis"]),
@@ -774,6 +776,7 @@ fn case_matches_its_style_and_apply_rewrites_into_it() {
         (Case::Pascal, "HTTPServer", "HttpServer"),
         (Case::Constant, "pageSize", "PAGE_SIZE"),
         (Case::Constant, "cacheE2eTimeoutMs", "CACHE_E2E_TIMEOUT_MS"),
+        (Case::Constant, "runE2ETimeoutMs", "RUN_E2E_TIMEOUT_MS"),
         (Case::Kebab, "OrderItem", "order-item"),
     ] {
         assert_eq!(
@@ -904,6 +907,18 @@ fn rename_edits_every_declaration_and_reference_and_keeps_object_keys() {
             "text",
             "string",
             "const string = 1; use(string); export {};",
+        ),
+        (
+            "export function isText(_v: unknown): _v is string { return typeof _v === 'string'; }",
+            "_v",
+            "value",
+            "export function isText(value: unknown): value is string { return typeof value === 'string'; }",
+        ),
+        (
+            "export type Check = (order_v: unknown) => asserts order_v;",
+            "order_v",
+            "orderV",
+            "export type Check = (orderV: unknown) => asserts orderV;",
         ),
     ] {
         assert_eq!(renamed(text, from, to).as_deref(), Some(expected), "{text}");
@@ -1076,12 +1091,242 @@ declare class B { private i: number; }";
             .semantic
             .nodes()
             .iter()
-            .filter_map(|node| private_member(file, node))
+            .filter_map(|node| {
+                let member = private_member(file, node)?;
+                assert!(PRIVATE_MEMBER_NODES.contains(&node.kind().ty()));
+                Some(member)
+            })
             .map(|(name, span)| (name, span.source_text(text)))
             .collect();
         assert_eq!(
             members,
             [("a", "a"), ("b", "#b"), ("c", "c"), ("m", "m"), ("d", "d")]
+        );
+    });
+}
+
+fn symbol_named(file: &File<'_>, name: &str) -> kit::oxc::semantic::SymbolId {
+    let scoping = file.semantic.scoping();
+    scoping
+        .symbol_ids()
+        .find(|&symbol| scoping.symbol_name(symbol) == name)
+        .unwrap_or_else(|| panic!("no {name}"))
+}
+
+#[test]
+fn related_symbols_share_a_line_of_scopes_and_similar_names_differ_in_separators_and_case() {
+    assert!(is_similar_name("user_id", "userID"));
+    assert!(is_similar_name("$user-id", "UserId"));
+    assert!(!is_similar_name("userIds", "userId"));
+
+    let text = "const outer = 1;
+function f(param: number) { const inner = param; return () => { const deep = inner; return deep; }; }
+function g() { const other = outer; return other; }
+export { f, g };";
+    with_file(text, |file| {
+        let scoping = file.semantic.scoping();
+        let mut related: Vec<_> = related_symbols(file, symbol_named(file, "inner"))
+            .map(|symbol| scoping.symbol_name(symbol))
+            .collect();
+        related.sort_unstable();
+        assert_eq!(related, ["deep", "f", "g", "outer", "param"]);
+    });
+}
+
+#[test]
+fn jsx_tag_script_global_and_ambient_name_where_a_symbol_or_node_stands() {
+    let text = "import { icons } from './i'; const Icon = icons.a; const label = 'x'; \
+                export const view = <Icon>{label}</Icon>;";
+    with_file_at("src/a.tsx", text, |file| {
+        assert!(is_jsx_tag(file, symbol_named(file, "Icon")));
+        assert!(!is_jsx_tag(file, symbol_named(file, "label")));
+    });
+
+    with_file(
+        "function run() { const inner = 1; return inner; } run();",
+        |file| {
+            assert!(is_script_global(file, symbol_named(file, "run")));
+            assert!(!is_script_global(file, symbol_named(file, "inner")));
+        },
+    );
+    with_file("function run() {} run(); export {};", |file| {
+        assert!(!is_script_global(file, symbol_named(file, "run")));
+    });
+
+    let text = "declare module 'm' { class A {} }
+declare namespace N { class B {} }
+declare class C {}
+class D {}
+export { D };";
+    with_file(text, |file| {
+        let ambient: Vec<_> = file
+            .semantic
+            .nodes()
+            .iter()
+            .filter_map(|node| match node.kind() {
+                AstKind::Class(class) => Some((
+                    class.id.as_ref().map_or("", |id| id.name.as_str()),
+                    is_ambient(file, node.id()),
+                )),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            ambient,
+            [("A", true), ("B", true), ("C", true), ("D", false)]
+        );
+    });
+}
+
+#[test]
+fn global_value_nullable_type_and_outer_assertion_read_through_the_syntax() {
+    let text = "const Map = 1; new Proxy({}, {}); new Map(); export {};";
+    with_file(text, |file| {
+        let globals: Vec<_> = file
+            .semantic
+            .nodes()
+            .iter()
+            .filter_map(|node| match node.kind() {
+                AstKind::NewExpression(new) => Some((
+                    is_global(file, &new.callee, "Proxy"),
+                    is_global(file, &new.callee, "Map"),
+                )),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(globals, [(true, false), (false, false)]);
+    });
+
+    let text = "type A = boolean | null | undefined; type B = boolean | string; type C = null; \
+                type D = boolean;";
+    with_file(text, |file| {
+        let is_boolean = |ty: &TSType<'_>| matches!(ty, TSType::TSBooleanKeyword(_));
+        for (name, expected) in [("A", true), ("B", false), ("C", false), ("D", true)] {
+            assert_eq!(
+                is_nullable(alias_type(file, name), is_boolean),
+                expected,
+                "{name}"
+            );
+        }
+    });
+
+    let text = "declare const x: { a: number }; (x as { a: number })!.a = 1; x.a = 2;";
+    with_file(text, |file| {
+        let outer: Vec<_> = file
+            .semantic
+            .nodes()
+            .iter()
+            .filter(
+                |node| matches!(node.kind(), AstKind::IdentifierReference(id) if id.name == "x"),
+            )
+            .map(|node| outer_assertion(file, node).kind().ty())
+            .collect();
+        assert_eq!(
+            outer,
+            [AstType::TSNonNullExpression, AstType::IdentifierReference]
+        );
+    });
+}
+
+#[test]
+fn path_span_is_empty_where_the_code_starts() {
+    for (text, start) in [
+        ("'use strict';\nconst a = 1;", 0),
+        ("// note\nconst a = 1;", 8),
+        ("// only a comment", 0),
+        ("", 0),
+    ] {
+        with_file(text, |file| {
+            assert_eq!(path_span(file), Span::empty(start), "{text:?}");
+        });
+    }
+}
+
+#[test]
+fn start_after_decorators_skips_the_decorators_and_the_comments_after_them() {
+    let text = "declare function D(): PropertyDecorator;
+class A {
+  @D() /* note */ x = 1;
+  @D()
+  // note
+  y = 2;
+  z = 3;
+}
+export { A };";
+    with_file(text, |file| {
+        let starts: Vec<_> = file
+            .semantic
+            .nodes()
+            .iter()
+            .filter_map(|node| match node.kind() {
+                AstKind::PropertyDefinition(property) => {
+                    let start = start_after_decorators(file, property.span, &property.decorators);
+                    Some(&text[start as usize..property.span.end as usize])
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(starts, ["x = 1;", "y = 2;", "z = 3;"]);
+    });
+}
+
+#[test]
+fn callback_is_a_function_handed_to_a_call_new_jsx_or_an_object() {
+    let text = "declare function run(f: unknown): void;
+run(() => 1);
+const kept = () => 2;
+const handlers = { pick: () => 3 };
+new Promise(function () {});
+export const view = <button onClick={() => 4} />;
+export { kept, handlers };";
+    with_file_at("src/a.tsx", text, |file| {
+        let callbacks: Vec<_> = file
+            .semantic
+            .nodes()
+            .iter()
+            .filter(|node| match node.kind() {
+                AstKind::ArrowFunctionExpression(_) => true,
+                AstKind::Function(function) => function.body.is_some(),
+                _ => false,
+            })
+            .map(|node| is_callback(file, node))
+            .collect();
+        assert_eq!(callbacks, [true, false, true, true, true]);
+    });
+}
+
+#[test]
+fn member_use_names_what_a_member_access_or_a_destructured_key_reaches() {
+    let text = "class A {
+  #p = 1;
+  q = 2;
+  m(key: 'q'): unknown[] {
+    const { q } = this;
+    let r;
+    ({ q: r } = this);
+    return [this.#p, this.q, this['q'], this[key], (this as A)[key], q, r, [1][0]];
+  }
+}
+export { A };";
+    with_file(text, |file| {
+        let uses: Vec<_> = file
+            .semantic
+            .nodes()
+            .iter()
+            .filter_map(|node| member_use(file, node))
+            .collect();
+        let name = |name: &'static str| MemberUse::Name(name.into());
+        assert_eq!(
+            uses,
+            [
+                name("q"),
+                name("q"),
+                name("#p"),
+                name("q"),
+                name("q"),
+                MemberUse::Any,
+                MemberUse::Any,
+            ]
         );
     });
 }

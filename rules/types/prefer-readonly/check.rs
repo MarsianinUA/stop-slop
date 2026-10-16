@@ -1,6 +1,5 @@
 use std::borrow::Cow;
 
-use kit::oxc::ast::MemberExpressionKind;
 use kit::oxc::ast::ast::{
     Class, ClassElement, Expression, FormalParameter, MethodDefinitionKind, PropertyDefinition,
     PropertyDefinitionType, PropertyKey, TSAccessibility, UnaryOperator, VariableDeclarationKind,
@@ -22,7 +21,7 @@ impl Rule for Check {
         let mut dynamic_writes = Vec::new();
         let mut dynamic_reads = Vec::new();
         for node in nodes.iter() {
-            let member = match node.kind() {
+            let reached = match node.kind() {
                 AstKind::PropertyDefinition(property) => {
                     fields.extend(property_field(file, node, property));
                     continue;
@@ -31,52 +30,40 @@ impl Rule for Check {
                     fields.extend(parameter_field(file, node, parameter));
                     continue;
                 }
-                // `const { mode } = this` reads a field without a member expression.
-                AstKind::BindingProperty(property) => {
-                    uses.extend(destructured(property.key.static_name(), node));
-                    continue;
-                }
-                AstKind::AssignmentTargetPropertyProperty(property) => {
-                    uses.extend(destructured(property.name.static_name(), node));
-                    continue;
-                }
-                AstKind::AssignmentTargetPropertyIdentifier(property) => {
-                    let name = Cow::Borrowed(property.binding.name.as_str());
-                    uses.extend(destructured(Some(name), node));
-                    continue;
-                }
-                kind => match kind.as_member_expression_kind() {
-                    Some(member) => member,
+                _ => match member_use(file, node) {
+                    Some(reached) => reached,
                     None => continue,
                 },
             };
-            let access = if is_write(file, node) {
-                // The constructor may set a `readonly` field through `this` only, not through
-                // `parent.children = ..`, and never `delete` it.
-                let on_this = matches!(member.object(), Expression::ThisExpression(_));
-                let deleted = matches!(
-                    nodes.parent_kind(node.id()),
-                    AstKind::UnaryExpression(unary) if unary.operator == UnaryOperator::Delete
-                );
-                Access::Write(
-                    (on_this && !deleted)
-                        .then(|| enclosing_function(file, node))
-                        .flatten(),
-                )
-            } else {
-                Access::Read(keeps_primitive(file, node))
+            let access = match node.kind().as_member_expression_kind() {
+                Some(member) if is_write(file, node) => {
+                    // The constructor may set a `readonly` field through `this` only, not
+                    // through `parent.children = ..`, and never `delete` it.
+                    let on_this = matches!(member.object(), Expression::ThisExpression(_));
+                    let deleted = matches!(
+                        nodes.parent_kind(node.id()),
+                        AstKind::UnaryExpression(unary) if unary.operator == UnaryOperator::Delete
+                    );
+                    Access::Write(
+                        (on_this && !deleted)
+                            .then(|| enclosing_function(file, node))
+                            .flatten(),
+                    )
+                }
+                Some(_) => Access::Read(keeps_primitive(file, node)),
+                // `const { mode } = this` reads a field without a member expression.
+                None => Access::Read(false),
             };
-            if let Some(name) = member_name(&member) {
-                uses.push(Use {
+            match reached {
+                MemberUse::Name(name) => uses.push(Use {
                     name,
                     span: node.span(),
                     access,
-                });
-            } else if matches!(member.object(), Expression::ThisExpression(_)) {
-                match access {
+                }),
+                MemberUse::Any => match access {
                     Access::Write(_) => dynamic_writes.push(node.span()),
                     Access::Read(_) => dynamic_reads.push(node.span()),
-                }
+                },
             }
         }
 
@@ -139,14 +126,6 @@ enum Access {
     Write(Option<NodeId>),
     /// True where a literal type behaves like its primitive.
     Read(bool),
-}
-
-fn destructured<'a>(name: Option<Cow<'a, str>>, node: &AstNode<'_>) -> Option<Use<'a>> {
-    Some(Use {
-        name: name?,
-        span: node.span(),
-        access: Access::Read(false),
-    })
 }
 
 fn property_field(
@@ -250,17 +229,6 @@ fn key_name(key: &PropertyKey<'_>) -> Option<String> {
 }
 
 /// `x` of `.x` and `['x']`, `#x` of `.#x`; `None` for `[key]`.
-fn member_name<'a>(member: &MemberExpressionKind<'a>) -> Option<Cow<'a, str>> {
-    match member {
-        MemberExpressionKind::PrivateField(member) => {
-            Some(Cow::Owned(format!("#{}", member.field.name)))
-        }
-        _ => member
-            .static_property_name()
-            .map(|name| Cow::Borrowed(name.as_str())),
-    }
-}
-
 /// The value may be a literal (`'fast'`, `null`, `Kind.User`, `cond ? 'a' : 'b'`) that a
 /// `readonly` field types as itself; an object, a call, `new`, `a + b`... keep their type.
 fn narrows_to_literal(value: &Expression<'_>) -> bool {
@@ -284,21 +252,9 @@ fn narrows_to_literal(value: &Expression<'_>) -> bool {
 /// The member is assigned, updated, deleted, destructured into or a `for` target, also
 /// through `!`, `as`, `<T>` and `satisfies`.
 fn is_write(file: &File<'_>, node: &AstNode<'_>) -> bool {
-    let nodes = file.semantic.nodes();
-    let mut target = node;
-    let mut parent = nodes.parent_node(target.id());
-    while matches!(
-        parent.kind(),
-        AstKind::TSNonNullExpression(_)
-            | AstKind::TSAsExpression(_)
-            | AstKind::TSTypeAssertion(_)
-            | AstKind::TSSatisfiesExpression(_)
-    ) {
-        target = parent;
-        parent = nodes.parent_node(target.id());
-    }
+    let target = outer_assertion(file, node);
     let span = target.span();
-    match parent.kind() {
+    match file.semantic.nodes().parent_kind(target.id()) {
         AstKind::AssignmentExpression(assignment) => assignment.left.span() == span,
         AstKind::UpdateExpression(_) | AstKind::ArrayAssignmentTarget(_) => true,
         AstKind::UnaryExpression(unary) => unary.operator == UnaryOperator::Delete,

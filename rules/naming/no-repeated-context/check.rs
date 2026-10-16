@@ -64,8 +64,8 @@ fn without_enum(enum_words: &[&str], member: &str) -> Option<String> {
     } else {
         return None;
     };
-    // In the case `enum-member-case` asks for, so `ORDER_STATUS_PAID` gets one answer, `Paid`.
-    // `Code_404` gets none: `404` is not a name.
+    // In the case `enum-member-case` asks for, so following this advice settles both rules:
+    // `ORDER_STATUS_PAID` -> `Paid`, not `PAID`. `Code_404` gets none: `404` is not a name.
     Case::Pascal
         .apply(&kept.join("_"))
         .filter(|name| name.starts_with(char::is_alphabetic))

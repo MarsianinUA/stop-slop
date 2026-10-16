@@ -18,14 +18,14 @@ impl Rule for Check {
         // One finding for all folders: they have no text in the file, so findings of their own
         // would share one fingerprint.
         if !dirs.is_empty() {
-            cx.report(Span::empty(code_start(file)))
-                .arg("dirs", dirs.join(", "));
+            cx.report(path_span(file)).arg("dirs", dirs.join(", "));
         }
     }
 }
 
 /// A name with other characters is framework syntax and passes: `[orderId]`, `(shop)`,
-/// `@modal`. One leading `.` (`.well-known`) and a `__..__` wrapper (`__tests__`) are dropped.
+/// `@modal`. One leading `.` (`.well-known`), a `__..__` wrapper (`__tests__`) or else one
+/// leading `_` (`_components`, a private folder of Next) is dropped.
 fn passes(dir: &str) -> bool {
     if !dir
         .chars()
@@ -37,18 +37,7 @@ fn passes(dir: &str) -> bool {
     let dir = dir
         .strip_prefix("__")
         .and_then(|inner| inner.strip_suffix("__"))
+        .or_else(|| dir.strip_prefix('_'))
         .unwrap_or(dir);
     Case::Kebab.matches(dir)
-}
-
-/// The path has no text in the file, so the finding sits where the code starts: a fixture's
-/// `// expect:` mark can reach that line, and a hunk that adds the file covers it.
-fn code_start(file: &File<'_>) -> u32 {
-    let program = file.semantic.nodes().program();
-    program
-        .directives
-        .first()
-        .map(|directive| directive.span.start)
-        .or_else(|| program.body.first().map(|statement| statement.span().start))
-        .unwrap_or(0)
 }

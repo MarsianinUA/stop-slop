@@ -91,4 +91,12 @@ class Draft {
   }
 }
 
-export { Counter, Lazy, Dynamic, Rows, TreeNode, Entity, Ambient, Draft };
+export { Counter, Lazy, Dynamic, Rows, TreeNode, Entity, Ambient, Draft, Cast };
+
+class Cast {
+  private second = 2;
+
+  set(key: 'second', value: number): void {
+    (this as Cast)[key] = value;
+  }
+}

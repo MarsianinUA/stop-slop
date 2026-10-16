@@ -57,3 +57,6 @@ export class Cart {
 
 const shared_label = 'cart'; // expect: naming-case
 export { shared_label };
+
+const runE2ETimeoutMs = 1000; // expect: naming-case
+export const limits = [runE2ETimeoutMs];

@@ -12,14 +12,20 @@ impl Rule for Check {
         if matches!(file.role, Some(Role::Functions | Role::Constants)) {
             return;
         }
-        let Some(class) = top_classes(file).first().map(|class| class.name) else {
-            return;
+        let names: Vec<String> = top_classes(file)
+            .iter()
+            .map(|class| format!("`{}`", class.name))
+            .collect();
+        let classes = match names.as_slice() {
+            [] => return,
+            [name] => format!("class {name}"),
+            _ => format!("classes {}", names.join(", ")),
         };
         for binding in top_bindings(file) {
             if binding.kind == TopKind::Function {
                 cx.report(binding.span)
                     .arg("name", binding.span.source_text(file.text))
-                    .arg("class", class);
+                    .arg("classes", &classes);
             }
         }
     }

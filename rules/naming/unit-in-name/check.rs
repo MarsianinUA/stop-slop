@@ -44,7 +44,10 @@ impl Rule for Check {
             _ => return,
         };
         if is_number_value(file, ty, value, &mut HashSet::new()) {
-            cx.report(span).arg("name", name).arg("quantity", quantity);
+            // With its `#`, as the reader sees it.
+            cx.report(span)
+                .arg("name", span.source_text(file.text))
+                .arg("quantity", quantity);
         }
     }
 
@@ -116,29 +119,19 @@ fn is_number_value(
 
 /// `number`, `bigint`, a numeric literal, or a union of them with `null` / `undefined`.
 fn is_number_type(ty: &TSType<'_>) -> bool {
-    let is_number = |ty: &TSType<'_>| match ty {
+    is_nullable(ty, |ty| match ty {
         TSType::TSNumberKeyword(_) | TSType::TSBigIntKeyword(_) => true,
         TSType::TSLiteralType(literal) => matches!(
             literal.literal,
             TSLiteral::NumericLiteral(_) | TSLiteral::BigIntLiteral(_)
         ),
         _ => false,
-    };
-    match ty {
-        TSType::TSUnionType(union) => {
-            union.types.iter().any(is_number)
-                && union.types.iter().all(|ty| {
-                    is_number(ty)
-                        || matches!(ty, TSType::TSNullKeyword(_) | TSType::TSUndefinedKeyword(_))
-                })
-        }
-        _ => is_number(ty),
-    }
+    })
 }
 
-/// Only what the syntax shows: `setTimeout(..)` returns a handle, and a call other than the
-/// global `Number(..)`, `parseInt(..)`, `parseFloat(..)`, `Math.*(..)` and `Date.now()` shows
-/// nothing.
+/// Only what the syntax shows: an operator other than `+` gives a number whatever it gets
+/// (`deadline - now`); `setTimeout(..)` returns a handle, and a call other than the global
+/// `Number(..)`, `parseInt(..)`, `parseFloat(..)`, `Math.*(..)` and `Date.now()` shows nothing.
 fn is_number(file: &File<'_>, expression: &Expression<'_>, seen: &mut HashSet<SymbolId>) -> bool {
     match expression {
         Expression::TSNonNullExpression(inner) => is_number(file, &inner.expression, seen),
@@ -150,18 +143,16 @@ fn is_number(file: &File<'_>, expression: &Expression<'_>, seen: &mut HashSet<Sy
         Expression::TSAsExpression(assertion) => is_number_type(&assertion.type_annotation),
         Expression::TSTypeAssertion(assertion) => is_number_type(&assertion.type_annotation),
         Expression::NumericLiteral(_) | Expression::BigIntLiteral(_) => true,
-        Expression::UnaryExpression(unary) => match unary.operator {
-            UnaryOperator::UnaryPlus => true,
-            UnaryOperator::UnaryNegation => is_number(file, &unary.argument, seen),
-            _ => false,
-        },
+        Expression::UnaryExpression(unary) => matches!(
+            unary.operator,
+            UnaryOperator::UnaryPlus | UnaryOperator::UnaryNegation | UnaryOperator::BitwiseNot
+        ),
         // `+` joins strings too.
         Expression::BinaryExpression(binary) if binary.operator == BinaryOperator::Addition => {
             is_number(file, &binary.left, seen) && is_number(file, &binary.right, seen)
         }
         Expression::BinaryExpression(binary) => {
-            binary.operator.is_arithmetic()
-                && (is_number(file, &binary.left, seen) || is_number(file, &binary.right, seen))
+            binary.operator.is_arithmetic() || binary.operator.is_bitwise()
         }
         Expression::CallExpression(call) => match &call.callee {
             Expression::StaticMemberExpression(member) => {
@@ -188,9 +179,4 @@ fn is_number(file: &File<'_>, expression: &Expression<'_>, seen: &mut HashSet<Sy
             }),
         _ => false,
     }
-}
-
-fn is_global(file: &File<'_>, expression: &Expression<'_>, name: &str) -> bool {
-    matches!(expression, Expression::Identifier(id)
-        if id.name == name && file.semantic.is_reference_to_global_variable(id))
 }

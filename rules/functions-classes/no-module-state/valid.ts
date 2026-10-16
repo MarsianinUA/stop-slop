@@ -23,3 +23,13 @@ export class Orders {
     return found;
   }
 }
+
+const api = {
+  add(left: number, right: number): number {
+    return left + right;
+  },
+};
+
+export function total(): number {
+  return api.add(1, 2);
+}

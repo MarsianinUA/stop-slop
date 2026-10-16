@@ -28,3 +28,11 @@ export class Store {
 
 const _defaults = { size: 1 };
 export { _defaults };
+
+export function isText(value: unknown): value is string {
+  return typeof value === 'string';
+}
+
+export function assertText(text: unknown): asserts text is string {
+  if (typeof text !== 'string') throw new Error('not text');
+}

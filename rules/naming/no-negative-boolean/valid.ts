@@ -31,3 +31,9 @@ export function read({ isNotDone }: { isNotDone: boolean }): boolean {
   const { isNotEmpty } = { isNotEmpty: isNotDone };
   return isNotEmpty;
 }
+
+export class NotFoundError extends Error {}
+
+export function isNotFoundError(error: unknown): error is NotFoundError {
+  return error instanceof NotFoundError;
+}

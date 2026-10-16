@@ -1,10 +1,10 @@
 use std::iter;
 
-use oxc_ast::AstKind;
 use oxc_ast::ast::{
     BinaryOperator, Class, ClassElement, Expression, MethodDefinitionKind, PropertyKey, Statement,
-    TSAccessibility,
+    TSAccessibility, TSType, TSTypePredicateName,
 };
+use oxc_ast::{AstKind, AstType};
 use oxc_semantic::{AstNode, AstNodes, NodeId, Reference, ScopeId, Scoping, SymbolFlags, SymbolId};
 use oxc_span::{GetSpan, Span};
 
@@ -72,10 +72,10 @@ const BUILT_IN_TYPES: &[&str] = &[
 ];
 
 /// Edits that rename `symbol` to `name` in the whole file: every declaration (overloads and
-/// merged declarations too) and every reference. A shorthand keeps its key: `{ value }` ->
-/// `{ value: name }`, in object literals, destructuring and assignment patterns alike; and
-/// `{ name: value }` -> `{ name }`. `None` when the rename may change what the code does or
-/// reach past this file.
+/// merged declarations too), every reference and a parameter's name in its type predicate
+/// (`value is Order`). A shorthand keeps its key: `{ value }` -> `{ value: name }`, in object
+/// literals, destructuring and assignment patterns alike; and `{ name: value }` -> `{ name }`.
+/// `None` when the rename may change what the code does or reach past this file.
 pub fn rename(file: &File<'_>, symbol: SymbolId, name: &str) -> Option<Vec<Edit>> {
     let scoping = file.semantic.scoping();
     let nodes = file.semantic.nodes();
@@ -99,12 +99,48 @@ pub fn rename(file: &File<'_>, symbol: SymbolId, name: &str) -> Option<Vec<Edit>
         return None;
     }
 
-    occurrences(file, symbol)
+    let mut edits: Vec<Edit> = occurrences(file, symbol)
         .map(|node| {
             // An escaped name (`\u0061`) is the same symbol under other text.
             (node.span().source_text(file.text) == old).then(|| edit(nodes, node, old, name))
         })
-        .collect()
+        .collect::<Option<_>>()?;
+    edits.extend(predicate_name(file, symbol).map(|span| Edit {
+        span,
+        text: name.to_string(),
+    }));
+    Some(edits)
+}
+
+/// The parameter's name in the type predicate of its function (`value is Order`,
+/// `asserts value`): a name, not a reference, so semantic leaves it out.
+fn predicate_name(file: &File<'_>, symbol: SymbolId) -> Option<Span> {
+    let nodes = file.semantic.nodes();
+    let scoping = file.semantic.scoping();
+    let declaration = scoping.symbol_declaration(symbol);
+    let AstKind::FormalParameter(_) = nodes.kind(declaration) else {
+        return None;
+    };
+    // The parent is the parameter list; its parent owns it.
+    let return_type = match nodes.ancestor_kinds(declaration).nth(1)? {
+        AstKind::Function(function) => function.return_type.as_deref(),
+        AstKind::ArrowFunctionExpression(arrow) => arrow.return_type.as_deref(),
+        AstKind::TSFunctionType(function) => Some(&*function.return_type),
+        AstKind::TSMethodSignature(method) => method.return_type.as_deref(),
+        AstKind::TSCallSignatureDeclaration(signature) => signature.return_type.as_deref(),
+        _ => None,
+    }?;
+    match &return_type.type_annotation {
+        TSType::TSTypePredicate(predicate) => match &predicate.parameter_name {
+            TSTypePredicateName::Identifier(id)
+                if id.span.source_text(file.text) == scoping.symbol_name(symbol) =>
+            {
+                Some(id.span)
+            }
+            _ => None,
+        },
+        _ => None,
+    }
 }
 
 /// Every binding of `symbol` (overloads and merged declarations each bind it), then every
@@ -153,13 +189,23 @@ pub fn is_own_name(file: &File<'_>, symbol: SymbolId) -> bool {
         | AstKind::TSMappedType(_) => true,
         _ => false,
     };
-    declares_own_name && !is_ambient(nodes, declaration)
+    declares_own_name && !is_ambient(file, declaration)
 }
+
+/// The nodes [`private_member`] finds a member in, for a rule's `NODES`.
+pub const PRIVATE_MEMBER_NODES: &[AstType] = &[
+    AstType::PropertyDefinition,
+    AstType::MethodDefinition,
+    AstType::AccessorProperty,
+    AstType::FormalParameter,
+];
 
 /// The name and span of a private class member: a `private` or `#` field, accessor or method
 /// with a body (a method without one is an overload signature), or a `private` parameter
 /// property; the `#` is not in the name. `None` for anything else: an interface, a base class,
 /// a protocol (`toJSON`) or an outside format (`_id`) may dictate public and protected names.
+/// A member is not a symbol: no rename reaches `this.x` here and `obj['x']` elsewhere, so a
+/// finding on one has no fix.
 pub fn private_member<'a>(file: &File<'a>, node: &AstNode<'a>) -> Option<(&'a str, Span)> {
     let member = match node.kind() {
         // A `declare` field only types a property that something else sets.
@@ -182,7 +228,7 @@ pub fn private_member<'a>(file: &File<'a>, node: &AstNode<'a>) -> Option<(&'a st
         }
         _ => None,
     }?;
-    (!is_ambient(file.semantic.nodes(), node.id())).then_some(member)
+    (!is_ambient(file, node.id())).then_some(member)
 }
 
 fn private_key<'a>(
@@ -198,10 +244,12 @@ fn private_key<'a>(
     }
 }
 
-/// The node or one around it is under `declare`.
-fn is_ambient(nodes: &AstNodes<'_>, id: NodeId) -> bool {
-    iter::once(nodes.kind(id))
-        .chain(nodes.ancestor_kinds(id))
+/// The node or one around it is under `declare` (`declare class`, `declare module`,
+/// `declare global`, ...): its code is elsewhere.
+pub fn is_ambient(file: &File<'_>, node: NodeId) -> bool {
+    let nodes = file.semantic.nodes();
+    iter::once(nodes.kind(node))
+        .chain(nodes.ancestor_kinds(node))
         .any(declares)
 }
 
@@ -229,7 +277,7 @@ fn is_identifier(name: &str) -> bool {
 
 /// A file without `import` or `export` is a script: its top-level names are global to other
 /// files.
-fn is_script_global(file: &File<'_>, symbol: SymbolId) -> bool {
+pub fn is_script_global(file: &File<'_>, symbol: SymbolId) -> bool {
     let scoping = file.semantic.scoping();
     scoping.symbol_scope_id(symbol) == scoping.root_scope_id()
         && !file
@@ -374,18 +422,21 @@ fn is_call_or_type(nodes: &AstNodes<'_>, reference: &Reference) -> bool {
 /// A JSX tag names a component only while it starts with no lowercase letter: `<icon />` is an
 /// HTML element, so renaming the symbol of `<Icon />` to `icon` changes what renders.
 fn lowers_jsx_tag(file: &File<'_>, symbol: SymbolId, name: &str) -> bool {
+    name.starts_with(|ch: char| ch.is_ascii_lowercase()) && is_jsx_tag(file, symbol)
+}
+
+/// A JSX tag refers to the symbol: `<Icon />`.
+pub fn is_jsx_tag(file: &File<'_>, symbol: SymbolId) -> bool {
     let nodes = file.semantic.nodes();
-    name.starts_with(|ch: char| ch.is_ascii_lowercase())
-        && file
-            .semantic
-            .scoping()
-            .get_resolved_references(symbol)
-            .any(|reference| {
-                matches!(
-                    nodes.parent_kind(reference.node_id()),
-                    AstKind::JSXOpeningElement(_) | AstKind::JSXClosingElement(_)
-                )
-            })
+    file.semantic
+        .scoping()
+        .get_resolved_references(symbol)
+        .any(|reference| {
+            matches!(
+                nodes.parent_kind(reference.node_id()),
+                AstKind::JSXOpeningElement(_) | AstKind::JSXClosingElement(_)
+            )
+        })
 }
 
 /// `name` is bound in the symbol's scope or a scope inside it, or some reference there already
@@ -415,25 +466,39 @@ fn is_taken(file: &File<'_>, symbol: SymbolId, name: &str) -> bool {
 /// same pass, and the two names would become one.
 fn has_similar_name(file: &File<'_>, symbol: SymbolId, name: &str) -> bool {
     let scoping = file.semantic.scoping();
-    let home = scoping.symbol_scope_id(symbol);
     let flags = scoping.symbol_flags(symbol);
-    scoping.symbol_ids().any(|other| {
+    related_symbols(file, symbol).any(|other| {
         let other_flags = scoping.symbol_flags(other);
         let both = |meaning| flags.intersects(meaning) && other_flags.intersects(meaning);
         let other_name = scoping.symbol_name(other);
-        let scope = scoping.symbol_scope_id(other);
         (both(SymbolFlags::Value) || both(SymbolFlags::Type))
-            && other != symbol
             && other_name != name
-            && loose(other_name).eq(loose(name))
-            && (is_within(scoping, scope, home) || is_within(scoping, home, scope))
+            && is_similar_name(other_name, name)
     })
 }
 
-fn loose(name: &str) -> impl Iterator<Item = char> + '_ {
-    name.chars()
-        .filter(|ch| !matches!(ch, '_' | '-' | '$'))
-        .flat_map(char::to_lowercase)
+/// The names differ only in `_`, `-`, `$` and case: `user_id`, `userID` and `userId`.
+pub fn is_similar_name(a: &str, b: &str) -> bool {
+    fn loose(name: &str) -> impl Iterator<Item = char> + '_ {
+        name.chars()
+            .filter(|ch| !matches!(ch, '_' | '-' | '$'))
+            .flat_map(char::to_lowercase)
+    }
+    loose(a).eq(loose(b))
+}
+
+/// The file's other symbols whose scope is the symbol's, inside it or around it: the names
+/// that one pass of renames in the symbol's scope may meet.
+pub fn related_symbols<'a>(
+    file: &File<'a>,
+    symbol: SymbolId,
+) -> impl Iterator<Item = SymbolId> + 'a {
+    let scoping = file.semantic.scoping();
+    let home = scoping.symbol_scope_id(symbol);
+    scoping.symbol_ids().filter(move |&other| {
+        let scope = scoping.symbol_scope_id(other);
+        other != symbol && (is_within(scoping, scope, home) || is_within(scoping, home, scope))
+    })
 }
 
 /// `scope` is `outer` or nested in it.

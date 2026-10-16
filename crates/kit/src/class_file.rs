@@ -1,6 +1,6 @@
 use oxc_ast::ast::{
-    ArrowFunctionExpression, Class, Declaration, ExportDefaultDeclarationKind, Expression,
-    Function, Statement, VariableDeclaration,
+    ArrowFunctionExpression, Class, Declaration, Decorator, ExportDefaultDeclarationKind,
+    Expression, Function, Statement, VariableDeclaration,
 };
 use oxc_semantic::SymbolId;
 use oxc_span::{GetSpan, Span};
@@ -75,8 +75,8 @@ pub struct TopBinding<'a> {
     /// The bound symbols: one, several for a pattern, none for an anonymous default export
     /// (the name of `export default (function f() {})` is bound only inside it).
     pub symbols: Vec<SymbolId>,
-    /// The value of a `const` / `let` / `var`; `None` for a function declaration and a
-    /// declarator without one.
+    /// The value of a `const` / `let` / `var`; `None` for a function declaration, an anonymous
+    /// default export (`export default () => ..`) and a declarator without one.
     pub init: Option<&'a Expression<'a>>,
 }
 
@@ -185,15 +185,9 @@ fn default_top<'a>(declaration: &'a ExportDefaultDeclarationKind<'a>) -> Option<
     }
 }
 
-/// From `class` or `abstract` to the end of the name, or of `class` without one. Decorators
-/// before `export` lie outside the class span; after it (`export @D() class B`) they lie inside.
+/// From `class` or `abstract` to the end of the name, or of `class` without one.
 fn class_head(file: &File<'_>, class: &Class<'_>) -> Span {
-    let start = match class.decorators.last() {
-        Some(decorator) if decorator.span.end > class.span.start => {
-            skip_trivia(file.text, decorator.span.end)
-        }
-        _ => class.span.start,
-    };
+    let start = start_after_decorators(file, class.span, &class.decorators);
     let end = match &class.id {
         Some(id) => id.span.end,
         None if file.text[start as usize..].starts_with("abstract") => {
@@ -202,6 +196,18 @@ fn class_head(file: &File<'_>, class: &Class<'_>) -> Span {
         None => start + "class".len() as u32,
     };
     Span::new(start, end)
+}
+
+/// Where a decorated class or class member starts without its decorators: past the last one and
+/// the spaces and comments after it. Decorators before `export` lie outside the class's span
+/// (`@D() export class A`) and leave its start; after it (`export @D() class B`) they lie inside.
+pub fn start_after_decorators(file: &File<'_>, span: Span, decorators: &[Decorator<'_>]) -> u32 {
+    match decorators.last() {
+        Some(decorator) if decorator.span.end > span.start => {
+            skip_trivia(file.text, decorator.span.end)
+        }
+        _ => span.start,
+    }
 }
 
 /// The first offset from `at` that is not whitespace or a comment. Only for a stretch between

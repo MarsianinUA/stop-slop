@@ -6,6 +6,14 @@ export class Money {
   add(other: Money): Money {
     return new Money(this.cents + other.cents);
   }
+
+  static sum(items: Money[]): Money {
+    return items.reduce((total, item) => total.add(item), Money.ZERO);
+  }
+
+  static isZero(money: Money): boolean {
+    return money.cents === Money.ZERO.cents;
+  }
 }
 
 export class Pool {
@@ -50,5 +58,13 @@ export class Color {
 
   static parse(text: string): Color {
     return text === 'red' ? Color.RED : Color.BLUE;
+  }
+}
+
+export class Theme {
+  static current: Theme | string = 'light';
+
+  static active(): Theme | string {
+    return Theme.current;
   }
 }

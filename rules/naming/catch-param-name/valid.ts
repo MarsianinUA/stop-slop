@@ -39,3 +39,12 @@ export function head(lines: string[]): string | null {
     return null;
   }
 }
+
+export function tryLog(line: string): boolean {
+  try {
+    log(line, null);
+    return true;
+  } catch (_error) {
+    return false;
+  }
+}

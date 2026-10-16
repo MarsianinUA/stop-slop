@@ -89,3 +89,30 @@ export class Legacy {
 
   name = 'legacy';
 }
+
+export class Report {
+  // #region output
+  render(): string {
+    return this.title;
+  }
+  // #endregion
+
+  title = 'report';
+}
+
+export class Draft { // eslint-disable-next-line class-methods-use-this
+  render(): string {
+    return this.body;
+  }
+
+  body = 'draft';
+}
+
+export class Tagged {
+  @Column() // stored as text
+  tag = '';
+
+  read(): string {
+    return this.tag;
+  }
+}

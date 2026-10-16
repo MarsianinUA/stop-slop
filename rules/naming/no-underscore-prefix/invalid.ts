@@ -28,3 +28,11 @@ export class Store {
 
 const _defaults = { size: 1 }; // expect: no-underscore-prefix
 export { _defaults };
+
+export function isText(_value: unknown): _value is string { // expect: no-underscore-prefix
+  return typeof _value === 'string';
+}
+
+export function assertText(_text: unknown): asserts _text is string { // expect: no-underscore-prefix
+  if (typeof _text !== 'string') throw new Error('not text');
+}

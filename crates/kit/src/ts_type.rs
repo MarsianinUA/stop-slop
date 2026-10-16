@@ -5,7 +5,7 @@ use oxc_ast::ast::{
     BindingPattern, Expression, TSType, TSTypeName, TSTypeOperatorOperator, TSTypeReference,
     UnaryOperator, VariableDeclarationKind,
 };
-use oxc_semantic::SymbolId;
+use oxc_semantic::{AstNode, SymbolId};
 
 use crate::File;
 
@@ -48,6 +48,43 @@ pub fn lib_type<'a>(
         return None;
     };
     (id.name == name && file.semantic.is_reference_to_global_variable(id)).then_some(reference)
+}
+
+/// The global value `name` (`Proxy`, `Number`, `Map`): the file neither declares nor imports it.
+pub fn is_global(file: &File<'_>, expression: &Expression<'_>, name: &str) -> bool {
+    matches!(expression, Expression::Identifier(id)
+        if id.name == name && file.semantic.is_reference_to_global_variable(id))
+}
+
+/// `ty` is one that `is` accepts, or a union of such types with `null` / `undefined`:
+/// `boolean | null`.
+pub fn is_nullable(ty: &TSType<'_>, is: impl Fn(&TSType<'_>) -> bool) -> bool {
+    match ty {
+        TSType::TSUnionType(union) => {
+            union.types.iter().any(&is)
+                && union.types.iter().all(|ty| {
+                    is(ty) || matches!(ty, TSType::TSNullKeyword(_) | TSType::TSUndefinedKeyword(_))
+                })
+        }
+        _ => is(ty),
+    }
+}
+
+/// The node with the type assertions around it (`x!`, `x as T`, `<T>x`, `x satisfies T`): the
+/// outermost one, or the node itself. A write through them (`(x as T).a = 1`) still writes `x`.
+pub fn outer_assertion<'a>(file: &File<'a>, node: &AstNode<'a>) -> &'a AstNode<'a> {
+    let nodes = file.semantic.nodes();
+    let mut id = node.id();
+    while matches!(
+        nodes.parent_kind(id),
+        AstKind::TSNonNullExpression(_)
+            | AstKind::TSAsExpression(_)
+            | AstKind::TSTypeAssertion(_)
+            | AstKind::TSSatisfiesExpression(_)
+    ) {
+        id = nodes.parent_id(id);
+    }
+    nodes.get_node(id)
 }
 
 /// `ty` without `readonly` and the lib `Readonly`, `Partial`, `Required`, `NonNullable`.

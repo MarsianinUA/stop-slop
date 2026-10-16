@@ -13,14 +13,7 @@ impl Rule for Check {
             return;
         };
         let file = cx.file();
-        // The code of an ambient class is elsewhere: `declare class`, or a class inside
-        // `declare module`, `declare namespace` or `declare global`.
-        let ambient = |kind: AstKind<'_>| match kind {
-            AstKind::TSExternalModuleDeclaration(_) | AstKind::TSGlobalDeclaration(_) => true,
-            AstKind::TSNamespaceDeclaration(namespace) => namespace.declare,
-            _ => false,
-        };
-        if class.declare || file.semantic.nodes().ancestor_kinds(node.id()).any(ambient) {
+        if is_ambient(file, node.id()) {
             return;
         }
         let mut highest = Category::Field;
@@ -100,10 +93,7 @@ fn place(file: &File<'_>, element: &ClassElement<'_>) -> Span {
         ClassElement::AccessorProperty(property) => &property.decorators[..],
         ClassElement::TSIndexSignature(_) | ClassElement::StaticBlock(_) => &[],
     };
-    let start = decorators.last().map_or(span.start, |decorator| {
-        let rest = &file.text[decorator.span.end as usize..span.end as usize];
-        decorator.span.end + (rest.len() - rest.trim_start().len()) as u32
-    });
+    let start = start_after_decorators(file, span, decorators);
     let end = match element {
         ClassElement::MethodDefinition(method) => method.value.params.span.end,
         _ => span.end,
@@ -128,7 +118,7 @@ fn reorder(file: &File<'_>, class: &Class<'_>) -> Option<Edit> {
     if file
         .semantic
         .comments_range(body.span.start..body.span.end)
-        .any(|comment| opens_eslint_region(comment.span.source_text(text)))
+        .any(|comment| opens_region(comment.span.source_text(text)))
     {
         return None;
     }
@@ -148,8 +138,9 @@ fn reorder(file: &File<'_>, class: &Class<'_>) -> Option<Edit> {
 
     let blank = |from: u32, to: u32| text[from as usize..to as usize].trim().is_empty();
     let mut slots = Vec::with_capacity(elements.len());
-    // Comments on the line of `{` stay with it.
-    let start = line_tail(file, body.span.start + 1).map_or(body.span.start + 1, |(end, _)| end);
+    // Comments on the line of `{` stay with it. Code there, or a comment about the next line
+    // (`// @ts-expect-error`), gets no fix: the new first member would land on that line.
+    let (start, _) = line_tail(file, body.span.start + 1)?;
     let mut end = start;
     let mut open = false;
     let mut keyword_open = false;
@@ -212,10 +203,12 @@ fn reorder(file: &File<'_>, class: &Class<'_>) -> Option<Edit> {
     })
 }
 
-/// `eslint-disable` and `eslint-enable` bound the members between them; the `-line` and
-/// `-next-line` forms move with their member.
-fn opens_eslint_region(comment: &str) -> bool {
-    comment.contains("eslint-enable")
+/// `eslint-disable` and `eslint-enable` bound the members between them, and `#region` and
+/// `#endregion` fold them; the `-line` and `-next-line` forms move with their member.
+fn opens_region(comment: &str) -> bool {
+    comment.contains("#region")
+        || comment.contains("#endregion")
+        || comment.contains("eslint-enable")
         || comment
             .split("eslint-disable")
             .skip(1)

@@ -58,3 +58,19 @@ declare global {
   interface Window { app_state: unknown }
 }
 export const debugEnabled = __DEV__;
+
+export class Statuses {
+  private static readonly ORDER_STATES = ['open', 'paid'] as const;
+
+  static first(): string {
+    return Statuses.ORDER_STATES[0];
+  }
+}
+
+declare class Admin {}
+declare class Guest {}
+
+export function pick(isAdmin: boolean): object {
+  const Model = isAdmin ? Admin : Guest;
+  return new Model();
+}

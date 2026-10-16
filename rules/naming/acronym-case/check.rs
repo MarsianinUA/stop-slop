@@ -9,22 +9,19 @@ pub struct Check {
 }
 
 impl Rule for Check {
-    const NODES: &'static [AstType] = &[
-        AstType::PropertyDefinition,
-        AstType::MethodDefinition,
-        AstType::AccessorProperty,
-        AstType::FormalParameter,
-    ];
+    const NODES: &'static [AstType] = PRIVATE_MEMBER_NODES;
 
     fn on_node<'a>(&self, node: &AstNode<'a>, cx: &mut Cx<'_, 'a>) {
-        let Some((name, span)) = private_member(cx.file(), node) else {
+        let file = cx.file();
+        let Some((name, span)) = private_member(file, node) else {
             return;
         };
-        // A member is not a symbol: `this.x` here and `obj['x']` elsewhere are out of reach.
         if let Some((suggestion, _)) = self.rewrite(name) {
+            // With its `#`, as the reader sees it.
+            let shown = span.source_text(file.text);
             cx.report(span)
-                .arg("name", name)
-                .arg("suggestion", suggestion);
+                .arg("name", shown)
+                .arg("suggestion", shown.replacen(name, &suggestion, 1));
         }
     }
 

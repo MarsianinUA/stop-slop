@@ -14,11 +14,15 @@ impl Rule for Check {
     const NODES: &'static [AstType] = &[AstType::MethodDefinition];
 
     fn on_node<'a>(&self, node: &AstNode<'a>, cx: &mut Cx<'_, 'a>) {
-        let Some((name, span)) = private_member(cx.file(), node) else {
+        let file = cx.file();
+        let Some((name, span)) = private_member(file, node) else {
             return;
         };
         if let Some(word) = self.red_word(name) {
-            cx.report(span).arg("name", name).arg("word", word);
+            // With its `#`, as the reader sees it.
+            cx.report(span)
+                .arg("name", span.source_text(file.text))
+                .arg("word", word);
         }
     }
 

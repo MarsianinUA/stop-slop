@@ -281,21 +281,9 @@ fn every_field_write_widens(file: &File<'_>, key: &PropertyKey<'_>, target: Targ
 /// `satisfies`: `None` for a read, `Some(None)` for a write without one value (`+=`, `++`,
 /// `delete`, destructuring, a `for` target).
 fn assigned<'a>(file: &File<'a>, node: &AstNode<'a>) -> Option<Option<&'a Expression<'a>>> {
-    let nodes = file.semantic.nodes();
-    let mut target = node;
-    let mut parent = nodes.parent_node(target.id());
-    while matches!(
-        parent.kind(),
-        AstKind::TSNonNullExpression(_)
-            | AstKind::TSAsExpression(_)
-            | AstKind::TSTypeAssertion(_)
-            | AstKind::TSSatisfiesExpression(_)
-    ) {
-        target = parent;
-        parent = nodes.parent_node(target.id());
-    }
+    let target = outer_assertion(file, node);
     let span = target.span();
-    let write = match parent.kind() {
+    let write = match file.semantic.nodes().parent_kind(target.id()) {
         AstKind::AssignmentExpression(assignment) if assignment.left.span() == span => {
             return Some(assignment.operator.is_assign().then_some(&assignment.right));
         }

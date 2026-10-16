@@ -1,5 +1,8 @@
+use std::borrow::Cow;
+
 use kit::oxc::ast::ast::{
-    AssignmentOperator, ClassElement, Expression, MethodDefinitionKind, TSType, TSTypeName,
+    AssignmentOperator, ClassElement, Expression, LogicalOperator, MethodDefinitionKind, TSType,
+    TSTypeName,
 };
 use kit::oxc::semantic::NodeId;
 use kit::prelude::*;
@@ -50,7 +53,7 @@ impl Rule for Check {
             .skip(body.index() + 1)
             .take_while(|inner| inner.span().start < end)
         {
-            let Some(field) = member_field(file, inner.kind(), name) else {
+            let Some(field) = member_field(file, inner, name) else {
                 continue;
             };
             for slot in slots.iter_mut().filter(|slot| slot.field == field) {
@@ -124,15 +127,12 @@ fn slot<'a>(file: &File<'a>, element: &ClassElement<'a>, class: &str) -> Option<
     })
 }
 
-/// `C`, `C | null`.
+/// `C`, `C | null`, `C | undefined`.
 fn names_class(ty: &TSType<'_>, class: &str) -> bool {
-    match ty {
-        TSType::TSTypeReference(reference) => {
-            matches!(&reference.type_name, TSTypeName::IdentifierReference(id) if id.name == class)
-        }
-        TSType::TSUnionType(union) => union.types.iter().any(|ty| names_class(ty, class)),
-        _ => false,
-    }
+    is_nullable(ty, |ty| {
+        matches!(ty, TSType::TSTypeReference(reference)
+            if matches!(&reference.type_name, TSTypeName::IdentifierReference(id) if id.name == class))
+    })
 }
 
 /// `new C(..)`, `new this(..)`.
@@ -150,29 +150,48 @@ fn is_class(expression: &Expression<'_>, class: &str) -> bool {
     }
 }
 
-/// `C.slot`, `this.slot`, `C.#slot`, `this.#slot`.
-fn member_field<'a>(file: &File<'a>, kind: AstKind<'a>, class: &str) -> Option<&'a str> {
-    let (object, field) = match kind {
-        AstKind::StaticMemberExpression(member) => (&member.object, member.property.span),
-        AstKind::PrivateFieldExpression(member) => (&member.object, member.field.span),
-        _ => return None,
-    };
-    is_class(object, class).then(|| field.source_text(file.text))
-}
-
-/// The key of the class's static method or getter whose own `return` holds the node: a `return`
-/// in a nested function returns from that function.
-fn returning_method<'a>(file: &File<'a>, id: NodeId, body: NodeId) -> Option<&'a str> {
-    let nodes = file.semantic.nodes();
-    let mut ancestors = nodes.ancestor_ids(id);
-    let nearest = ancestors.find(|&ancestor| {
-        let kind = nodes.kind(ancestor);
-        matches!(kind, AstKind::ReturnStatement(_)) || kind.is_function_like()
-    })?;
-    if !matches!(nodes.kind(nearest), AstKind::ReturnStatement(_)) {
+/// `C.slot`, `this.slot`, `C['slot']`, `C.#slot`, `this.#slot`.
+fn member_field<'a>(file: &File<'a>, node: &AstNode<'a>, class: &str) -> Option<Cow<'a, str>> {
+    let member = node.kind().as_member_expression_kind()?;
+    if !is_class(member.object(), class) {
         return None;
     }
-    let function = ancestors.find(|&ancestor| nodes.kind(ancestor).is_function_like())?;
+    match member_use(file, node)? {
+        MemberUse::Name(name) => Some(name),
+        MemberUse::Any => None,
+    }
+}
+
+/// The key of the class's static method or getter whose own `return` hands out the slot read
+/// at the node: `return C.slot`, also through `!`, `as`, `?:`, `??` / `||` and an assignment to
+/// the slot (`return (this.#shared ??= new C())`). A slot only used inside the returned value
+/// (`return items.reduce(add, Money.ZERO)`) stays in the class.
+fn returning_method<'a>(file: &File<'a>, id: NodeId, body: NodeId) -> Option<&'a str> {
+    let nodes = file.semantic.nodes();
+    let mut value = nodes.get_node(id);
+    let statement = loop {
+        let parent = nodes.parent_node(value.id());
+        let span = value.span();
+        let hands_out = match parent.kind() {
+            AstKind::ReturnStatement(_) => break parent,
+            AstKind::TSNonNullExpression(_)
+            | AstKind::TSAsExpression(_)
+            | AstKind::TSSatisfiesExpression(_)
+            | AstKind::TSTypeAssertion(_) => true,
+            AstKind::AssignmentExpression(assignment) => assignment.left.span() == span,
+            AstKind::LogicalExpression(logical) => logical.operator != LogicalOperator::And,
+            AstKind::ConditionalExpression(conditional) => conditional.test.span() != span,
+            _ => false,
+        };
+        if !hands_out {
+            return None;
+        }
+        value = parent;
+    };
+    // A `return` in a nested function returns from that function.
+    let function = nodes
+        .ancestor_ids(statement.id())
+        .find(|&ancestor| nodes.kind(ancestor).is_function_like())?;
     let method = nodes.parent_id(function);
     match nodes.kind(method) {
         AstKind::MethodDefinition(method_definition)
