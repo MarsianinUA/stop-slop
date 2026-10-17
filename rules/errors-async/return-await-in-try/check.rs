@@ -25,10 +25,13 @@ impl Rule for Check {
             },
             _ => return,
         };
+        if !in_try_of_async(file, node) {
+            return;
+        }
         // A function of this file that gives no promise: `return this.toView(row)`.
         let is_plain =
             local_callee(file, call).is_some_and(|callee| !returns_promise(file, callee));
-        if !is_plain && in_try_of_async(file, node) {
+        if !is_plain {
             cx.report(statement.span);
         }
     }
@@ -43,7 +46,10 @@ fn in_try_of_async(file: &File<'_>, node: &AstNode<'_>) -> bool {
             AstKind::TryStatement(statement) => {
                 in_try = in_try || statement.block.span.contains_inclusive(node.span());
             }
-            AstKind::Function(function) => return in_try && function.r#async,
+            // An async generator's `return` already awaits its value.
+            AstKind::Function(function) => {
+                return in_try && function.r#async && !function.generator;
+            }
             AstKind::ArrowFunctionExpression(arrow) => return in_try && arrow.r#async,
             _ => {}
         }

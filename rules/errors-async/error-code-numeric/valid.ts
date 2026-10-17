@@ -29,3 +29,8 @@ export const errorCodes = ['E1', 'E2'];
 export type HttpErrorCode = 'bad-request' | 'not-found';
 
 export { VendorErrorCode };
+
+export const STOCK_ERROR_CODES = {
+  Missing: 10901 as const,
+  Reserved: -2 as const,
+};

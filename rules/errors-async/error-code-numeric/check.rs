@@ -14,7 +14,7 @@ impl Rule for Check {
             AstKind::TSEnumDeclaration(declaration) => {
                 let name = declaration.id.name.as_str();
                 // `declare enum` describes codes someone else assigned.
-                if is_ambient(file, node.id()) || !is_code_name(name) {
+                if !is_code_name(name) || is_ambient(file, node.id()) {
                     return;
                 }
                 for member in &declaration.body.members {
@@ -65,13 +65,12 @@ fn is_code_name(name: &str) -> bool {
             && (code.eq_ignore_ascii_case("code") || code.eq_ignore_ascii_case("codes")))
 }
 
-/// `10702`, `-1`.
+/// `10702`, `-1`, also under `as const`.
 fn is_number(expression: &Expression<'_>) -> bool {
-    match expression {
+    match expression.get_inner_expression() {
         Expression::NumericLiteral(_) => true,
         Expression::UnaryExpression(unary) => {
-            unary.operator == UnaryOperator::UnaryNegation
-                && matches!(unary.argument, Expression::NumericLiteral(_))
+            unary.operator == UnaryOperator::UnaryNegation && unary.argument.is_number()
         }
         _ => false,
     }

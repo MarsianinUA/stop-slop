@@ -19,3 +19,5 @@ export abstract class DomainError { // expect: error-extends-error
 }
 
 export default class HTTPError {} // expect: error-extends-error
+
+export const NotFoundError = class NotFound {}; // expect: error-extends-error

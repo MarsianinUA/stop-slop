@@ -62,3 +62,12 @@ export async function value(text: string): Promise<string> {
     await load('log');
   }
 }
+
+export async function* pages(id: string): AsyncGenerator<string, string> {
+  try {
+    return load(`${id}:last`);
+  } catch {
+    yield 'empty';
+    return '';
+  }
+}

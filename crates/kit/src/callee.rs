@@ -13,22 +13,20 @@ pub fn local_callee<'a>(file: &File<'a>, call: &CallExpression<'a>) -> Option<&'
     match call.callee.get_inner_expression() {
         Expression::Identifier(id) => {
             let symbol = scoping.get_reference(id.reference_id()).symbol_id()?;
-            if scoping
-                .get_resolved_references(symbol)
-                .any(|reference| reference.is_write())
-            {
-                return None;
-            }
             let declaration = scoping.symbol_declaration(symbol);
-            match nodes.kind(declaration) {
+            let callee = match nodes.kind(declaration) {
                 AstKind::Function(function) if function.body.is_some() => {
-                    Some(nodes.get_node(declaration))
+                    nodes.get_node(declaration)
                 }
                 AstKind::VariableDeclarator(declarator) => {
-                    function_value(file, declarator.init.as_ref()?)
+                    function_value(file, declarator.init.as_ref()?)?
                 }
-                _ => None,
-            }
+                _ => return None,
+            };
+            let is_written = scoping
+                .get_resolved_references(symbol)
+                .any(|reference| reference.is_write());
+            (!is_written).then_some(callee)
         }
         Expression::StaticMemberExpression(member)
             if matches!(member.object, Expression::ThisExpression(_)) =>
