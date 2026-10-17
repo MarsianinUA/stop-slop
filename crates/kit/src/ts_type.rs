@@ -219,6 +219,32 @@ fn is_known(file: &File<'_>, expression: &Expression<'_>, seen: &mut HashSet<Sym
     }
 }
 
+/// A literal value: `'orders'`, `50`, `-1`, `60 * 1000`, `true`, a template without `${}`, also
+/// under `as const`. Not `null`, a regex, an array or an object; `'a' as string` is not fixed.
+/// `naming-case` wants CONSTANT_CASE for such a module `const`, `no-loose-constant` a home.
+pub fn is_literal_value(expression: &Expression<'_>) -> bool {
+    match expression {
+        Expression::StringLiteral(_)
+        | Expression::NumericLiteral(_)
+        | Expression::BigIntLiteral(_)
+        | Expression::BooleanLiteral(_) => true,
+        Expression::TemplateLiteral(template) => template.expressions.is_empty(),
+        Expression::UnaryExpression(unary) => {
+            matches!(
+                unary.operator,
+                UnaryOperator::UnaryNegation | UnaryOperator::UnaryPlus
+            ) && is_literal_value(&unary.argument)
+        }
+        Expression::BinaryExpression(binary) => {
+            binary.operator.is_arithmetic()
+                && is_literal_value(&binary.left)
+                && is_literal_value(&binary.right)
+        }
+        _ => expression_assertion(expression)
+            .is_some_and(|(value, ty)| is_const_assertion(ty) && is_literal_value(value)),
+    }
+}
+
 /// `key` of the parameter's object is an option: the type is lib `Partial<..>`, or `key?:` in its
 /// type literal or in the interface or type literal alias of this file it names, also through
 /// `Readonly<..>`; `key: T | null` is data, whose `?? 0` handles `null`. Where the type does not

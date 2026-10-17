@@ -2021,6 +2021,33 @@ fn line_helpers_find_line_starts_blank_lines_regions_and_line_tails() {
 }
 
 #[test]
+fn literal_value_is_a_fixed_scalar_also_under_as_const() {
+    let text = "const a = 'x', b = 5, c = -1, d = 60 * 1000, e = true, f = `t`, g = 'm' as const, \
+                h = 1n, i = null, j = /x/, k = [1], l = { a: 1 }, m = 'n' as string, n = `${b}`, \
+                o = !e, p = a + 'y';";
+    with_file(text, |file| {
+        let literals: Vec<bool> = file
+            .semantic
+            .nodes()
+            .iter()
+            .filter_map(|node| match node.kind() {
+                AstKind::VariableDeclarator(declarator) => {
+                    declarator.init.as_ref().map(is_literal_value)
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            literals,
+            [
+                true, true, true, true, true, true, true, true, false, false, false, false, false,
+                false, false, false
+            ]
+        );
+    });
+}
+
+#[test]
 fn boolean_parameter_has_a_boolean_type_or_a_boolean_default() {
     let text = "export function f(a: boolean, b: true | null, c: boolean[], d = false, e = 0, f?: string) {
   return [a, b, c, d, e, f];

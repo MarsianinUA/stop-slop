@@ -1,7 +1,6 @@
 use kit::Reported;
 use kit::oxc::ast::ast::{
-    BinaryOperator, BindingPattern, Expression, UnaryOperator, VariableDeclarationKind,
-    VariableDeclarator,
+    BinaryOperator, BindingPattern, Expression, VariableDeclarationKind, VariableDeclarator,
 };
 use kit::oxc::semantic::SymbolId;
 use kit::prelude::*;
@@ -180,7 +179,7 @@ fn variable_cases(
         AstKind::VariableDeclaration(declaration) if declaration.kind == VariableDeclarationKind::Const
     );
     let in_module = scoping.symbol_scope_id(symbol) == scoping.root_scope_id();
-    // `is_literal` takes the value with its assertion: `'a' as string` is not a fixed value.
+    // The value with its assertion: `'a' as string` is not a fixed value.
     let value = declarator.init.as_ref();
     match value.map(Expression::get_inner_expression) {
         Some(Expression::FunctionExpression(_) | Expression::ArrowFunctionExpression(_)) => {
@@ -188,32 +187,9 @@ fn variable_cases(
         }
         Some(Expression::ClassExpression(_)) => PASCAL,
         _ if !is_const => CAMEL,
-        _ if in_module && value.is_some_and(is_literal) => CONSTANT,
+        _ if in_module && value.is_some_and(is_literal_value) => CONSTANT,
         _ if in_module => ANY,
         Some(Expression::CallExpression(_) | Expression::AwaitExpression(_)) => CAMEL_OR_PASCAL,
         _ => CAMEL,
-    }
-}
-
-/// A fixed value: `'orders'`, `50`, `-1`, `60 * 1000`, a template without `${}`, also under
-/// `as const`.
-fn is_literal(expression: &Expression<'_>) -> bool {
-    match expression {
-        Expression::StringLiteral(_)
-        | Expression::NumericLiteral(_)
-        | Expression::BigIntLiteral(_)
-        | Expression::BooleanLiteral(_) => true,
-        Expression::TemplateLiteral(template) => template.expressions.is_empty(),
-        Expression::UnaryExpression(unary) => {
-            matches!(
-                unary.operator,
-                UnaryOperator::UnaryNegation | UnaryOperator::UnaryPlus
-            ) && is_literal(&unary.argument)
-        }
-        Expression::BinaryExpression(binary) => {
-            binary.operator.is_arithmetic() && is_literal(&binary.left) && is_literal(&binary.right)
-        }
-        _ => expression_assertion(expression)
-            .is_some_and(|(value, ty)| is_const_assertion(ty) && is_literal(value)),
     }
 }

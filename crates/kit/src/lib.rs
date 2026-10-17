@@ -48,8 +48,8 @@ pub use safety::has_safety_comment;
 pub use serde;
 pub use ts_type::{
     expression_assertion, is_boolean_parameter, is_boolean_type, is_const_assertion, is_global,
-    is_known_value, is_nullable, is_open_key, is_option_key, lib_type, outer_assertion,
-    type_assertion, unwrapped_type,
+    is_known_value, is_literal_value, is_nullable, is_open_key, is_option_key, lib_type,
+    outer_assertion, type_assertion, unwrapped_type,
 };
 
 pub mod oxc {
@@ -66,12 +66,13 @@ pub mod prelude {
         Rule, TopBinding, TopClass, TopKind, add_import, expression_assertion, has_blank_line,
         has_safety_comment, if_runs, import_blocks, import_group, import_kind, is_ambient,
         is_boolean_parameter, is_boolean_type, is_callback, is_const_assertion, is_di_constructor,
-        is_exported, is_exported_node, is_global, is_jsx_tag, is_known_value, is_nullable,
-        is_open_key, is_option_key, is_own_name, is_own_type, is_public, is_script_global,
-        is_signature_given, is_similar_name, lib_type, line_start, line_tail, local_callee,
-        member_use, member_write, module_source, mutator_call, opens_region, outer_assertion,
-        package_name, path_span, private_member, related_symbols, rename, start_after_decorators,
-        this_class, top_bindings, top_classes, type_assertion, unwrapped_type, words,
+        is_exported, is_exported_node, is_global, is_jsx_tag, is_known_value, is_literal_value,
+        is_nullable, is_open_key, is_option_key, is_own_name, is_own_type, is_public,
+        is_script_global, is_signature_given, is_similar_name, lib_type, line_start, line_tail,
+        local_callee, member_use, member_write, module_source, mutator_call, opens_region,
+        outer_assertion, package_name, path_span, private_member, related_symbols, rename,
+        start_after_decorators, this_class, top_bindings, top_classes, type_assertion,
+        unwrapped_type, words,
     };
     pub use oxc_allocator::Allocator;
     pub use oxc_ast::{AstKind, AstType};
