@@ -16,7 +16,7 @@ impl Rule for Check {
             return;
         }
         let scoping = file.semantic.scoping();
-        let (processes, mut reads) = imports(file);
+        let (processes, env_imports) = imports(file);
         // `process` the file neither declares nor imports is Node's global.
         let globals = scoping
             .root_unresolved_references()
@@ -29,12 +29,10 @@ impl Rule for Check {
                 .get_resolved_references(symbol)
                 .map(|reference| reference.node_id())
         });
-        reads.extend(
-            globals
-                .chain(imported)
-                .filter_map(|node| env_read(file, node)),
-        );
-        for span in reads {
+        let reads = globals
+            .chain(imported)
+            .filter_map(|node| env_read(file, node));
+        for span in env_imports.into_iter().chain(reads) {
             // One line in the text output, also for a destructuring over several lines.
             let access = span
                 .source_text(file.text)
@@ -77,16 +75,20 @@ fn imports(file: &File<'_>) -> (Vec<SymbolId>, Vec<Span>) {
                 ImportDeclarationSpecifier::ImportDefaultSpecifier(default) => &default.local,
                 ImportDeclarationSpecifier::ImportNamespaceSpecifier(namespace) => &namespace.local,
                 ImportDeclarationSpecifier::ImportSpecifier(named)
-                    if named.import_kind.is_value() =>
+                    if !named.import_kind.is_value() =>
                 {
-                    match named.imported.name().as_str() {
-                        "default" => &named.local,
-                        "env" => {
-                            reads.push(named.span);
-                            continue;
-                        }
-                        _ => continue,
-                    }
+                    continue;
+                }
+                ImportDeclarationSpecifier::ImportSpecifier(named)
+                    if named.imported.name() == "default" =>
+                {
+                    &named.local
+                }
+                ImportDeclarationSpecifier::ImportSpecifier(named)
+                    if named.imported.name() == "env" =>
+                {
+                    reads.push(named.span);
+                    continue;
                 }
                 ImportDeclarationSpecifier::ImportSpecifier(_) => continue,
             };
@@ -100,33 +102,22 @@ fn imports(file: &File<'_>) -> (Vec<SymbolId>, Vec<Span>) {
 /// what it is read for (`process.env.PORT`, `process.env[key]`, `const { PORT } = process.env`),
 /// or a destructuring that takes `env` (`const { env } = process`).
 fn env_read(file: &File<'_>, reference: NodeId) -> Option<Span> {
-    let nodes = file.semantic.nodes();
-    let process = outer_assertion(file, nodes.get_node(reference));
-    let parent = nodes.parent_node(process.id());
-    match parent.kind() {
-        AstKind::VariableDeclarator(declarator) => {
-            let BindingPattern::ObjectPattern(pattern) = &declarator.id else {
-                return None;
-            };
-            pattern
-                .properties
-                .iter()
-                .any(|property| property.key.static_name().is_some_and(|key| key == "env"))
-                .then_some(declarator.span)
-        }
-        _ if matches!(member_use(file, parent), Some(MemberUse::Name(name)) if name == "env") => {
-            Some(read_span(file, parent))
-        }
-        _ => None,
+    let (_, parent) = use_of(file, file.semantic.nodes().get_node(reference));
+    if let AstKind::VariableDeclarator(declarator) = parent.kind() {
+        let BindingPattern::ObjectPattern(pattern) = &declarator.id else {
+            return None;
+        };
+        return pattern
+            .properties
+            .iter()
+            .any(|property| property.key.static_name().is_some_and(|key| key == "env"))
+            .then_some(declarator.span);
     }
-}
-
-/// `process.env` and what it is read for: the member taken from it, or its destructuring.
-fn read_span(file: &File<'_>, env: &AstNode<'_>) -> Span {
-    let nodes = file.semantic.nodes();
-    let env = outer_assertion(file, env);
-    let parent = nodes.parent_node(env.id());
-    match parent.kind() {
+    if !matches!(member_use(file, parent), Some(MemberUse::Name(name)) if name == "env") {
+        return None;
+    }
+    let (env, parent) = use_of(file, parent);
+    Some(match parent.kind() {
         AstKind::VariableDeclarator(declarator)
             if matches!(declarator.id, BindingPattern::ObjectPattern(_)) =>
         {
@@ -139,5 +130,11 @@ fn read_span(file: &File<'_>, env: &AstNode<'_>) -> Span {
             parent.span()
         }
         _ => env.span(),
-    }
+    })
+}
+
+/// The node with the assertions around it, and the node that uses it.
+fn use_of<'a>(file: &File<'a>, node: &AstNode<'a>) -> (&'a AstNode<'a>, &'a AstNode<'a>) {
+    let node = outer_assertion(file, node);
+    (node, file.semantic.nodes().parent_node(node.id()))
 }
