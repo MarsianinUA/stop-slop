@@ -1,0 +1,13 @@
+description = "A value named like a secret (`token`, `password`, `authorization`, `apiKey`...) goes into a log call"
+kind = "candidate"
+files = "code"
+source = ["personal"]
+message = "`{value}` goes into a log line, and its name says it holds a secret: log lines are kept, shipped and read by more people and tools than the secret is meant for, so a leaked line hands it to all of them. Log that the value is there, or an id, instead of the value."
+agent = """
+A value named like a secret reaches a log call as it is. If it does hold a secret (a token, a password, a key, an authorization header, a cookie), log its presence or an id instead, or mask it. If the logger's redaction list already censors this structured key (pino `redact`, a winston format), or the name only looks like a secret (an ERC-20 token, a CSRF token count), ignore the finding with that reason. A secret-bearing field added to a structured log updates the redaction list in the same change.
+"""
+
+[options]
+loggers = ["console", "log", "logger"]
+levels = ["log", "trace", "debug", "info", "notice", "warn", "warning", "error", "fatal", "verbose"]
+names = ["token", "password", "passphrase", "secret", "authorization", "cookie", "cookies", "credentials", "signature", "apiKey", "accessKey", "secretKey", "privateKey"]
