@@ -1794,6 +1794,38 @@ export class K {
 }
 
 #[test]
+fn returns_promise_is_async_or_a_lib_promise_return_type() {
+    let text = "declare const later: Promise<number>;
+async function a() {}
+function b(): Promise<number> { return later; }
+function c() { return later; }
+async function* d() {}
+const e = async () => 1;
+const f = (): Promise<number> => later;
+const g = () => later;
+export class K {
+  async m() {}
+  n(): Promise<number> { return later; }
+  o() {}
+}
+export function shadowed() {
+  type Promise<T> = { value: T };
+  function h(): Promise<number> { return { value: 1 }; }
+  return h;
+}
+export { a, b, c, d, e, f, g };";
+    with_file(text, |file| {
+        // `c` and `g` give a promise without saying so: only the syntax counts.
+        assert_eq!(
+            per_function(file, |node| returns_promise(file, node)),
+            [
+                true, true, false, false, true, true, false, true, true, false, false, false
+            ]
+        );
+    });
+}
+
+#[test]
 fn if_runs_are_the_tests_of_adjacent_ifs_and_their_else_ifs() {
     let text = "export function f(a: number) {
   if (a === 1) {} else if (a === 2) {}

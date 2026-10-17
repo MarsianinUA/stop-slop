@@ -2,7 +2,7 @@ use oxc_ast::AstKind;
 use oxc_ast::ast::{CallExpression, Class, ClassElement, Expression, MethodDefinitionKind};
 use oxc_semantic::{AstNode, NodeId};
 
-use crate::File;
+use crate::{File, lib_type};
 
 /// The function of this file that the call runs: a function declared with a body, a `const`
 /// holding a function or an arrow, or `this.m(..)` - a method with a body or a function field of
@@ -58,6 +58,23 @@ pub fn local_callee<'a>(file: &File<'a>, call: &CallExpression<'a>) -> Option<&'
         }
         _ => None,
     }
+}
+
+/// A function or arrow whose call gives a promise: `async`, or the lib `Promise<..>` as its return
+/// type. An async generator gives an iterator: its call starts no work.
+pub fn returns_promise(file: &File<'_>, function: &AstNode<'_>) -> bool {
+    let (is_async, return_type) = match function.kind() {
+        AstKind::Function(function) => (
+            function.r#async && !function.generator,
+            &function.return_type,
+        ),
+        AstKind::ArrowFunctionExpression(arrow) => (arrow.r#async, &arrow.return_type),
+        _ => return false,
+    };
+    is_async
+        || return_type
+            .as_ref()
+            .is_some_and(|ty| lib_type(file, &ty.type_annotation, "Promise").is_some())
 }
 
 fn function_value<'a>(file: &File<'a>, value: &Expression<'a>) -> Option<&'a AstNode<'a>> {

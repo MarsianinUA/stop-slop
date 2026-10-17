@@ -1,0 +1,8 @@
+description = "`return call()` without `await` inside `try` of an async function"
+kind = "candidate"
+files = "code"
+source = ["personal"]
+message = "This `return` hands back the promise from inside `try` before it settles: if it rejects, the `catch` here never sees the error, `finally` runs before the work ends, and the stack trace loses this function. Write `return await` inside `try`."
+agent = """
+The function is async and returns a call from inside a `try` block without `await`. If the call gives a promise (an async method, a client call, a query), add `await`. If it returns a plain value (a mapper, a getter), ignore the finding with that reason.
+"""

@@ -1,0 +1,5 @@
+description = "`.then(..)` instead of `await`"
+kind = "error"
+files = "code"
+source = ["personal"]
+message = "`.then(..)` threads the result through callbacks: the flow reads inside out, a missing `return` or a `throw` in a callback quietly changes what the chain gives, and the stack trace loses the caller. Use `await` in an async function."

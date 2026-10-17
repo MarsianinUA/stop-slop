@@ -22,7 +22,7 @@ mod ts_type;
 pub use add_import::add_import;
 pub use branch::if_runs;
 pub use callback::{is_callback, is_di_constructor, is_public, is_signature_given};
-pub use callee::{local_callee, this_class};
+pub use callee::{local_callee, returns_promise, this_class};
 pub use case::{Case, words};
 pub use class_file::{
     TopBinding, TopClass, TopKind, start_after_decorators, top_bindings, top_classes,
@@ -71,8 +71,8 @@ pub mod prelude {
         is_script_global, is_signature_given, is_similar_name, lib_type, line_start, line_tail,
         local_callee, member_use, member_write, module_source, mutator_call, opens_region,
         outer_assertion, package_name, path_span, private_member, related_symbols, rename,
-        start_after_decorators, this_class, top_bindings, top_classes, type_assertion,
-        unwrapped_type, words,
+        returns_promise, start_after_decorators, this_class, top_bindings, top_classes,
+        type_assertion, unwrapped_type, words,
     };
     pub use oxc_allocator::Allocator;
     pub use oxc_ast::{AstKind, AstType};

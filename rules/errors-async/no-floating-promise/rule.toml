@@ -1,0 +1,4 @@
+description = "A call of an async function of this file without `await`, `return` or `void`"
+kind = "error"
+source = ["personal"]
+message = "A call of `{name}` starts async work that nothing waits for: if it rejects, the rejection goes unhandled and can stop the process, and the code after it runs before the work is done. `await` it or `return` it; for work that runs on its own on purpose, write `void` with a comment on why nothing waits."
