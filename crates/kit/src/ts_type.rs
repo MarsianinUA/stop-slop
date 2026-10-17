@@ -56,6 +56,22 @@ pub fn is_global(file: &File<'_>, expression: &Expression<'_>, name: &str) -> bo
         if id.name == name && file.semantic.is_reference_to_global_variable(id))
 }
 
+/// Every reference to the global value `name` (`process`, `console`) in the file: the
+/// `IdentifierReference` nodes no declaration or import holds, `typeof name` in a type too.
+pub fn global_references<'a>(
+    file: &File<'a>,
+    name: &str,
+) -> impl Iterator<Item = &'a AstNode<'a>> + 'a {
+    let scoping = file.semantic.scoping();
+    let nodes = file.semantic.nodes();
+    scoping
+        .root_unresolved_references()
+        .get(name)
+        .into_iter()
+        .flatten()
+        .map(move |&reference| nodes.get_node(scoping.get_reference(reference).node_id()))
+}
+
 /// `ty` is one that `is` accepts, or a union of such types with `null` / `undefined`:
 /// `boolean | null`.
 pub fn is_nullable(ty: &TSType<'_>, is: impl Fn(&TSType<'_>) -> bool) -> bool {

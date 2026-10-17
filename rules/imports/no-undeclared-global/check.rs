@@ -28,21 +28,9 @@ impl Rule for Check {
         }
         // A project with `@types/node` may still have code for the browser (Next.js, Vite).
         let in_node = imports_node(file, facts);
-        let scoping = file.semantic.scoping();
-        let nodes = file.semantic.nodes();
-        // Unresolved: no declaration or import of the name in the file holds the reference.
-        let unresolved = scoping.root_unresolved_references();
         for (name, module) in &self.globals {
-            let Some(references) = unresolved.get(name.as_str()) else {
-                continue;
-            };
-            let Some(span) = references
-                .iter()
-                .map(|&reference| {
-                    nodes
-                        .get_node(scoping.get_reference(reference).node_id())
-                        .span()
-                })
+            let Some(span) = global_references(file, name)
+                .map(|reference| reference.span())
                 .min_by_key(|span| span.start)
             else {
                 continue;

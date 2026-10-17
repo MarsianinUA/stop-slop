@@ -1229,6 +1229,37 @@ fn global_value_nullable_type_and_outer_assertion_read_through_the_syntax() {
 }
 
 #[test]
+fn global_references_are_the_references_no_declaration_or_import_holds() {
+    let text = "import { log } from './log';
+console.log(1);
+function f(console: { log(x: number): void }) { console.log(2); }
+type C = typeof console;
+log(console);
+{ const console = { log }; console.log(3); }
+export {};";
+    with_file(text, |file| {
+        let found = |name: &str| {
+            global_references(file, name)
+                .map(|node| {
+                    let parent = file.semantic.nodes().parent_node(node.id());
+                    (node.kind().ty(), source(file, parent))
+                })
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            found("console"),
+            [
+                (AstType::IdentifierReference, "console.log"),
+                (AstType::IdentifierReference, "typeof console"),
+                (AstType::IdentifierReference, "log(console)"),
+            ]
+        );
+        assert_eq!(found("log"), []);
+        assert_eq!(found("process"), []);
+    });
+}
+
+#[test]
 fn path_span_is_empty_where_the_code_starts() {
     for (text, start) in [
         ("'use strict';\nconst a = 1;", 0),
@@ -1920,6 +1951,55 @@ fn member_write_and_mutator_call_find_what_changes_a_parameter() {
                 None,
                 Some("{ [o.b ?? '']: o.a } = src"),
                 Some("delete o?.b"),
+            ]
+        );
+    });
+}
+
+#[test]
+fn log_call_is_a_level_method_on_a_receiver_with_a_logger_word() {
+    let text = "declare const logger: any, Logger: any, console: any, dialog: any, metrics: any;
+declare const remoteLogger: any, log: any, catalog: any;
+class A {
+  logger = logger;
+  #log = logger;
+  run() {
+    console.error(1);
+    this.logger.warn(2);
+    this.#log.info(3);
+    Logger.log(4);
+    logger?.error(5);
+    (remoteLogger as any).debug(6);
+    logger['warn'](7);
+    log(8);
+    dialog.error(9);
+    metrics.error(10);
+    catalog.info(11);
+    logger.flush(12);
+    logger.child({}).info(13);
+  }
+}
+export {};";
+    let loggers = ["console", "log", "logger"].map(String::from);
+    let levels = ["log", "debug", "info", "warn", "error"].map(String::from);
+    with_file(text, |file| {
+        let logs: Vec<_> = file
+            .semantic
+            .nodes()
+            .iter()
+            .filter_map(|node| match node.kind() {
+                AstKind::CallExpression(call) if !call.arguments.is_empty() => {
+                    Some(is_log_call(call, &loggers, &levels))
+                }
+                _ => None,
+            })
+            .collect();
+        // `logger.child({}).info(13)` comes before the call in its receiver.
+        assert_eq!(
+            logs,
+            [
+                true, true, true, true, true, true, false, false, false, false, false, false,
+                false, false
             ]
         );
     });

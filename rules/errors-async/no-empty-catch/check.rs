@@ -31,7 +31,7 @@ impl Rule for Check {
 }
 
 impl Check {
-    /// `this.logger.warn(..)`, `console.error(..)`, `logger?.info(..)`, `await log.error(..)`.
+    /// `this.logger.warn(..);`, `logger?.info(..);`, `await log.error(..);`.
     fn is_log(&self, statement: &Statement<'_>) -> bool {
         let Statement::ExpressionStatement(statement) = statement else {
             return false;
@@ -48,22 +48,6 @@ impl Check {
             },
             _ => return false,
         };
-        let Expression::StaticMemberExpression(method) = call.callee.get_inner_expression() else {
-            return false;
-        };
-        let receiver = match method.object.get_inner_expression() {
-            Expression::Identifier(id) => id.name.as_str(),
-            Expression::StaticMemberExpression(member) => member.property.name.as_str(),
-            Expression::PrivateFieldExpression(member) => member.field.name.as_str(),
-            _ => return false,
-        };
-        self.levels
-            .iter()
-            .any(|level| level == method.property.name.as_str())
-            && words(receiver).iter().any(|word| {
-                self.loggers
-                    .iter()
-                    .any(|logger| logger.eq_ignore_ascii_case(word))
-            })
+        is_log_call(call, &self.loggers, &self.levels)
     }
 }

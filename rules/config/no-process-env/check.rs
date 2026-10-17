@@ -1,5 +1,5 @@
 use kit::oxc::ast::ast::{BindingPattern, ImportDeclarationSpecifier, Statement};
-use kit::oxc::semantic::{NodeId, SymbolId};
+use kit::oxc::semantic::SymbolId;
 use kit::prelude::*;
 
 #[derive(Deserialize)]
@@ -16,20 +16,15 @@ impl Rule for Check {
             return;
         }
         let scoping = file.semantic.scoping();
+        let nodes = file.semantic.nodes();
         let (processes, env_imports) = imports(file);
-        // `process` the file neither declares nor imports is Node's global.
-        let globals = scoping
-            .root_unresolved_references()
-            .get("process")
-            .into_iter()
-            .flatten()
-            .map(|&reference| scoping.get_reference(reference).node_id());
         let imported = processes.into_iter().flat_map(|symbol| {
             scoping
                 .get_resolved_references(symbol)
-                .map(|reference| reference.node_id())
+                .map(|reference| nodes.get_node(reference.node_id()))
         });
-        let reads = globals
+        // `process` the file neither declares nor imports is Node's global.
+        let reads = global_references(file, "process")
             .chain(imported)
             .filter_map(|node| env_read(file, node));
         for span in env_imports.into_iter().chain(reads) {
@@ -101,8 +96,8 @@ fn imports(file: &File<'_>) -> (Vec<SymbolId>, Vec<Span>) {
 /// The read of the environment when the reference to `process` gives it: `process.env` with
 /// what it is read for (`process.env.PORT`, `process.env[key]`, `const { PORT } = process.env`),
 /// or a destructuring that takes `env` (`const { env } = process`).
-fn env_read(file: &File<'_>, reference: NodeId) -> Option<Span> {
-    let (_, parent) = use_of(file, file.semantic.nodes().get_node(reference));
+fn env_read<'a>(file: &File<'a>, reference: &AstNode<'a>) -> Option<Span> {
+    let (_, parent) = use_of(file, reference);
     if let AstKind::VariableDeclarator(declarator) = parent.kind() {
         let BindingPattern::ObjectPattern(pattern) = &declarator.id else {
             return None;

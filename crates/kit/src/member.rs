@@ -1,11 +1,11 @@
 use std::borrow::Cow;
 
-use oxc_ast::ast::{Expression, UnaryOperator};
+use oxc_ast::ast::{CallExpression, Expression, UnaryOperator};
 use oxc_ast::{AstKind, MemberExpressionKind};
 use oxc_semantic::{AstNode, NodeId};
 use oxc_span::{GetSpan, Span};
 
-use crate::{File, outer_assertion};
+use crate::{File, outer_assertion, words};
 
 /// What a node reaches of an object by name. The object's type is not seen.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -155,4 +155,28 @@ pub fn mutator_call(file: &File<'_>, reference: NodeId) -> Option<Span> {
         }
         _ => None,
     }
+}
+
+/// A call that writes a log line: a method from `levels` on a receiver with a word from `loggers`
+/// in its name, also through `?.`: `this.logger.warn(..)`, `console.error(..)`,
+/// `this.#log.info(..)`. The receiver's type is not seen: `dialog.error(..)` has no logger word,
+/// `log(..)` no receiver. `no-empty-catch` and `no-secret-in-log` judge the same calls.
+pub fn is_log_call(call: &CallExpression<'_>, loggers: &[String], levels: &[String]) -> bool {
+    let Expression::StaticMemberExpression(method) = call.callee.get_inner_expression() else {
+        return false;
+    };
+    let receiver = match method.object.get_inner_expression() {
+        Expression::Identifier(id) => id.name.as_str(),
+        Expression::StaticMemberExpression(member) => member.property.name.as_str(),
+        Expression::PrivateFieldExpression(member) => member.field.name.as_str(),
+        _ => return false,
+    };
+    levels
+        .iter()
+        .any(|level| level == method.property.name.as_str())
+        && words(receiver).iter().any(|word| {
+            loggers
+                .iter()
+                .any(|logger| logger.eq_ignore_ascii_case(word))
+        })
 }
