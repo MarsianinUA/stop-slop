@@ -1,0 +1,8 @@
+description = "`process.env` read outside a `*.config.ts` file or an env helper"
+kind = "error"
+files = "code"
+source = ["personal"]
+message = "`{access}` reads the environment outside a config file: the setting gets no single place that names, parses and defaults it, so a reader cannot see from the config what the app needs, a mistyped or missing variable passes until this line runs, and a test has to patch the process environment. Read `process.env` only in a `*.config.ts` file or an env helper, and take the value from config here (`ConfigService`, a constructor parameter)."
+
+[options]
+helpers = ["env", "environment"]

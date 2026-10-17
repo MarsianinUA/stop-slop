@@ -251,18 +251,18 @@ fn finding_files(report: &Value) -> Vec<&str> {
         .collect()
 }
 
-/// `main` with `src/keep.service.ts`; `feat` changes line 1 of it, keeps the `any` on line 2 and
-/// adds `src/new.service.ts` with a `TODO` without an owner.
+/// `main` with `src/keep.constants.ts`; `feat` changes line 1 of it, keeps the `any` on line 2 and
+/// adds `src/new.constants.ts` with a `TODO` without an owner.
 fn branch_repo() -> TempRepo {
     branch_repo_with(&[])
 }
 
 /// `branch_repo` with `main_files` added to `main` in a commit of their own after
-/// `keep.service.ts`; `feat` does not touch them.
+/// `keep.constants.ts`; `feat` does not touch them.
 fn branch_repo_with(main_files: &[(&str, &str)]) -> TempRepo {
     let t = TempRepo::new();
     t.write(
-        "src/keep.service.ts",
+        "src/keep.constants.ts",
         "export const ALPHA = 1;\nexport const BETA: any = 2;\n",
     )
     .commit("main");
@@ -274,11 +274,11 @@ fn branch_repo_with(main_files: &[(&str, &str)]) -> TempRepo {
     }
     t.branch("feat")
         .write(
-            "src/keep.service.ts",
+            "src/keep.constants.ts",
             "export const ALPHA = 10;\nexport const BETA: any = 2;\n",
         )
         .write(
-            "src/new.service.ts",
+            "src/new.constants.ts",
             "// TODO fix\nexport const FRESH = 1;\n",
         )
         .commit("feat");
@@ -306,7 +306,7 @@ fn check_reports_findings_of_the_branch_as_json() {
     );
     assert_eq!(
         report["files"],
-        json!(["src/keep.service.ts", "src/new.service.ts"])
+        json!(["src/keep.constants.ts", "src/new.constants.ts"])
     );
     assert_eq!(report["skipped"], json!([]));
     assert_eq!(report["fixed"], json!([]));
@@ -321,7 +321,7 @@ fn check_reports_findings_of_the_branch_as_json() {
         json!({
             "rule": "no-any",
             "kind": "error",
-            "file": "src/keep.service.ts",
+            "file": "src/keep.constants.ts",
             "line": 2,
             "column": 20,
             "endLine": 2,
@@ -337,7 +337,7 @@ fn check_reports_findings_of_the_branch_as_json() {
         json!({
             "rule": "todo-owner",
             "kind": "error",
-            "file": "src/new.service.ts",
+            "file": "src/new.constants.ts",
             "line": 1,
             "column": 4,
             "endLine": 1,
@@ -353,10 +353,10 @@ fn check_reports_findings_of_the_branch_as_json() {
 #[test]
 fn check_prints_the_base_and_the_findings_as_text() {
     let t = TempRepo::new();
-    t.write("src/m.service.ts", "export const MAIN = 1;\n")
+    t.write("src/m.constants.ts", "export const MAIN = 1;\n")
         .commit("main");
     t.branch("feat")
-        .write("src/clean.service.ts", "export const CLEAN = 1;\n")
+        .write("src/clean.constants.ts", "export const CLEAN = 1;\n")
         .commit("feat");
     // No `origin/feat`, so the base is searched without `gh`.
     let out = run(t.path(), &["check"]);
@@ -373,9 +373,12 @@ fn check_prints_the_base_and_the_findings_as_text() {
     let lines: Vec<&str> = text.lines().collect();
     assert_eq!(lines[0], format!("base main {} (flag)", sha7(&t, "main")));
     for line in [
-        format!("src/keep.service.ts:2:20 no-any {}", meta("no-any").message),
         format!(
-            "src/new.service.ts:1:4 todo-owner {}",
+            "src/keep.constants.ts:2:20 no-any {}",
+            meta("no-any").message
+        ),
+        format!(
+            "src/new.constants.ts:1:4 todo-owner {}",
             meta("todo-owner").message
         ),
     ] {
@@ -388,8 +391,8 @@ fn check_rejects_flags_that_do_not_go_together() {
     let t = branch_repo();
     for args in [
         &["check", "--rev", "feat"][..],
-        &["check", "--files", "src/new.service.ts", "--all"],
-        &["check", "--base", "main", "--files", "src/new.service.ts"],
+        &["check", "--files", "src/new.constants.ts", "--all"],
+        &["check", "--base", "main", "--files", "src/new.constants.ts"],
         &["check", "--base", "main", "--all"],
     ] {
         let out = run(t.path(), args);
@@ -406,24 +409,24 @@ fn check_without_a_base_checks_every_line() {
     assert_eq!(report["skipped"], json!([]));
     assert_eq!(
         report["files"],
-        json!(["src/keep.service.ts", "src/new.service.ts"])
+        json!(["src/keep.constants.ts", "src/new.constants.ts"])
     );
     assert!(!findings(&report).is_empty());
     for finding in findings(&report) {
         assert_eq!(finding["inHunk"], Value::Null, "{finding}");
     }
 
-    let absolute = t.path().join("src/new.service.ts");
+    let absolute = t.path().join("src/new.constants.ts");
     let src = t.path().join("src");
     for (dir, file) in [
-        (t.path(), "src/new.service.ts"),
-        (src.as_path(), "new.service.ts"),
+        (t.path(), "src/new.constants.ts"),
+        (src.as_path(), "new.constants.ts"),
         (t.path(), absolute.to_str().expect("a UTF-8 temp path")),
     ] {
         let report = check(dir, &["check", "--files", file, "--json"], 1);
-        assert_eq!(report["files"], json!(["src/new.service.ts"]), "{file}");
+        assert_eq!(report["files"], json!(["src/new.constants.ts"]), "{file}");
         assert_eq!(report["base"], Value::Null, "{file}");
-        assert_eq!(finding_files(&report), ["src/new.service.ts"], "{file}");
+        assert_eq!(finding_files(&report), ["src/new.constants.ts"], "{file}");
         assert_eq!(findings(&report)[0]["inHunk"], Value::Null, "{file}");
     }
 
@@ -431,22 +434,22 @@ fn check_without_a_base_checks_every_line() {
     let args = [
         "check",
         "--files",
-        "src/new.service.ts",
+        "src/new.constants.ts",
         "README.md",
         "--json",
     ];
     assert_eq!(
         check(t.path(), &args, 1)["files"],
-        json!(["src/new.service.ts"])
+        json!(["src/new.constants.ts"])
     );
 
-    t.write("src/gone.service.ts", "export const GONE: any = 1;\n")
+    t.write("src/gone.constants.ts", "export const GONE: any = 1;\n")
         .commit("gone");
-    fs::remove_file(t.path().join("src/gone.service.ts")).expect("remove src/gone.service.ts");
+    fs::remove_file(t.path().join("src/gone.constants.ts")).expect("remove src/gone.constants.ts");
     let report = check(t.path(), &["check", "--all", "--json"], 1);
     assert_eq!(
         report["files"],
-        json!(["src/keep.service.ts", "src/new.service.ts"])
+        json!(["src/keep.constants.ts", "src/new.constants.ts"])
     );
 }
 
@@ -473,11 +476,17 @@ fn check_fails_on_a_broken_config_or_ignore_file() {
 #[test]
 fn check_drops_ignored_findings_and_disabled_rules() {
     let t = TempRepo::new();
-    t.write("src/m.service.ts", "export const MAIN = 1;\n")
+    t.write("src/m.constants.ts", "export const MAIN = 1;\n")
         .commit("main");
     t.branch("feat")
-        .write("src/one.service.ts", "// TODO fix\nexport const ONE = 1;\n")
-        .write("src/two.service.ts", "// TODO fix\nexport const TWO = 2;\n")
+        .write(
+            "src/one.constants.ts",
+            "// TODO fix\nexport const ONE = 1;\n",
+        )
+        .write(
+            "src/two.constants.ts",
+            "// TODO fix\nexport const TWO = 2;\n",
+        )
         .commit("feat");
     let args = ["check", "--base", "main", "--json"];
 
@@ -494,14 +503,14 @@ fn check_drops_ignored_findings_and_disabled_rules() {
         .add_ignore(vec![IgnoreEntry {
             fingerprint,
             rule: "todo-owner".into(),
-            file: "src/one.service.ts".into(),
+            file: "src/one.constants.ts".into(),
             reason: "test".into(),
             added: "2026-10-15".into(),
         }])
         .expect("write ignore.json");
     assert_eq!(
         finding_files(&check(t.path(), &args, 1)),
-        ["src/two.service.ts"]
+        ["src/two.constants.ts"]
     );
 
     write_config(&t, "disabled = [\"todo-owner\"]\n");
@@ -511,28 +520,31 @@ fn check_drops_ignored_findings_and_disabled_rules() {
 #[test]
 fn check_at_a_revision_reads_the_files_from_git() {
     let t = TempRepo::new();
-    t.write("src/m.service.ts", "export const MAIN = 1;\n")
+    t.write("src/m.constants.ts", "export const MAIN = 1;\n")
         .commit("main");
     t.branch("feat")
-        .write("src/r.service.ts", "export const REVISION: any = 1;\n")
+        .write("src/r.constants.ts", "export const REVISION: any = 1;\n")
         .commit("feat");
-    t.write("src/r.service.ts", "export const REVISION = 1;\n")
-        .write("src/u.service.ts", "export const UNTRACKED: any = 1;\n");
+    t.write("src/r.constants.ts", "export const REVISION = 1;\n")
+        .write("src/u.constants.ts", "export const UNTRACKED: any = 1;\n");
 
     let args = ["check", "--rev", "feat", "--base", "main", "--json"];
     let report = check(t.path(), &args, 1);
-    assert_eq!(report["files"], json!(["src/r.service.ts"]));
+    assert_eq!(report["files"], json!(["src/r.constants.ts"]));
     assert_eq!(report["base"]["reason"], "flag");
     let [finding] = findings(&report) else {
         panic!("one finding: {report}");
     };
     assert_eq!(finding["rule"], "no-any");
-    assert_eq!(finding["file"], "src/r.service.ts");
+    assert_eq!(finding["file"], "src/r.constants.ts");
     assert_eq!(finding["inHunk"], true);
-    assert_eq!(read(&t, "src/r.service.ts"), "export const REVISION = 1;\n");
+    assert_eq!(
+        read(&t, "src/r.constants.ts"),
+        "export const REVISION = 1;\n"
+    );
 
     let report = check(t.path(), &["check", "--base", "main", "--json"], 1);
-    assert_eq!(finding_files(&report), ["src/u.service.ts"]);
+    assert_eq!(finding_files(&report), ["src/u.constants.ts"]);
 }
 
 #[test]
@@ -553,8 +565,8 @@ fn check_fails_with_the_cause() {
         ),
         (&["check", "--rev", "no-such", "--base", "main"], "no-such"),
         (
-            &["check", "--files", "src/missing.service.ts"],
-            "missing.service.ts",
+            &["check", "--files", "src/missing.constants.ts"],
+            "missing.constants.ts",
         ),
         (&["check", "--files", "src"], "src: is a directory"),
     ] {
@@ -567,10 +579,10 @@ fn check_fails_with_the_cause() {
 #[test]
 fn check_reports_a_file_that_does_not_parse() {
     let t = TempRepo::new();
-    t.write("src/m.service.ts", "export const MAIN = 1;\n")
+    t.write("src/m.constants.ts", "export const MAIN = 1;\n")
         .commit("main");
     t.branch("feat")
-        .write("src/bad.service.ts", "const = ;\n")
+        .write("src/bad.constants.ts", "const = ;\n")
         .commit("feat");
     let report = check(t.path(), &["check", "--base", "main", "--json"], 1);
     let [finding] = findings(&report) else {
@@ -578,22 +590,22 @@ fn check_reports_a_file_that_does_not_parse() {
     };
     assert_eq!(finding["rule"], "parse-error");
     assert_eq!(finding["kind"], "parse-error");
-    assert_eq!(finding["file"], "src/bad.service.ts");
+    assert_eq!(finding["file"], "src/bad.constants.ts");
 }
 
 #[test]
 fn check_skips_files_a_squash_merge_brought_into_the_base() {
     let t = TempRepo::new();
-    t.write("shared.service.ts", "1\n2\n3\n")
-        .write("m.service.ts", "m\n")
+    t.write("shared.constants.ts", "1\n2\n3\n")
+        .write("m.constants.ts", "m\n")
         .commit("main");
     t.branch("a")
-        .write("a.service.ts", "a\n")
-        .write("shared.service.ts", "one\n2\n3\n")
+        .write("a.constants.ts", "a\n")
+        .write("shared.constants.ts", "one\n2\n3\n")
         .commit("a");
     t.branch("b")
-        .write("b.service.ts", "b\n")
-        .write("shared.service.ts", "one\n2\nthree\n")
+        .write("b.constants.ts", "b\n")
+        .write("shared.constants.ts", "one\n2\nthree\n")
         .commit("b");
     t.checkout("main");
     t.git(&["merge", "-q", "--squash", "a"]);
@@ -604,11 +616,11 @@ fn check_skips_files_a_squash_merge_brought_into_the_base() {
     let report = check(t.path(), &["check", "--base", "main", "--json"], 0);
     assert_eq!(
         report["files"],
-        json!(["b.service.ts", "shared.service.ts"])
+        json!(["b.constants.ts", "shared.constants.ts"])
     );
     assert_eq!(
         report["skipped"],
-        json!([{"file": "a.service.ts", "reason": "already-in-base"}])
+        json!([{"file": "a.constants.ts", "reason": "already-in-base"}])
     );
 }
 
@@ -622,13 +634,13 @@ fn check_finds_a_raw_value_of_an_enum_from_outside_the_diff() {
     .commit("main");
     t.branch("feat")
         .write(
-            "src/sync.service.ts",
+            "src/sync.constants.ts",
             "import { Source } from './source.enum';\n\n\
              export const SOURCE: Source | string = 'DASHBOARD';\n",
         )
         // The file does not know the enum, so the same word is no finding.
         .write(
-            "src/label.service.ts",
+            "src/label.constants.ts",
             "export const LABEL = 'DASHBOARD';\n",
         )
         .commit("feat");
@@ -636,13 +648,13 @@ fn check_finds_a_raw_value_of_an_enum_from_outside_the_diff() {
     let report = check(t.path(), &["check", "--base", "main", "--json"], 1);
     assert_eq!(
         report["files"],
-        json!(["src/label.service.ts", "src/sync.service.ts"])
+        json!(["src/label.constants.ts", "src/sync.constants.ts"])
     );
     assert_eq!(
         places(&report),
         [(
             "no-enum-raw-value",
-            "src/sync.service.ts",
+            "src/sync.constants.ts",
             3,
             40,
             Some(true)
@@ -659,17 +671,17 @@ const IO_FEAT: &str = "import { readFileSync } from 'fs'; export const read: any
 const MAIN_FEAT: &str =
     "import path from 'path';\nimport os from 'os';\nexport const modules = [path, os];\n";
 
-/// `main` with `src/io.service.ts`: a bare `'fs'` and an `any` on line 1, an `any` on line 3.
+/// `main` with `src/io.constants.ts`: a bare `'fs'` and an `any` on line 1, an `any` on line 3.
 /// `feat` changes line 2 of it and adds `src/main.ts` with two bare imports.
 fn fix_repo() -> TempRepo {
     let t = TempRepo::new();
     t.write(
-        "src/io.service.ts",
+        "src/io.constants.ts",
         &IO_FEAT.replace("ALPHA = 10", "ALPHA = 1"),
     )
     .commit("main");
     t.branch("feat")
-        .write("src/io.service.ts", IO_FEAT)
+        .write("src/io.constants.ts", IO_FEAT)
         .write("src/main.ts", MAIN_FEAT)
         .commit("feat");
     t
@@ -702,9 +714,9 @@ fn check_fix_writes_the_fixes_and_checks_the_new_text() {
     assert_eq!(
         places(&before),
         [
-            ("node-protocol", "src/io.service.ts", 1, 30, Some(false)),
-            ("no-any", "src/io.service.ts", 1, 55, Some(false)),
-            ("no-any", "src/io.service.ts", 3, 20, Some(false)),
+            ("node-protocol", "src/io.constants.ts", 1, 30, Some(false)),
+            ("no-any", "src/io.constants.ts", 1, 55, Some(false)),
+            ("no-any", "src/io.constants.ts", 3, 20, Some(false)),
             ("node-protocol", "src/main.ts", 1, 18, Some(true)),
             ("node-protocol", "src/main.ts", 2, 16, Some(true)),
         ]
@@ -716,33 +728,36 @@ fn check_fix_writes_the_fixes_and_checks_the_new_text() {
     let io_fixed = IO_FEAT.replace("'fs'", "'node:fs'");
     let main_fixed = "import path from 'node:path';\nimport os from 'node:os';\n\
                       export const modules = [path, os];\n";
-    assert_eq!(read(&t, "src/io.service.ts"), io_fixed);
+    assert_eq!(read(&t, "src/io.constants.ts"), io_fixed);
     assert_eq!(read(&t, "src/main.ts"), main_fixed);
     assert_eq!(
         report["fixed"],
         json!([
-            {"rule": "node-protocol", "file": "src/io.service.ts", "count": 1},
+            {"rule": "node-protocol", "file": "src/io.constants.ts", "count": 1},
             {"rule": "node-protocol", "file": "src/main.ts", "count": 2},
         ])
     );
-    // `--fix` changed line 1 of `src/io.service.ts`, so it is in the diff now.
+    // `--fix` changed line 1 of `src/io.constants.ts`, so it is in the diff now.
     assert_eq!(
         places(&report),
         [
-            ("no-any", "src/io.service.ts", 1, 60, Some(true)),
-            ("no-any", "src/io.service.ts", 3, 20, Some(false)),
+            ("no-any", "src/io.constants.ts", 1, 60, Some(true)),
+            ("no-any", "src/io.constants.ts", 3, 20, Some(false)),
         ]
     );
     assert_eq!(
         report["base"],
         json!({"ref": "main", "sha": sha7(&t, "main"), "reason": "flag"})
     );
-    assert_eq!(report["files"], json!(["src/io.service.ts", "src/main.ts"]));
+    assert_eq!(
+        report["files"],
+        json!(["src/io.constants.ts", "src/main.ts"])
+    );
 
     let again = check(t.path(), &args, 1);
     assert_eq!(again["fixed"], json!([]));
     assert_eq!(again["findings"], report["findings"]);
-    assert_eq!(read(&t, "src/io.service.ts"), io_fixed);
+    assert_eq!(read(&t, "src/io.constants.ts"), io_fixed);
     assert_eq!(read(&t, "src/main.ts"), main_fixed);
 
     t.git(&["checkout", "--", "src"]);
@@ -751,7 +766,7 @@ fn check_fix_writes_the_fixes_and_checks_the_new_text() {
     let text = stdout(&out);
     let lines: Vec<&str> = text.lines().collect();
     for line in [
-        "fixed src/io.service.ts node-protocol x1",
+        "fixed src/io.constants.ts node-protocol x1",
         "fixed src/main.ts node-protocol x2",
     ] {
         assert!(lines.contains(&line), "no `{line}` in\n{text}");
@@ -769,7 +784,7 @@ fn check_fix_of_files_fixes_only_those_files() {
     );
     assert_eq!(report["base"], Value::Null);
     assert_eq!(report["findings"], json!([]));
-    assert_eq!(read(&t, "src/io.service.ts"), IO_FEAT);
+    assert_eq!(read(&t, "src/io.constants.ts"), IO_FEAT);
 }
 
 #[test]
@@ -781,18 +796,18 @@ fn check_fix_at_a_revision_is_refused() {
     );
     assert_eq!(code(&out), 2);
     assert!(!stderr(&out).is_empty());
-    assert_eq!(read(&t, "src/io.service.ts"), IO_FEAT);
+    assert_eq!(read(&t, "src/io.constants.ts"), IO_FEAT);
     assert_eq!(read(&t, "src/main.ts"), MAIN_FEAT);
 }
 
 #[test]
 fn check_fix_keeps_crlf_line_endings() {
     let t = TempRepo::new();
-    t.write("src/m.service.ts", "export const MAIN = 1;\n")
+    t.write("src/m.constants.ts", "export const MAIN = 1;\n")
         .commit("main");
     t.branch("feat")
         .write(
-            "src/crlf.service.ts",
+            "src/crlf.constants.ts",
             "import os from 'os';\r\nexport const system = os;\r\n",
         )
         .commit("feat");
@@ -800,10 +815,10 @@ fn check_fix_keeps_crlf_line_endings() {
     let report = check(t.path(), &["check", "--base", "main", "--fix", "--json"], 0);
     assert_eq!(
         report["fixed"],
-        json!([{"rule": "node-protocol", "file": "src/crlf.service.ts", "count": 1}])
+        json!([{"rule": "node-protocol", "file": "src/crlf.constants.ts", "count": 1}])
     );
     assert_eq!(
-        read(&t, "src/crlf.service.ts"),
+        read(&t, "src/crlf.constants.ts"),
         "import os from 'node:os';\r\nexport const system = os;\r\n"
     );
 }
@@ -812,19 +827,19 @@ fn check_fix_keeps_crlf_line_endings() {
 fn check_fix_drops_a_file_that_became_as_in_the_base() {
     let t = TempRepo::new();
     let base_text = "import fs from 'node:fs';\nexport const files = fs;\n";
-    t.write("src/x.service.ts", base_text).commit("main");
+    t.write("src/x.constants.ts", base_text).commit("main");
     t.branch("feat")
-        .write("src/x.service.ts", &base_text.replace("node:", ""))
-        .write("src/y.service.ts", "export const EXTRA = 1;\n")
+        .write("src/x.constants.ts", &base_text.replace("node:", ""))
+        .write("src/y.constants.ts", "export const EXTRA = 1;\n")
         .commit("feat");
 
     let report = check(t.path(), &["check", "--base", "main", "--fix", "--json"], 0);
-    assert_eq!(read(&t, "src/x.service.ts"), base_text);
+    assert_eq!(read(&t, "src/x.constants.ts"), base_text);
     assert_eq!(
         report["fixed"],
-        json!([{"rule": "node-protocol", "file": "src/x.service.ts", "count": 1}])
+        json!([{"rule": "node-protocol", "file": "src/x.constants.ts", "count": 1}])
     );
-    assert_eq!(report["files"], json!(["src/y.service.ts"]));
+    assert_eq!(report["files"], json!(["src/y.constants.ts"]));
     assert_eq!(report["skipped"], json!([]));
 }
 
@@ -898,7 +913,7 @@ fn enable_and_disable_change_only_the_marker() {
     let t = TempRepo::new();
     write_config(&t, "disabled = []\n");
     t.write(".git/info/stop-slop/ignore.json", "[]\n")
-        .write("src/a.service.ts", ANY);
+        .write("src/a.constants.ts", ANY);
     let state_files = || {
         ["config.toml", "ignore.json"].map(|name| {
             let path = t.path().join(".git/info/stop-slop").join(name);
@@ -947,7 +962,7 @@ fn linked_worktree(t: &TempRepo) -> (tempfile::TempDir, PathBuf) {
 #[test]
 fn enable_in_a_linked_worktree_turns_the_hook_on_for_the_repo() {
     let t = TempRepo::new();
-    t.write("src/a.service.ts", ANY).commit("main");
+    t.write("src/a.constants.ts", ANY).commit("main");
     let (_trees, tree) = linked_worktree(&t);
 
     let out = run(&tree, &["enable"]);
@@ -955,15 +970,15 @@ fn enable_in_a_linked_worktree_turns_the_hook_on_for_the_repo() {
     assert!(marker(&t).is_file());
     assert!(tree.join(".git").is_file());
 
-    assert_eq!(hook_on(&t, "src/a.service.ts").0, 2);
-    let out = hook(&tree, &hook_input(&tree.join("src").join("a.service.ts")));
+    assert_eq!(hook_on(&t, "src/a.constants.ts").0, 2);
+    let out = hook(&tree, &hook_input(&tree.join("src").join("a.constants.ts")));
     assert_eq!(code(&out), 2, "{}", stderr(&out));
 }
 
 #[test]
 fn config_error_in_a_linked_worktree_names_the_file_of_the_repo() {
     let t = TempRepo::new();
-    t.write("src/a.service.ts", ANY).commit("main");
+    t.write("src/a.constants.ts", ANY).commit("main");
     let (_trees, tree) = linked_worktree(&t);
     write_config(&t, "disabled = [\"no-such\"]\n");
 
@@ -987,13 +1002,16 @@ fn config_error_in_a_linked_worktree_names_the_file_of_the_repo() {
 fn hook_reports_errors_with_code_2() {
     let t = TempRepo::new();
     enable(&t);
-    t.write("src/a.service.ts", ANY);
-    let expected = format!("src/a.service.ts:2:20 no-any {}\n", meta("no-any").message);
+    t.write("src/a.constants.ts", ANY);
+    let expected = format!(
+        "src/a.constants.ts:2:20 no-any {}\n",
+        meta("no-any").message
+    );
 
-    let absolute = t.path().join("src").join("a.service.ts");
+    let absolute = t.path().join("src").join("a.constants.ts");
     for input in [
         hook_input(&absolute),
-        hook_input(Path::new("src/a.service.ts")),
+        hook_input(Path::new("src/a.constants.ts")),
     ] {
         let out = hook(t.path(), &input);
         assert_eq!(code(&out), 2, "{input}: {}", stderr(&out));
@@ -1009,15 +1027,15 @@ fn hook_prints_at_most_20_lines() {
     let text: String = (1..=25)
         .map(|i| format!("export const A{i}: any = {i};\n"))
         .collect();
-    t.write("src/many.service.ts", &text);
+    t.write("src/many.constants.ts", &text);
 
-    let (code, text) = hook_on(&t, "src/many.service.ts");
+    let (code, text) = hook_on(&t, "src/many.constants.ts");
     assert_eq!(code, 2, "{text}");
     let message = meta("no-any").message;
     let mut expected: Vec<String> = (1..=19)
         .map(|i| {
             let column = 17 + i.to_string().len();
-            format!("src/many.service.ts:{i}:{column} no-any {message}")
+            format!("src/many.constants.ts:{i}:{column} no-any {message}")
         })
         .collect();
     expected.push("stop-slop: 6 more errors".into());
@@ -1027,9 +1045,9 @@ fn hook_prints_at_most_20_lines() {
 #[test]
 fn hook_passes_what_it_does_not_check() {
     let t = TempRepo::new();
-    t.write("src/a.service.ts", ANY);
+    t.write("src/a.constants.ts", ANY);
     assert_eq!(
-        hook_on(&t, "src/a.service.ts"),
+        hook_on(&t, "src/a.constants.ts"),
         (0, String::new()),
         "no marker"
     );
@@ -1039,17 +1057,22 @@ fn hook_passes_what_it_does_not_check() {
     t.write("notes.md", "# any\n")
         .write("src/types.d.ts", "export type T = any;\n")
         .write(draft, "# review\n")
-        .write("src/clean.service.ts", "export const CLEAN = 1;\n");
-    for file in ["notes.md", "src/types.d.ts", draft, "src/clean.service.ts"] {
+        .write("src/clean.constants.ts", "export const CLEAN = 1;\n");
+    for file in [
+        "notes.md",
+        "src/types.d.ts",
+        draft,
+        "src/clean.constants.ts",
+    ] {
         assert_eq!(hook_on(&t, file), (0, String::new()), "{file}");
     }
 
     let outside = tempfile::tempdir().expect("create a temp folder");
-    let file = outside.path().join("a.service.ts");
-    fs::write(&file, ANY).expect("write a.service.ts");
-    if symlink_file_or_skip(&file, &t.path().join("src/link.service.ts")) {
+    let file = outside.path().join("a.constants.ts");
+    fs::write(&file, ANY).expect("write a.constants.ts");
+    if symlink_file_or_skip(&file, &t.path().join("src/link.constants.ts")) {
         assert_eq!(
-            hook_on(&t, "src/link.service.ts"),
+            hook_on(&t, "src/link.constants.ts"),
             (0, String::new()),
             "symlink"
         );
@@ -1061,7 +1084,7 @@ fn hook_passes_what_it_does_not_check() {
     let out = run(t.path(), &["disable"]);
     assert_eq!(code(&out), 0, "{}", stderr(&out));
     assert_eq!(
-        hook_on(&t, "src/a.service.ts"),
+        hook_on(&t, "src/a.constants.ts"),
         (0, String::new()),
         "disabled"
     );
@@ -1071,8 +1094,8 @@ fn hook_passes_what_it_does_not_check() {
 fn hook_passes_a_folder_git_refuses_but_fails_without_git() {
     let t = TempRepo::new();
     enable(&t);
-    let in_git = ".git/info/stop-slop/reviews/x.service.ts";
-    t.write("src/a.service.ts", ANY).write(in_git, ANY);
+    let in_git = ".git/info/stop-slop/reviews/x.constants.ts";
+    t.write("src/a.constants.ts", ANY).write(in_git, ANY);
     assert_eq!(hook_on(&t, in_git), (0, String::new()), "inside .git");
 
     let empty = tempfile::tempdir().expect("create a temp folder");
@@ -1097,12 +1120,12 @@ fn hook_passes_a_folder_git_refuses_but_fails_without_git() {
         "{}",
         stderr(&out)
     );
-    let out = feed(foreign(), &hook_input(&t.path().join("src/a.service.ts")));
+    let out = feed(foreign(), &hook_input(&t.path().join("src/a.constants.ts")));
     assert_eq!((code(&out), stderr(&out)), (0, String::new()), "foreign");
 
     let mut no_git = exe(t.path());
     no_git.env("PATH", empty.path());
-    let out = feed(no_git, &hook_input(&t.path().join("src/a.service.ts")));
+    let out = feed(no_git, &hook_input(&t.path().join("src/a.constants.ts")));
     assert_eq!(code(&out), 2, "no git");
     assert!(stderr(&out).contains("git"), "{}", stderr(&out));
 }
@@ -1111,20 +1134,20 @@ fn hook_passes_a_folder_git_refuses_but_fails_without_git() {
 fn hook_uses_the_repo_of_the_file() {
     let a = TempRepo::new();
     enable(&a);
-    a.write("src/a.service.ts", ANY);
+    a.write("src/a.constants.ts", ANY);
     let b = TempRepo::new();
-    b.write("src/b.service.ts", ANY);
+    b.write("src/b.constants.ts", ANY);
 
-    let out = hook(b.path(), &hook_input(&a.path().join("src/a.service.ts")));
+    let out = hook(b.path(), &hook_input(&a.path().join("src/a.constants.ts")));
     assert_eq!(code(&out), 2, "{}", stderr(&out));
-    let out = hook(a.path(), &hook_input(&b.path().join("src/b.service.ts")));
+    let out = hook(a.path(), &hook_input(&b.path().join("src/b.constants.ts")));
     assert_eq!(code(&out), 0, "{}", stderr(&out));
 }
 
 #[test]
 fn hook_fails_with_the_cause() {
     let t = TempRepo::new();
-    t.write("src/a.service.ts", ANY);
+    t.write("src/a.constants.ts", ANY);
     for input in ["not json", r#"{"tool_input": {}}"#] {
         let out = hook(t.path(), input);
         assert_eq!(code(&out), 2, "{input}");
@@ -1137,12 +1160,12 @@ fn hook_fails_with_the_cause() {
 
     write_config(&t, "disabled = [\"no-such\"]\n");
     assert_eq!(
-        hook_on(&t, "src/a.service.ts"),
+        hook_on(&t, "src/a.constants.ts"),
         (0, String::new()),
         "no marker"
     );
     enable(&t);
-    let (code, text) = hook_on(&t, "src/a.service.ts");
+    let (code, text) = hook_on(&t, "src/a.constants.ts");
     assert_eq!(code, 2);
     assert!(text.contains("config.toml"), "{text}");
     assert!(text.contains("disabled[0]"), "{text}");
@@ -1152,13 +1175,13 @@ fn hook_fails_with_the_cause() {
 fn hook_reports_a_file_that_does_not_parse() {
     let t = TempRepo::new();
     enable(&t);
-    t.write("src/bad.service.ts", "const = ;\n");
-    let (code, text) = hook_on(&t, "src/bad.service.ts");
+    t.write("src/bad.constants.ts", "const = ;\n");
+    let (code, text) = hook_on(&t, "src/bad.constants.ts");
     assert_eq!(code, 2, "{text}");
     let [line] = text.lines().collect::<Vec<_>>()[..] else {
         panic!("one line: {text}");
     };
-    assert!(line.starts_with("src/bad.service.ts:1:"), "{line}");
+    assert!(line.starts_with("src/bad.constants.ts:1:"), "{line}");
     assert!(line.contains(" parse-error "), "{line}");
 }
 
@@ -1179,7 +1202,7 @@ fn hook_runs_git_once_and_not_for_other_files() {
     let t = TempRepo::new();
     enable(&t);
     let draft = ".git/info/stop-slop/reviews/pr-1.md";
-    t.write("src/a.service.ts", ANY)
+    t.write("src/a.constants.ts", ANY)
         .write("notes.md", "# notes\n")
         .write(draft, "# review\n");
     let traces = tempfile::tempdir().expect("create a temp folder");
@@ -1192,7 +1215,7 @@ fn hook_runs_git_once_and_not_for_other_files() {
     };
 
     assert_eq!(
-        traced("src/a.service.ts", "ts.txt"),
+        traced("src/a.constants.ts", "ts.txt"),
         (2, vec!["rev-parse".to_owned()])
     );
     assert_eq!(traced("notes.md", "md.txt"), (0, Vec::new()));
@@ -1227,19 +1250,26 @@ fn rules_of(report: &Value) -> Vec<&str> {
 fn ignore_writes_an_entry_with_the_file_and_the_rule() {
     let t = branch_repo();
     enable(&t);
-    assert_eq!(hook_on(&t, "src/keep.service.ts").0, 2);
+    assert_eq!(hook_on(&t, "src/keep.constants.ts").0, 2);
     let args = ["check", "--base", "main", "--json"];
-    let fp = fingerprint(&check(t.path(), &args, 1), "no-any", "src/keep.service.ts");
+    let fp = fingerprint(
+        &check(t.path(), &args, 1),
+        "no-any",
+        "src/keep.constants.ts",
+    );
 
     let out = run(t.path(), &["ignore", &fp, "--reason", "boundary type"]);
     assert_eq!(code(&out), 0, "{}", stderr(&out));
-    assert_eq!(stdout(&out), format!("ignored {fp} src/keep.service.ts\n"));
+    assert_eq!(
+        stdout(&out),
+        format!("ignored {fp} src/keep.constants.ts\n")
+    );
     let [entry] = &ignore_file(&t)[..] else {
         panic!("one entry: {:?}", ignore_file(&t));
     };
     assert_eq!(entry.fingerprint, fp);
     assert_eq!(entry.rule, "no-any");
-    assert_eq!(entry.file, "src/keep.service.ts");
+    assert_eq!(entry.file, "src/keep.constants.ts");
     assert_eq!(entry.reason, "boundary type");
     let added = &entry.added;
     let is_date = added.len() == 10
@@ -1250,23 +1280,29 @@ fn ignore_writes_an_entry_with_the_file_and_the_rule() {
     assert!(is_date && added[..4] >= *"2026", "{added}");
 
     assert_eq!(rules_of(&check(t.path(), &args, 1)), ["todo-owner"]);
-    assert_eq!(hook_on(&t, "src/keep.service.ts"), (0, String::new()));
+    assert_eq!(hook_on(&t, "src/keep.constants.ts"), (0, String::new()));
 }
 
 #[test]
 fn ignore_writes_an_entry_per_file_and_replaces_it_again() {
     let t = TempRepo::new();
-    t.write("src/m.service.ts", "export const MAIN = 1;\n")
+    t.write("src/m.constants.ts", "export const MAIN = 1;\n")
         .commit("main");
     t.branch("feat")
-        .write("src/one.service.ts", "// TODO fix\nexport const ONE = 1;\n")
-        .write("src/two.service.ts", "// TODO fix\nexport const TWO = 2;\n")
+        .write(
+            "src/one.constants.ts",
+            "// TODO fix\nexport const ONE = 1;\n",
+        )
+        .write(
+            "src/two.constants.ts",
+            "// TODO fix\nexport const TWO = 2;\n",
+        )
         .commit("feat");
     let args = ["check", "--base", "main", "--json"];
     let fp = fingerprint(
         &check(t.path(), &args, 1),
         "todo-owner",
-        "src/one.service.ts",
+        "src/one.constants.ts",
     );
     let entries = |t: &TempRepo| -> Vec<(String, String, String)> {
         ignore_file(t)
@@ -1275,7 +1311,7 @@ fn ignore_writes_an_entry_per_file_and_replaces_it_again() {
             .collect()
     };
     let expected = |reason: &str| {
-        ["src/one.service.ts", "src/two.service.ts"]
+        ["src/one.constants.ts", "src/two.constants.ts"]
             .map(|file| (file.into(), "todo-owner".into(), reason.into()))
     };
 
@@ -1283,7 +1319,7 @@ fn ignore_writes_an_entry_per_file_and_replaces_it_again() {
     assert_eq!(code(&out), 0, "{}", stderr(&out));
     assert_eq!(
         stdout(&out),
-        format!("ignored {fp} src/one.service.ts\nignored {fp} src/two.service.ts\n")
+        format!("ignored {fp} src/one.constants.ts\nignored {fp} src/two.constants.ts\n")
     );
     assert_eq!(entries(&t), expected("r"));
     assert!(findings(&check(t.path(), &args, 0)).is_empty());
@@ -1293,11 +1329,11 @@ fn ignore_writes_an_entry_per_file_and_replaces_it_again() {
     assert_eq!(entries(&t), expected("second"));
 }
 
-/// The `any` of `src/old.service.ts` is inside a function, so its fingerprint differs from the one
-/// of `keep.service.ts`.
+/// The `any` of `src/old.constants.ts` is inside a function, so its fingerprint differs from the one
+/// of `keep.constants.ts`.
 fn old_repo() -> TempRepo {
     branch_repo_with(&[(
-        "src/old.service.ts",
+        "src/old.constants.ts",
         "export function legacy() { const x: any = 1; return x; }\n",
     )])
 }
@@ -1314,7 +1350,7 @@ fn ignore_of_an_unknown_fingerprint_fails() {
     let fp = fingerprint(
         &check(t.path(), &["check", "--all", "--json"], 1),
         "no-any",
-        "src/old.service.ts",
+        "src/old.constants.ts",
     );
     let out = run(t.path(), &["ignore", &fp, "--reason", "r"]);
     assert_eq!(code(&out), 2, "{}", stdout(&out));
@@ -1346,7 +1382,11 @@ fn ignore_needs_a_reason_and_a_repo() {
 fn ignore_with_a_base_checks_the_files_from_it() {
     let t = branch_repo();
     let args = ["check", "--base", "main", "--json"];
-    let fp = fingerprint(&check(t.path(), &args, 1), "no-any", "src/keep.service.ts");
+    let fp = fingerprint(
+        &check(t.path(), &args, 1),
+        "no-any",
+        "src/keep.constants.ts",
+    );
     let out = run(
         t.path(),
         &["ignore", &fp, "--reason", "r", "--base", "main"],
@@ -1368,7 +1408,7 @@ fn ignore_with_a_base_checks_the_files_from_it() {
     let fp = fingerprint(
         &check(t.path(), &["check", "--all", "--json"], 1),
         "no-any",
-        "src/old.service.ts",
+        "src/old.constants.ts",
     );
     let out = run(t.path(), &["ignore", &fp, "--reason", "r"]);
     assert_eq!(code(&out), 2, "{}", stdout(&out));
@@ -1381,5 +1421,5 @@ fn ignore_with_a_base_checks_the_files_from_it() {
         .into_iter()
         .map(|entry| entry.file.into_string())
         .collect();
-    assert_eq!(files, ["src/old.service.ts"]);
+    assert_eq!(files, ["src/old.constants.ts"]);
 }

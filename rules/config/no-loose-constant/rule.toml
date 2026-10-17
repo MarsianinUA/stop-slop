@@ -1,0 +1,11 @@
+description = "A literal constant loose at the top of a runtime file without a class"
+kind = "candidate"
+files = "code"
+source = ["personal"]
+message = "`{name}` is a fixed value loose at the top of a runtime file: a reader looking for the project's settings and names does not find it among them, and the next file that needs it copies the value or imports this file for it. Move it to its home: a setting someone may tune to a `*.config.ts`, a unit or dimension to the shared constants, a domain key (a queue, cache or subject name) to a `*.constants.ts` next to its domain."
+agent = """
+A `const` at the top of a file holds a literal (a string, a number, a boolean, a template without `${}`), and the file is runtime code: it has no class, or it is a functions file, where the class is the stray. Every named value has one home: a setting someone may tune goes to a `*.config.ts`; a universal unit or dimension (time units, scale factors) to the shared constants; a domain key (a cache namespace, a queue or job name, a protocol subject) to a `*.constants.ts` next to its domain. Move it there and import it. If the file holds only such values, it is a constants file under another name: rename it to `*.constants.ts`. If only one function uses the value and it means nothing outside it, move it into that function. Ignore the finding, with the reason, when the file is not runtime code (a script, a seed, a generated file) or the project keeps such values elsewhere by its own convention.
+"""
+
+[options]
+homes = ["config", "provider"]
