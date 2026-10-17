@@ -1,0 +1,8 @@
+description = "An empty `catch`, or a `catch` that only logs"
+kind = "error"
+source = ["personal"]
+message = "This `catch` {does}: the error is swallowed, so the caller goes on as if the call worked, and the broken state shows up later somewhere else; a comment or a log line does not handle it. Handle the error (a fallback value, a retry, a typed error for the caller) or rethrow it."
+
+[options]
+loggers = ["console", "log", "logger"]
+levels = ["log", "trace", "debug", "info", "notice", "warn", "warning", "error", "fatal", "verbose"]

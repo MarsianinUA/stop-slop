@@ -1,0 +1,4 @@
+description = "A class named `*Error` that does not extend `Error`"
+kind = "error"
+source = ["personal"]
+message = "`{name}` is named as an error but does not extend `Error`: it has no stack trace, `instanceof Error` is false for it, and error filters and loggers treat it as plain data. Extend `Error`, or a project error class that does."
