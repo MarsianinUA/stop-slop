@@ -160,7 +160,7 @@ pub fn mutator_call(file: &File<'_>, reference: NodeId) -> Option<Span> {
 /// A call that writes a log line: a method from `levels` on a receiver with a word from `loggers`
 /// in its name, also through `?.`: `this.logger.warn(..)`, `console.error(..)`,
 /// `this.#log.info(..)`. The receiver's type is not seen: `dialog.error(..)` has no logger word,
-/// `log(..)` no receiver. `no-empty-catch` and `no-secret-in-log` judge the same calls.
+/// `log(..)` no receiver.
 pub fn is_log_call(call: &CallExpression<'_>, loggers: &[String], levels: &[String]) -> bool {
     let Expression::StaticMemberExpression(method) = call.callee.get_inner_expression() else {
         return false;

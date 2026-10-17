@@ -17,8 +17,11 @@ impl Rule for Check {
         for reference in global_references(file, "console") {
             let node = outer_assertion(file, reference);
             let parent = nodes.parent_node(node.id());
-            // `typeof console` in a type writes nothing.
-            if matches!(parent.kind(), AstKind::TSTypeQuery(_)) {
+            // `typeof console` and `typeof console.warn` in a type write nothing.
+            if matches!(
+                parent.kind(),
+                AstKind::TSTypeQuery(_) | AstKind::TSQualifiedName(_)
+            ) {
                 continue;
             }
             let (span, used) = used_as(file, node, parent);
@@ -47,10 +50,11 @@ impl Check {
 /// call from another) with `console.warn`, the member for `const log = console.log`, and
 /// `console` itself where the object goes on (`new Logger(console)`, `const { log } = console`).
 fn used_as<'a>(file: &File<'a>, node: &AstNode<'a>, parent: &AstNode<'a>) -> (Span, Span) {
-    let Some(member) = parent.kind().as_member_expression_kind() else {
-        return (node.span(), node.span());
-    };
-    if member.object().span() != node.span() {
+    let on_object = parent
+        .kind()
+        .as_member_expression_kind()
+        .is_some_and(|member| member.object().span() == node.span());
+    if !on_object {
         return (node.span(), node.span());
     }
     let method = outer_assertion(file, parent);

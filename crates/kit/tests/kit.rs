@@ -1988,18 +1988,21 @@ export {};";
             .nodes()
             .iter()
             .filter_map(|node| match node.kind() {
-                AstKind::CallExpression(call) if !call.arguments.is_empty() => {
-                    Some(is_log_call(call, &loggers, &levels))
+                AstKind::CallExpression(call) if is_log_call(call, &loggers, &levels) => {
+                    Some(source(file, call))
                 }
                 _ => None,
             })
             .collect();
-        // `logger.child({}).info(13)` comes before the call in its receiver.
         assert_eq!(
             logs,
             [
-                true, true, true, true, true, true, false, false, false, false, false, false,
-                false, false
+                "console.error(1)",
+                "this.logger.warn(2)",
+                "this.#log.info(3)",
+                "Logger.log(4)",
+                "logger?.error(5)",
+                "(remoteLogger as any).debug(6)",
             ]
         );
     });

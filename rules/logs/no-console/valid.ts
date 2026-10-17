@@ -15,4 +15,6 @@ export function local(): void {
 
 export type Sink = typeof console;
 
+export type Warn = typeof console.warn;
+
 export const NAME = 'console.log';

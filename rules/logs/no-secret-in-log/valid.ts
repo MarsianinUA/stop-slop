@@ -9,6 +9,7 @@ export function signIn(user: string, password: string): void {
   logger.info(`sign in ${user}`, { hasPassword: password.length > 0 });
   logger.info({ password: mask(password) });
   logger.info({ password: password ? '[set]' : '[empty]' });
+  logger.info({ user, password: undefined });
 }
 
 export function refreshed(accessToken: string, tokenAddress: string, tokenId: number): void {
