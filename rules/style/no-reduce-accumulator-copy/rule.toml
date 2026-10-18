@@ -1,0 +1,5 @@
+description = "A `reduce` callback copies its accumulator: `{ ...acc }`, `Object.assign({}, acc)`, `acc.concat(..)`"
+kind = "error"
+files = "code"
+source = ["anti-slop"]
+message = "This copies `{name}`, the accumulator of the `reduce`, on every step: each copy is as large as everything gathered so far, so the work grows with the square of the items. Start from a fresh accumulator in the initial value and change it in place (`{name}[key] = value; return {name};`), or build the result in one call (`Object.fromEntries(..)`, `flatMap`)."

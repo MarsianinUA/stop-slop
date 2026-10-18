@@ -1,0 +1,12 @@
+description = "A call or other work at the top level of a module that exports something, outside `main.ts` and bootstrap files"
+kind = "candidate"
+files = "code"
+source = ["personal"]
+message = "This statement runs the moment any file imports the module: an import made for one type or constant starts it too, when it runs depends on the order of the import graph, and a test cannot load the module without it. Move it into a function that the entry point (`main.ts`, a bootstrap file) calls."
+agent = """
+A module that exports something also does work at its top level when it loads: a call (`dayjs.extend(utc)`, `registerHandlers()`), an assignment to a global or a member (`process.env.TZ = 'UTC'`, `Error.stackTraceLimit = 50`), or an `if` / loop / `try` around such work. Move the work into an exported function and call it from the entry point (`main.ts`, a bootstrap file), so importing the module only declares things. A module that must run on load and has nothing else to give can drop its exports and be imported for its effect (`import './register-handlers'`). Ignore the finding, with the reason, when the order is the point: a polyfill, a tool's config file that the tool loads (`drizzle.config.ts` loading the env), an entry point under another name.
+"""
+
+[options]
+entries = ["main", "bootstrap"]
+dirs = ["scripts", "bin"]
