@@ -12,6 +12,7 @@ jest.mock('@acme/db/client'); // expect: no-internal-module-mock
 jest['doMock']('./clock'); // expect: no-internal-module-mock
 jest.setMock('./orders.config.json', { retries: 3 }); // expect: no-internal-module-mock
 jest.unstable_mockModule(`./mailer`, () => ({ send: jest.fn() })); // expect: no-internal-module-mock
+vitest.doMock('./orders.audit'); // expect: no-internal-module-mock
 
 describe('OrdersService', () => {
   beforeEach(() => {

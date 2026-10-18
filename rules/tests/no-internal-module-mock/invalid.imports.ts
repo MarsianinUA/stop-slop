@@ -2,7 +2,7 @@
 import { jest as runner } from '@jest/globals';
 import { mock } from 'bun:test';
 import { mock as nodeMock } from 'node:test';
-import { vi as testApi } from 'vitest';
+import { vi as testApi, vitest as runnerApi } from 'vitest';
 
 runner.mock('./orders.repository'); // expect: no-internal-module-mock
 testApi.mock('./orders.mapper.helper'); // expect: no-internal-module-mock
@@ -10,3 +10,4 @@ testApi.doMock(import('./orders.cache'), () => ({ get: testApi.fn() })); // expe
 vi.mock('../shared/clock'); // expect: no-internal-module-mock
 mock.module('./orders.client', () => ({ send: () => undefined })); // expect: no-internal-module-mock
 nodeMock.module('./orders.config.js', { namedExports: { retries: 3 } }); // expect: no-internal-module-mock
+runnerApi.mock('./orders.stock'); // expect: no-internal-module-mock

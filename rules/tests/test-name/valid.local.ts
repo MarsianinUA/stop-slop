@@ -1,4 +1,5 @@
 // @path src/orders/orders.service.spec.ts
+import mocha from 'mocha';
 import { it } from './harness';
 
 function test(name: string, run: () => void): void {
@@ -10,3 +11,4 @@ const suite = { it: (name: string) => name };
 it('works', () => undefined);
 test('test1', () => undefined);
 suite.it('works');
+mocha('works');

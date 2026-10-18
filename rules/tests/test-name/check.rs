@@ -1,4 +1,4 @@
-use kit::oxc::ast::ast::{CallExpression, Expression};
+use kit::oxc::ast::ast::{Argument, CallExpression, Expression};
 use kit::prelude::*;
 
 #[derive(Deserialize)]
@@ -24,6 +24,8 @@ const RUNNERS: [&str; 6] = [
     "@playwright/test",
     "mocha",
 ];
+/// Runners whose default export is `test`: `import test from 'node:test'`.
+const DEFAULT_TEST: [&str; 2] = ["node:test", "@playwright/test"];
 /// Members that still take the name first: `it.only(name, ..)`, `test.concurrent.skip(..)`.
 const MODIFIERS: [&str; 9] = [
     "only",
@@ -47,11 +49,7 @@ impl Rule for Check {
         let AstKind::CallExpression(call) = node.kind() else {
             return;
         };
-        let Some(title) = call
-            .arguments
-            .first()
-            .and_then(|first| first.as_expression())
-        else {
+        let Some(title) = call.arguments.first().and_then(Argument::as_expression) else {
             return;
         };
         let name = match title {
@@ -73,37 +71,43 @@ impl Rule for Check {
 impl Check {
     /// Nothing but `vague` and `filler` words and numbers, with a `vague` word or a number:
     /// `works`, `should work correctly`, `test1`, `case 2`, `case %#`. A name without letters and
-    /// digits (`''`) too; a bare number (`'404'`) names a case.
+    /// digits (`''`, `'%#'`) too; a bare number (`'404'`) names a case.
     fn is_vague(&self, name: &str) -> bool {
         // `each` fills `%s`, `%d` and `$expected` from its table row, and these name the case;
-        // `%#` and `$#` give only the row's index.
+        // `%#`, `$#` and Vitest's `%$` give only the row's index.
         let fills = name.as_bytes().windows(2).any(|pair| {
             matches!(pair, [b'%' | b'$', next] if next.is_ascii_alphabetic() || *next == b'_')
         });
         if fills {
             return false;
         }
-        let mut words = Vec::new();
-        let mut numbered = name.contains("%#") || name.contains("$#");
+        let is_in =
+            |list: &[String], word: &str| list.iter().any(|item| item.eq_ignore_ascii_case(word));
+        let index = ["%#", "$#", "%$"].iter().any(|index| name.contains(index));
+        let mut digits = false;
+        let mut any_word = false;
+        let mut any_vague = false;
         for token in name
             .split(|ch: char| !ch.is_alphanumeric())
             .filter(|token| !token.is_empty())
         {
             let word = token.trim_end_matches(|ch: char| ch.is_ascii_digit());
-            numbered |= word.len() < token.len();
-            if !word.is_empty() {
-                words.push(word);
+            digits |= word.len() < token.len();
+            if word.is_empty() {
+                continue;
+            }
+            any_word = true;
+            if is_in(&self.vague, word) {
+                any_vague = true;
+            } else if !is_in(&self.filler, word) {
+                return false;
             }
         }
-        if words.is_empty() {
-            return !numbered;
+        if any_word {
+            digits || index || any_vague
+        } else {
+            !digits
         }
-        let is_in =
-            |list: &[String], word: &str| list.iter().any(|item| item.eq_ignore_ascii_case(word));
-        words
-            .iter()
-            .all(|word| is_in(&self.vague, word) || is_in(&self.filler, word))
-            && (numbered || words.iter().any(|word| is_in(&self.vague, word)))
     }
 }
 
@@ -121,9 +125,8 @@ fn declares_test(file: &File<'_>, call: &CallExpression<'_>) -> bool {
 /// The test behind `it.each` or `test.skipIf`.
 fn curried<'b, 'a>(callee: &'b Expression<'a>) -> Option<&'b Expression<'a>> {
     let member = callee.get_member_expr()?;
-    member
-        .static_property_name()
-        .is_some_and(|name| CURRIED.contains(&name))
+    CURRIED
+        .contains(&member.static_property_name()?)
         .then(|| member.object())
 }
 
@@ -144,7 +147,9 @@ fn is_test(file: &File<'_>, test: &Expression<'_>) -> bool {
         return false;
     };
     TESTS.iter().any(|name| is_global(file, test, name))
-        || RUNNERS
-            .iter()
-            .any(|runner| imported_from(file, id, runner).is_some_and(|name| TESTS.contains(&name)))
+        || imported_name(file, id).is_some_and(|(module, name)| {
+            let runner = package_name(module);
+            (TESTS.contains(&name) && RUNNERS.contains(&runner))
+                || (name == "default" && DEFAULT_TEST.contains(&runner))
+        })
 }

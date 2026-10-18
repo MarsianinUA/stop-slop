@@ -48,4 +48,12 @@ describe('OrdersService', () => {
   test.failing('', () => { // expect: test-name
     expect(8 + 8).toBe(17);
   });
+
+  it.each([[9]])('%#', (value) => { // expect: test-name
+    expect(value).toBe(9);
+  });
+
+  test.each([[10]])('case %$', (value) => { // expect: test-name
+    expect(value).toBe(10);
+  });
 });

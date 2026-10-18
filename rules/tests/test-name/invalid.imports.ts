@@ -1,6 +1,6 @@
 // @path src/orders/__tests__/orders.mapper.ts
-import { test as e2e } from '@playwright/test';
-import { test as nodeTest } from 'node:test';
+import pw, { test as e2e } from '@playwright/test';
+import run, { test as nodeTest } from 'node:test';
 import { it as check, test } from 'vitest';
 
 check('works fine', () => { // expect: test-name
@@ -25,6 +25,14 @@ e2e('test 5', async () => { // expect: test-name
 
 e2e.fixme('simple test', async () => { // expect: test-name
   expect(toOrder({ id: 6 }).id).toBe(6);
+});
+
+run('should work properly', () => { // expect: test-name
+  expect(toOrder({ id: 7 }).id).toBe(7);
+});
+
+pw.skip('test 8', async () => { // expect: test-name
+  expect(toOrder({ id: 8 }).id).toBe(8);
 });
 
 function toOrder(row: { id: number }): { id: number } {

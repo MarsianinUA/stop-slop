@@ -1,41 +1,35 @@
-use kit::oxc::ast::ast::Expression;
+use kit::oxc::ast::ast::{Argument, Expression};
 use kit::prelude::*;
 
 #[derive(Deserialize)]
 #[serde(crate = "kit::serde", deny_unknown_fields)]
 pub struct Check {}
 
-/// A test runner's object that swaps a module for a fake: its name, the module that exports it,
-/// whether tests see it as a global too, and the methods that register the fake.
 struct Mocker {
-    object: &'static str,
-    module: &'static str,
+    /// Vitest gives `vi` as `vitest` too.
+    names: &'static [&'static str],
+    modules: &'static [&'static str],
+    /// Tests see `names` without an import too.
     global: bool,
     methods: &'static [&'static str],
 }
 
-const MOCKERS: [Mocker; 4] = [
+const MOCKERS: [Mocker; 3] = [
     Mocker {
-        object: "jest",
-        module: "@jest/globals",
+        names: &["jest"],
+        modules: &["@jest/globals"],
         global: true,
         methods: &["mock", "doMock", "setMock", "unstable_mockModule"],
     },
     Mocker {
-        object: "vi",
-        module: "vitest",
+        names: &["vi", "vitest"],
+        modules: &["vitest"],
         global: true,
         methods: &["mock", "doMock"],
     },
     Mocker {
-        object: "mock",
-        module: "bun:test",
-        global: false,
-        methods: &["module"],
-    },
-    Mocker {
-        object: "mock",
-        module: "node:test",
+        names: &["mock"],
+        modules: &["bun:test", "node:test"],
         global: false,
         methods: &["module"],
     },
@@ -63,11 +57,7 @@ impl Rule for Check {
         {
             return;
         }
-        let Some(module) = call
-            .arguments
-            .first()
-            .and_then(|first| first.as_expression())
-        else {
+        let Some(module) = call.arguments.first().and_then(Argument::as_expression) else {
             return;
         };
         let Some(source) = module_text(file, module) else {
@@ -87,11 +77,14 @@ fn is_mocker(file: &File<'_>, object: &Expression<'_>, mocker: &Mocker) -> bool 
     let Expression::Identifier(id) = object else {
         return false;
     };
-    (mocker.global && is_global(file, object, mocker.object))
-        || imported_from(file, id, mocker.module) == Some(mocker.object)
+    let global = mocker.global && mocker.names.contains(&id.name.as_str());
+    (global && is_global(file, object, &id.name))
+        || imported_name(file, id).is_some_and(|(module, name)| {
+            mocker.names.contains(&name) && mocker.modules.contains(&package_name(module))
+        })
 }
 
-/// The module a mock names: a string, a template without `${}`, or Vitest's `import('./x')`.
+/// The module a mock names; Vitest also takes `import('./x')`.
 fn module_text<'a>(file: &File<'a>, module: &'a Expression<'a>) -> Option<&'a str> {
     match module {
         Expression::StringLiteral(literal) => Some(literal.value.as_str()),
