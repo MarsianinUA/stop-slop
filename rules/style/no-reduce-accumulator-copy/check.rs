@@ -94,11 +94,8 @@ fn alias_of(file: &File<'_>, value: &AstNode<'_>) -> Option<SymbolId> {
     let BindingPattern::BindingIdentifier(alias) = &declarator.id else {
         return None;
     };
-    let holds_value = declarator
-        .init
-        .as_ref()
-        .is_some_and(|init| init.span() == value.span());
-    if !declaration.kind.is_const() || !holds_value {
+    // The value's parent is the declarator, so the value is its `init`.
+    if !declaration.kind.is_const() {
         return None;
     }
     alias.symbol_id.get()
@@ -128,20 +125,17 @@ fn copy_of(file: &File<'_>, value: &AstNode<'_>, is_array: bool) -> Option<Span>
             let is_copy = match callee.get_member_expr() {
                 Some(member) => {
                     let owner = member.object().get_inner_expression();
+                    let target = call.arguments.first().and_then(Argument::as_expression);
                     match member.static_property_name()? {
                         // `Object.assign(acc, item)` fills the accumulator itself.
                         "assign" => {
                             is_global(file, owner, "Object")
-                                && call
-                                    .arguments
-                                    .first()
-                                    .and_then(Argument::as_expression)
-                                    .is_some_and(|target| {
-                                        matches!(
-                                            target.get_inner_expression(),
-                                            Expression::ObjectExpression(_)
-                                        )
-                                    })
+                                && target.is_some_and(|target| {
+                                    matches!(
+                                        target.get_inner_expression(),
+                                        Expression::ObjectExpression(_)
+                                    )
+                                })
                         }
                         "from" => is_global(file, owner, "Array") && is_first(&call.arguments),
                         _ => false,
@@ -165,13 +159,14 @@ fn copy_of(file: &File<'_>, value: &AstNode<'_>, is_array: bool) -> Option<Span>
                     member.static_property_name()?.as_str(),
                     "concat" | "slice" | "toSorted" | "toReversed" | "toSpliced" | "with"
                 );
-            let method = outer_assertion(file, parent);
-            match nodes.parent_kind(method.id()) {
-                AstKind::CallExpression(call) if is_copy && call.callee.span() == method.span() => {
-                    Some(call.span)
-                }
-                _ => None,
+            if !is_copy {
+                return None;
             }
+            let method = outer_assertion(file, parent);
+            let AstKind::CallExpression(call) = nodes.parent_kind(method.id()) else {
+                return None;
+            };
+            (call.callee.span() == method.span()).then_some(call.span)
         }
     }
 }

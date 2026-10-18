@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 use kit::oxc::ast::ast::{
-    BindingPattern, ClassElement, Declaration, ExportDefaultDeclarationKind, Statement,
+    BindingPattern, ClassElement, Declaration, ExportDefaultDeclarationKind, Expression, Statement,
 };
 use kit::oxc::semantic::NodeId;
 use kit::prelude::*;
@@ -22,28 +22,32 @@ impl Rule for Check {
 }
 
 /// A function or method that can move: where it starts, and the units (top-level statements or
-/// class members) whose code calls it, each with where it starts and its name.
-struct Callee {
+/// class members) whose code calls it, each with where it starts and its name. Names are source
+/// text, put on one line only for a finding.
+struct Callee<'a> {
     unit: u32,
     span: Span,
-    name: String,
-    callers: Vec<(u32, String)>,
+    name: &'a str,
+    callers: Vec<(u32, &'a str)>,
 }
 
 /// The finding when the callee sits above every caller, unless one of them is also its callee:
 /// two functions that call each other cannot both come first.
-fn above_callers(callees: &[Callee]) -> Vec<(Span, String, String)> {
+fn above_callers(callees: &[Callee<'_>]) -> Vec<(Span, String, String)> {
     callees
         .iter()
         .filter_map(|callee| {
             let first = callee.callers.iter().min_by_key(|(start, _)| *start)?;
-            let is_mutual = callee.callers.iter().any(|(start, _)| {
-                callees.iter().any(|other| {
-                    other.unit == *start && other.callers.iter().any(|(at, _)| *at == callee.unit)
+            let is_mutual = || {
+                callee.callers.iter().any(|(start, _)| {
+                    callees.iter().any(|other| {
+                        other.unit == *start
+                            && other.callers.iter().any(|(at, _)| *at == callee.unit)
+                    })
                 })
-            });
-            (callee.unit < first.0 && !is_mutual)
-                .then(|| (callee.span, callee.name.clone(), first.1.clone()))
+            };
+            (callee.unit < first.0 && !is_mutual())
+                .then(|| (callee.span, one_line(callee.name), one_line(first.1)))
         })
         .collect()
 }
@@ -66,7 +70,7 @@ fn top_functions(file: &File<'_>) -> Vec<(Span, String, String)> {
         if binding.kind != TopKind::Function {
             continue;
         }
-        let Some(own) = unit_of(binding.span.start) else {
+        let Some(own) = unit_of(binding.span.start).map(|unit| unit.span().start) else {
             continue;
         };
         // A `const` function is not hoisted: code that runs on load must find it above.
@@ -87,7 +91,7 @@ fn top_functions(file: &File<'_>) -> Vec<(Span, String, String)> {
                 is_used_on_load = true;
                 continue;
             }
-            if unit.span() == own.span() {
+            if unit.span().start == own {
                 continue;
             }
             if let Some(name) = unit_name(file, unit, node.span().start) {
@@ -98,9 +102,9 @@ fn top_functions(file: &File<'_>) -> Vec<(Span, String, String)> {
             continue;
         }
         callees.push(Callee {
-            unit: own.span().start,
+            unit: own,
             span: binding.span,
-            name: one_line(binding.span.source_text(file.text)),
+            name: binding.span.source_text(file.text),
             callers,
         });
     }
@@ -108,20 +112,36 @@ fn top_functions(file: &File<'_>) -> Vec<(Span, String, String)> {
 }
 
 /// The reference sits in code that runs after the module loads: inside a function, or in an
-/// instance field's value, which runs for each `new`.
+/// instance field's value, which runs for each `new`. A decorator and a field's computed key run
+/// when the class is defined: `@Column(money())`, `constructor(@Inject(token('repo')) ..)`.
 fn runs_later(file: &File<'_>, node: NodeId) -> bool {
-    file.semantic
-        .nodes()
-        .ancestor_kinds(node)
-        .any(|kind| match kind {
-            AstKind::PropertyDefinition(field) => !field.r#static,
-            AstKind::AccessorProperty(field) => !field.r#static,
-            kind => kind.is_function_like(),
-        })
+    let nodes = file.semantic.nodes();
+    let at = nodes.get_node(node).span();
+    let holds = |value: &Option<Expression<'_>>| {
+        value
+            .as_ref()
+            .is_some_and(|value| value.span().contains_inclusive(at))
+    };
+    let mut in_decorator = false;
+    for kind in nodes.ancestor_kinds(node) {
+        match kind {
+            AstKind::Decorator(_) => in_decorator = true,
+            AstKind::Class(_) => in_decorator = false,
+            AstKind::PropertyDefinition(field) if !field.r#static && holds(&field.value) => {
+                return true;
+            }
+            AstKind::AccessorProperty(field) if !field.r#static && holds(&field.value) => {
+                return true;
+            }
+            kind if kind.is_function_like() && !in_decorator => return true,
+            _ => {}
+        }
+    }
+    false
 }
 
 /// The name of the top-level declaration that holds the offset: its function, class or variable.
-fn unit_name(file: &File<'_>, statement: &Statement<'_>, at: u32) -> Option<String> {
+fn unit_name<'a>(file: &File<'a>, statement: &Statement<'a>, at: u32) -> Option<&'a str> {
     let declaration = match statement {
         Statement::ExportDeclaration(export) => &export.declaration,
         Statement::ExportDefaultDeclaration(export) => {
@@ -130,21 +150,21 @@ fn unit_name(file: &File<'_>, statement: &Statement<'_>, at: u32) -> Option<Stri
                 ExportDefaultDeclarationKind::ClassDeclaration(class) => class.id.as_ref(),
                 _ => None,
             };
-            return Some(id.map_or("default", |id| id.name.as_str()).to_string());
+            return Some(id.map_or("default", |id| id.name.as_str()));
         }
         statement => statement.as_declaration()?,
     };
     match declaration {
-        Declaration::FunctionDeclaration(function) => Some(function.id.as_ref()?.name.to_string()),
-        Declaration::ClassDeclaration(class) => Some(class.id.as_ref()?.name.to_string()),
+        Declaration::FunctionDeclaration(function) => Some(function.id.as_ref()?.name.as_str()),
+        Declaration::ClassDeclaration(class) => Some(class.id.as_ref()?.name.as_str()),
         Declaration::VariableDeclaration(variables) => {
             let declarator = variables
                 .declarations
                 .iter()
                 .find(|declarator| declarator.span.start <= at && at < declarator.span.end)?;
             Some(match &declarator.id {
-                BindingPattern::BindingIdentifier(id) => id.name.to_string(),
-                pattern => one_line(pattern.span().source_text(file.text)),
+                BindingPattern::BindingIdentifier(id) => id.name.as_str(),
+                pattern => pattern.span().source_text(file.text),
             })
         }
         _ => None,
@@ -154,11 +174,31 @@ fn unit_name(file: &File<'_>, statement: &Statement<'_>, at: u32) -> Option<Stri
 /// Methods of each class and the members of the same class that call them through `this`.
 fn methods(file: &File<'_>) -> Vec<(Span, String, String)> {
     let nodes = file.semantic.nodes();
-    let mut callers: HashMap<NodeId, Vec<(u32, String)>> = HashMap::new();
+    let mut callers: HashMap<NodeId, Vec<(u32, &str)>> = HashMap::new();
+    let mut classes = Vec::new();
     for node in nodes.iter() {
-        let AstKind::CallExpression(call) = node.kind() else {
-            continue;
+        let call = match node.kind() {
+            AstKind::CallExpression(call) => call,
+            AstKind::Class(class) => {
+                classes.push(class);
+                continue;
+            }
+            _ => continue,
         };
+        // Only `this.m(..)` can run a method; `local_callee` on a plain name would scan all its
+        // references for nothing.
+        let is_this_call = match call.callee.get_inner_expression() {
+            Expression::StaticMemberExpression(member) => {
+                matches!(member.object, Expression::ThisExpression(_))
+            }
+            Expression::PrivateFieldExpression(member) => {
+                matches!(member.object, Expression::ThisExpression(_))
+            }
+            _ => false,
+        };
+        if !is_this_call {
+            continue;
+        }
         let Some(function) = local_callee(file, call) else {
             continue;
         };
@@ -183,11 +223,11 @@ fn methods(file: &File<'_>) -> Vec<(Span, String, String)> {
                 .push((member.span().start, name));
         }
     }
+    if callers.is_empty() {
+        return Vec::new();
+    }
     let mut found = Vec::new();
-    for node in nodes.iter() {
-        let AstKind::Class(class) = node.kind() else {
-            continue;
-        };
+    for class in classes {
         // `local_callee` runs only a method with a body through `this`: not a getter, a static
         // method or an overload signature.
         let callees: Vec<Callee> = class
@@ -201,7 +241,7 @@ fn methods(file: &File<'_>) -> Vec<(Span, String, String)> {
                 Some(Callee {
                     unit: method.span.start,
                     span: method.key.span(),
-                    name: one_line(method.key.span().source_text(file.text)),
+                    name: method.key.span().source_text(file.text),
                     callers: callers.remove(&method.node_id.get())?,
                 })
             })
@@ -211,13 +251,12 @@ fn methods(file: &File<'_>) -> Vec<(Span, String, String)> {
     found
 }
 
-/// The name of a class member: its key, or `constructor`.
-fn member_name(file: &File<'_>, kind: AstKind<'_>) -> Option<String> {
+fn member_name<'a>(file: &File<'a>, kind: AstKind<'_>) -> Option<&'a str> {
     let key = match kind {
         AstKind::MethodDefinition(method) => &method.key,
         AstKind::PropertyDefinition(field) => &field.key,
         AstKind::AccessorProperty(field) => &field.key,
         _ => return None,
     };
-    Some(one_line(key.span().source_text(file.text)))
+    Some(key.span().source_text(file.text))
 }

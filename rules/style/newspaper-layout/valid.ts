@@ -93,3 +93,19 @@ export class Cart {
     return this.prices.reduce((all, price) => all + price, 0) + this.walk({});
   }
 }
+
+declare function Column(options: object): PropertyDecorator;
+declare function Inject(token: string): ParameterDecorator;
+
+const money = (): object => ({ scale: 2 });
+const token = (name: string): string => `${name}-token`;
+const slot = (): string => 'slot';
+
+export class Order {
+  @Column(money())
+  amount = 0;
+
+  [slot()] = 1;
+
+  constructor(@Inject(token('repo')) readonly repo: object) {}
+}

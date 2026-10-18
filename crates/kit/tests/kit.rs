@@ -2325,7 +2325,7 @@ fn known_array_is_an_array_by_its_own_syntax() {
 declare const rows: { filter(): number[] };
 export function arrays(typed: number[], frozen: readonly number[], lib: Array<number>,
   read: ReadonlyArray<number>, pair: [number, number], maybe: number[] | undefined,
-  untyped: unknown, set: Set<number>) {
+  untyped: unknown, set: Set<number>, ...more: number[]) {
   const literal = [1];
   const alias = literal;
   let written = [1];
@@ -2338,7 +2338,7 @@ export function arrays(typed: number[], frozen: readonly number[], lib: Array<nu
   return [
     [1, 2], literal, alias, typed, frozen, lib, read, pair, maybe, typed.filter(Boolean),
     typed?.slice(), typed.map(String).sort(), Array.from(set), Array.of(1), Object.keys({}),
-    Object.entries({}), literal as number[], literal!, grown,
+    Object.entries({}), literal as number[], literal!, grown, more,
     written, unwritten, head, loaded, untyped, set, rows.filter(), load(), typed.find(Boolean),
     typed.at(0),
   ];
@@ -2367,8 +2367,8 @@ export function shadowed(Array: { from(value: unknown): number[] }) {
             known,
             [
                 true, true, true, true, true, true, true, true, true, true, true, true, true, true,
-                true, true, true, true, true, false, false, false, false, false, false, false,
-                false, false, false, false, false
+                true, true, true, true, true, true, false, false, false, false, false, false,
+                false, false, false, false, false, false
             ]
         );
     });

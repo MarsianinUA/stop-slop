@@ -17,11 +17,7 @@ impl Rule for Check {
         if !exports_something(body) || self.is_entry(file) || is_cli_script(file, &self.dirs) {
             return;
         }
-        let mut effects = Vec::new();
-        load_time_work(body, &mut effects);
-        for span in effects {
-            cx.report(span);
-        }
+        report_load_time_work(body, cx);
     }
 }
 
@@ -50,10 +46,10 @@ fn exports_something(body: &[Statement<'_>]) -> bool {
 
 /// The statements that do work when the module loads: anything but a declaration, an import or an
 /// export. The body of a bare block runs too (`no-bare-block` reports the braces).
-fn load_time_work(statements: &[Statement<'_>], out: &mut Vec<Span>) {
+fn report_load_time_work(statements: &[Statement<'_>], cx: &mut Cx<'_, '_>) {
     for statement in statements {
         match statement {
-            Statement::BlockStatement(block) => load_time_work(&block.body, out),
+            Statement::BlockStatement(block) => report_load_time_work(&block.body, cx),
             Statement::ExpressionStatement(_)
             | Statement::IfStatement(_)
             | Statement::SwitchStatement(_)
@@ -64,7 +60,9 @@ fn load_time_work(statements: &[Statement<'_>], out: &mut Vec<Span>) {
             | Statement::DoWhileStatement(_)
             | Statement::TryStatement(_)
             | Statement::LabeledStatement(_)
-            | Statement::ThrowStatement(_) => out.push(statement.span()),
+            | Statement::ThrowStatement(_) => {
+                cx.report(statement.span());
+            }
             _ => {}
         }
     }

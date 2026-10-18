@@ -408,12 +408,25 @@ fn is_array(file: &File<'_>, expression: &Expression<'_>, seen: &mut HashSet<Sym
     }
     let nodes = file.semantic.nodes();
     let declaration = scoping.symbol_declaration(symbol);
+    let (pattern, annotation, const_init) =
+        match (nodes.kind(declaration), nodes.parent_kind(declaration)) {
+            (AstKind::VariableDeclarator(declarator), AstKind::VariableDeclaration(statement)) => (
+                &declarator.id,
+                &declarator.type_annotation,
+                declarator
+                    .init
+                    .as_ref()
+                    .filter(|_| statement.kind.is_const()),
+            ),
+            (AstKind::FormalParameter(parameter), _) => {
+                (&parameter.pattern, &parameter.type_annotation, None)
+            }
+            (AstKind::FormalParameterRest(parameter), _) => {
+                (&parameter.rest.argument, &parameter.type_annotation, None)
+            }
+            _ => return false,
+        };
     // The annotation of a destructuring pattern types the whole value, not this name.
-    let (pattern, annotation) = match nodes.kind(declaration) {
-        AstKind::VariableDeclarator(declarator) => (&declarator.id, &declarator.type_annotation),
-        AstKind::FormalParameter(parameter) => (&parameter.pattern, &parameter.type_annotation),
-        _ => return false,
-    };
     if !matches!(pattern, BindingPattern::BindingIdentifier(_)) {
         return false;
     }
@@ -421,16 +434,7 @@ fn is_array(file: &File<'_>, expression: &Expression<'_>, seen: &mut HashSet<Sym
         // Whatever is written to the name later is of this type too.
         return is_array_type(file, &annotation.type_annotation);
     }
-    match (nodes.kind(declaration), nodes.parent_kind(declaration)) {
-        (AstKind::VariableDeclarator(declarator), AstKind::VariableDeclaration(statement)) => {
-            statement.kind.is_const()
-                && declarator
-                    .init
-                    .as_ref()
-                    .is_some_and(|init| is_array(file, init, seen))
-        }
-        _ => false,
-    }
+    const_init.is_some_and(|init| is_array(file, init, seen))
 }
 
 fn is_array_type(file: &File<'_>, ty: &TSType<'_>) -> bool {

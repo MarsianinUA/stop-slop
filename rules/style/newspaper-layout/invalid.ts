@@ -95,3 +95,11 @@ export class Tree {
     return this.flatten(root);
   }
 }
+
+const decorated = (): ClassDecorator => () => undefined; // expect: newspaper-layout
+
+export function register(): object {
+  @decorated()
+  class Handler {}
+  return Handler;
+}
