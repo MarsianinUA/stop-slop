@@ -50,6 +50,11 @@ export function port(app: INestApplication, untyped: { get(key: string): number 
   return configService.getOrThrow<number>('worker.port') + untyped.get('offset');
 }
 
+export function destructured(app: INestApplication): unknown {
+  const { cache } = app.get(ConfigService) as unknown as { cache: Map<string, unknown> };
+  return cache.get('key');
+}
+
 export class Settings {
   private readonly options: { get(key: string): string };
 

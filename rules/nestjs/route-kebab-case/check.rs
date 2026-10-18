@@ -33,32 +33,32 @@ impl Rule for Check {
         let Expression::Identifier(callee) = &call.callee else {
             return;
         };
+        let Some(argument) = call.arguments.first().and_then(Argument::as_expression) else {
+            return;
+        };
         let file = cx.file();
         let is_route = matches!(imported_name(file, callee),
             Some((module, name)) if package_name(module) == "@nestjs/common" && ROUTES.contains(&name));
         if !is_route {
             return;
         }
-        let mut paths = Vec::new();
-        if let Some(argument) = call.arguments.first() {
-            match argument {
-                // `@Controller({ path: 'orders', version: '1' })`.
-                Argument::ObjectExpression(options) => {
-                    for property in &options.properties {
-                        if let ObjectPropertyKind::ObjectProperty(property) = property
-                            && property.key.is_specific_static_name("path")
-                        {
-                            path_literals(&property.value, &mut paths);
-                        }
+        let paths: Vec<Span> = match argument {
+            // `@Controller({ path: 'orders', version: '1' })`.
+            Expression::ObjectExpression(options) => options
+                .properties
+                .iter()
+                .filter_map(|property| match property {
+                    ObjectPropertyKind::ObjectProperty(property)
+                        if property.key.is_specific_static_name("path") =>
+                    {
+                        Some(&property.value)
                     }
-                }
-                argument => {
-                    if let Some(argument) = argument.as_expression() {
-                        path_literals(argument, &mut paths);
-                    }
-                }
-            }
-        }
+                    _ => None,
+                })
+                .flat_map(path_literals)
+                .collect(),
+            argument => path_literals(argument),
+        };
         for literal in paths {
             // Between the quotes, as written: offsets stay those of the file.
             let start = literal.start + 1;
@@ -78,59 +78,49 @@ impl Rule for Check {
 
 /// The spans of the literals that hold paths: a string, a template without `${}`, or an array
 /// of them.
-fn path_literals(value: &Expression<'_>, out: &mut Vec<Span>) {
+fn path_literals(value: &Expression<'_>) -> Vec<Span> {
     match value {
-        Expression::StringLiteral(literal) => out.push(literal.span),
-        Expression::TemplateLiteral(template) if template.expressions.is_empty() => {
-            out.push(template.span);
+        Expression::ArrayExpression(array) => array
+            .elements
+            .iter()
+            .filter_map(ArrayExpressionElement::as_expression)
+            .filter_map(path_literal)
+            .collect(),
+        value => path_literal(value).into_iter().collect(),
+    }
+}
+
+fn path_literal(value: &Expression<'_>) -> Option<Span> {
+    match value {
+        Expression::StringLiteral(literal) => Some(literal.span),
+        Expression::TemplateLiteral(template) if template.is_no_substitution_template() => {
+            Some(template.span)
         }
-        Expression::ArrayExpression(array) => {
-            for element in &array.elements {
-                if let ArrayExpressionElement::StringLiteral(literal) = element {
-                    out.push(literal.span);
-                } else if let ArrayExpressionElement::TemplateLiteral(template) = element
-                    && template.expressions.is_empty()
-                {
-                    out.push(template.span);
-                }
-            }
-        }
-        _ => {}
+        _ => None,
     }
 }
 
 /// A segment with other characters is route syntax and passes: `:id`, `*path`, `{/:id}`,
-/// `(.*)`. One leading `.` (`.well-known`) is dropped; parts between dots are each a word
-/// (`robots.txt`, `llms-all.txt`).
+/// `(.*)`. Parts between dots are each a word (`robots.txt`, `llms-all.txt`); an empty part has
+/// no case to judge (`.well-known`, `.`, `..`).
 fn passes(segment: &str) -> bool {
-    if segment.is_empty()
-        || !segment
-            .chars()
-            .all(|ch| ch.is_alphanumeric() || matches!(ch, '-' | '_' | '.'))
-    {
-        return true;
-    }
-    let segment = segment.strip_prefix('.').unwrap_or(segment);
-    segment.split('.').all(|part| Case::Kebab.matches(part))
+    !segment
+        .chars()
+        .all(|ch| ch.is_alphanumeric() || matches!(ch, '-' | '_' | '.'))
+        || segment
+            .split('.')
+            .all(|part| part.is_empty() || Case::Kebab.matches(part))
 }
 
 /// `userSettings` -> `user-settings`, `Robots.TXT` -> `robots.txt`.
 fn kebab(segment: &str) -> String {
-    let (dot, rest) = match segment.strip_prefix('.') {
-        Some(rest) => (".", rest),
-        None => ("", segment),
-    };
-    let parts: Vec<String> = rest
+    let parts: Vec<String> = segment
         .split('.')
         .map(|part| {
-            if Case::Kebab.matches(part) {
-                part.to_string()
-            } else {
-                Case::Kebab
-                    .apply(part)
-                    .unwrap_or_else(|| part.to_lowercase())
-            }
+            Case::Kebab
+                .apply(part)
+                .unwrap_or_else(|| part.to_lowercase())
         })
         .collect();
-    format!("{dot}{}", parts.join("."))
+    parts.join(".")
 }

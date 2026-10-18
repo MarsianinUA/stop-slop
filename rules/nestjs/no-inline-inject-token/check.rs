@@ -20,7 +20,7 @@ impl Rule for Check {
         };
         let is_string = match call.arguments.first() {
             Some(Argument::StringLiteral(_)) => true,
-            Some(Argument::TemplateLiteral(template)) => template.expressions.is_empty(),
+            Some(Argument::TemplateLiteral(template)) => template.is_no_substitution_template(),
             _ => false,
         };
         if !is_string {

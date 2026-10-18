@@ -68,14 +68,11 @@ impl Check {
         if has(&self.inputs, &class_words) {
             return false;
         }
-        let file_words: Vec<&str> = file
-            .path
+        file.path
             .file_stem()
             .unwrap_or_default()
             .split('.')
-            .flat_map(words)
-            .collect();
-        has(&self.responses, &file_words)
+            .any(|part| has(&self.responses, &words(part)))
     }
 }
 

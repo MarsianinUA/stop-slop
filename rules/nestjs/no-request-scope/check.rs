@@ -48,26 +48,19 @@ fn place(file: &File<'_>, member: &AstNode<'_>) -> Span {
         return span;
     }
     let object = nodes.parent_node(property.id());
-    let mut owner = nodes.ancestors(object.id());
-    let decorated = match (owner.next(), owner.next(), owner.next()) {
-        (Some(call), Some(decorator), Some(class))
-            if matches!(call.kind(), AstKind::CallExpression(_))
-                && matches!(decorator.kind(), AstKind::Decorator(_)) =>
-        {
-            match class.kind() {
-                AstKind::Class(class) => Some(
-                    class
-                        .id
-                        .as_ref()
-                        .map_or(class.body.span.start, |id| id.span.end),
-                ),
-                _ => None,
-            }
-        }
-        _ => None,
-    };
-    match decorated {
-        Some(end) => Span::new(span.start, end),
-        None => object.span(),
+    let mut owner = nodes.ancestor_kinds(object.id());
+    match (owner.next(), owner.next(), owner.next()) {
+        (
+            Some(AstKind::CallExpression(_)),
+            Some(AstKind::Decorator(_)),
+            Some(AstKind::Class(class)),
+        ) => Span::new(
+            span.start,
+            class
+                .id
+                .as_ref()
+                .map_or(class.body.span.start, |id| id.span.end),
+        ),
+        _ => object.span(),
     }
 }

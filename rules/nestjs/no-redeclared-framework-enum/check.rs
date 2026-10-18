@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 
-use kit::oxc::ast::ast::{BindingPattern, Expression};
+use kit::oxc::ast::ast::{BindingPattern, Expression, TSType};
 use kit::prelude::*;
 
 #[derive(Deserialize)]
@@ -20,26 +20,32 @@ impl Rule for Check {
 
     fn on_node<'a>(&self, node: &AstNode<'a>, cx: &mut Cx<'_, 'a>) {
         let file = cx.file();
-        let nodes = file.semantic.nodes();
+        let name = match node.kind() {
+            AstKind::TSEnumDeclaration(declaration) => declaration.id.span,
+            // `type HttpStatus = common.HttpStatus` names the framework's own type.
+            AstKind::TSTypeAliasDeclaration(alias) => match &alias.type_annotation {
+                TSType::TSTypeReference(reference) if reference.type_arguments.is_none() => return,
+                TSType::TSImportType(_) => return,
+                _ => alias.id.span,
+            },
+            AstKind::Class(class) => match &class.id {
+                Some(id) => id.span,
+                None => return,
+            },
+            AstKind::VariableDeclarator(declarator) => match &declarator.id {
+                BindingPattern::BindingIdentifier(id) => id.span,
+                _ => return,
+            },
+            _ => return,
+        };
+        let text = name.source_text(file.text);
+        let Some(module) = self.enums.get(text) else {
+            return;
+        };
         // From the keyword to the name: `enum HttpStatus`, `const HttpStatus`.
-        let (start, name) = match node.kind() {
-            AstKind::TSEnumDeclaration(declaration) => {
-                (declaration.span.start, declaration.id.span)
-            }
-            AstKind::TSTypeAliasDeclaration(alias) => (alias.span.start, alias.id.span),
-            AstKind::Class(class) => {
-                let Some(id) = &class.id else {
-                    return;
-                };
-                (
-                    start_after_decorators(file, class.span, &class.decorators),
-                    id.span,
-                )
-            }
+        let start = match node.kind() {
+            AstKind::Class(class) => start_after_decorators(file, class.span, &class.decorators),
             AstKind::VariableDeclarator(declarator) => {
-                let BindingPattern::BindingIdentifier(id) = &declarator.id else {
-                    return;
-                };
                 if !declarator
                     .init
                     .as_ref()
@@ -47,13 +53,9 @@ impl Rule for Check {
                 {
                     return;
                 }
-                (nodes.parent_node(node.id()).span().start, id.span)
+                file.semantic.nodes().parent_node(node.id()).span().start
             }
-            _ => return,
-        };
-        let text = name.source_text(file.text);
-        let Some(module) = self.enums.get(text) else {
-            return;
+            _ => node.span().start,
         };
         // `declare module '@nestjs/common' { .. }` describes the framework's own enum.
         if is_ambient(file, node.id()) {
@@ -67,18 +69,20 @@ impl Rule for Check {
 
 /// An object literal, also under `as const`, `satisfies` and the global `Object.freeze(..)`.
 fn is_object(file: &File<'_>, value: &Expression<'_>) -> bool {
-    match value.get_inner_expression() {
-        Expression::ObjectExpression(_) => true,
-        Expression::CallExpression(call) => {
-            call.callee.get_member_expr().is_some_and(|member| {
-                member.static_property_name() == Some("freeze")
-                    && is_global(file, member.object().get_inner_expression(), "Object")
-            }) && call
-                .arguments
-                .first()
-                .and_then(|argument| argument.as_expression())
-                .is_some_and(|argument| is_object(file, argument))
-        }
-        _ => false,
+    if matches!(
+        value.get_inner_expression(),
+        Expression::ObjectExpression(_)
+    ) {
+        return true;
     }
+    call_of(value).is_some_and(|call| {
+        call.callee.get_member_expr().is_some_and(|member| {
+            member.static_property_name() == Some("freeze")
+                && is_global(file, member.object().get_inner_expression(), "Object")
+        }) && call
+            .arguments
+            .first()
+            .and_then(|argument| argument.as_expression())
+            .is_some_and(|argument| is_object(file, argument))
+    })
 }

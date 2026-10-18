@@ -52,7 +52,10 @@ fn is_config_service(file: &File<'_>, at: NodeId, value: &Expression<'_>) -> boo
                 AstKind::FormalParameter(parameter) => {
                     is_config_type(file, parameter.type_annotation.as_deref())
                 }
-                AstKind::VariableDeclarator(declarator) => {
+                // A binding of `const { cache } = app.get(ConfigService)` is not the service.
+                AstKind::VariableDeclarator(declarator)
+                    if matches!(declarator.id, BindingPattern::BindingIdentifier(_)) =>
+                {
                     is_config_type(file, declarator.type_annotation.as_deref())
                         || matches!(nodes.parent_kind(declaration),
                             AstKind::VariableDeclaration(list) if list.kind.is_const())
@@ -108,10 +111,9 @@ fn is_config_field(file: &File<'_>, at: NodeId, field: &Field<'_>) -> bool {
 }
 
 fn has_key(key: &PropertyKey<'_>, field: &Field<'_>) -> bool {
-    match (key, field) {
-        (PropertyKey::PrivateIdentifier(id), Field::Private(name)) => id.name == *name,
-        (_, Field::Public(name)) => key.static_name().is_some_and(|key| key == *name),
-        _ => false,
+    match field {
+        Field::Public(name) => key.is_specific_static_name(name),
+        Field::Private(name) => key.private_name().is_some_and(|key| key == *name),
     }
 }
 

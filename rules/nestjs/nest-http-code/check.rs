@@ -7,7 +7,8 @@ pub struct Check {}
 
 /// The route decorators of `@nestjs/common` and the status the fix writes for them: the one Nest
 /// already answers with. Only GET and POST get it; for the others `204` or `202` is often meant,
-/// and the code is a decision, not a default to copy.
+/// and the code is a decision, not a default to copy. `Sse` is left out: a stream has no status
+/// to declare.
 const ROUTES: [(&str, Option<&str>); 9] = [
     ("Get", Some("OK")),
     ("Post", Some("CREATED")),
@@ -41,32 +42,23 @@ impl Rule for Check {
             .iter()
             .map(|decorator| called_import(file, decorator))
             .collect();
+        let names = || imports.iter().map(|&import| from_nest(import));
         // `@Redirect` answers with a status of its own.
-        if imports
-            .iter()
-            .filter_map(|&import| from_nest(import))
+        if names()
+            .flatten()
             .any(|name| matches!(name, "HttpCode" | "Redirect"))
         {
             return;
         }
-        let routes: Vec<(usize, Option<&str>)> = imports
-            .iter()
-            .enumerate()
-            .filter_map(|(index, &import)| {
-                let name = from_nest(import)?;
-                let (_, status) = ROUTES.iter().find(|(route, _)| *route == name)?;
-                Some((index, *status))
-            })
-            .collect();
-        let Some(&(first, _)) = routes.first() else {
+        let mut routes = names().enumerate().filter_map(|(index, name)| {
+            let (_, status) = ROUTES.iter().find(|(route, _)| Some(*route) == name)?;
+            Some((index, *status))
+        });
+        let Some((first, status)) = routes.next() else {
             return;
         };
         // `@Get() @Post()` answers each method with its own default; one code cannot keep both.
-        let status = routes
-            .iter()
-            .map(|(_, status)| *status)
-            .reduce(|a, b| if a == b { a } else { None })
-            .flatten();
+        let status = routes.fold(status, |a, (_, b)| if a == b { a } else { None });
         // Decorators apply from the bottom up, and the last `HttpCode` to apply wins. Under the
         // route decorator the new one applies after those below it, so only Nest's own may stand
         // there; else it goes last, applies first, and a `HttpCode` hidden in a decorator of the
@@ -75,10 +67,11 @@ impl Rule for Check {
             .iter()
             .all(|import| import.is_some_and(|(module, _)| module.starts_with("@nestjs/")))
         {
-            &method.decorators[first]
+            first
         } else {
-            &method.decorators[method.decorators.len() - 1]
+            method.decorators.len() - 1
         };
+        let anchor = &method.decorators[anchor];
         let fix = status
             .and_then(|status| fix(file, cx.facts(), anchor, status))
             .unwrap_or_default();
@@ -121,7 +114,8 @@ fn fix(
     let text = file.text;
     edits.push(match line_tail(file, anchor.span.end) {
         Some((end, _)) => {
-            let line = &text[line_start(text, anchor.span.start) as usize..];
+            let line =
+                &text[line_start(text, anchor.span.start) as usize..anchor.span.start as usize];
             let indent = &line[..line.len() - line.trim_start().len()];
             Edit {
                 span: Span::empty(end),

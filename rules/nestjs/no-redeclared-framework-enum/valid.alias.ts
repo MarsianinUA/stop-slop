@@ -2,3 +2,4 @@
 import * as common from '@nestjs/common';
 
 export const HttpStatus = common.HttpStatus;
+export type HttpStatus = common.HttpStatus;

@@ -36,6 +36,11 @@ export class ApiKeysController {
     return '';
   }
 
+  @Get('archive/./..')
+  parent(): string {
+    return '';
+  }
+
   @Get('users{/:userId}')
   user(): string {
     return '';
