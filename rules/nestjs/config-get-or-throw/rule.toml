@@ -1,0 +1,5 @@
+description = "`configService.get(..)` instead of `getOrThrow(..)`"
+kind = "error"
+files = "code"
+source = ["personal"]
+message = "`{call}` gives `undefined` when the key is missing or misspelled, so the gap travels on as a value and breaks far from here: a client gets `undefined` for a URL, a timeout turns `NaN`. Read it with `getOrThrow`, which fails at this line and names the key; a setting that may be absent gets `null` or its default in the config factory."

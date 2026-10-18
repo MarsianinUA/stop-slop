@@ -1,0 +1,9 @@
+description = "`@ApiPropertyOptional` on a field of a response DTO"
+kind = "error"
+files = "code"
+source = ["project"]
+message = "`{name}` is a field of a response, and its decorator tells the OpenAPI schema the key may be missing: clients generated from it type the field optional and handle an absent key the service never leaves out, while the `null` it does send goes undocumented. Declare it `@ApiProperty({ nullable: true })` and type it `T | null`: the key is always there, the value may be `null`."
+
+[options]
+responses = ["response"]
+inputs = ["request", "query", "params", "body", "input"]
