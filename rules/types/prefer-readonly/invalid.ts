@@ -4,6 +4,7 @@ declare class Logger {
 }
 declare class Repo {}
 declare function Inject(token: string): ParameterDecorator;
+declare function pick<T>(value: T): T;
 enum Kind {
   User = 'user',
 }
@@ -17,6 +18,9 @@ class UserService {
   private label = 'users'; // expect: prefer-readonly
   private mode = 'fast'; // expect: prefer-readonly
   private kind = Kind.User; // expect: prefer-readonly
+  // `pick<T>` returns the literal type of its argument; a call without such an argument does not.
+  private region = pick('north'); // expect: prefer-readonly
+  private started = Date.now(); // expect: prefer-readonly
 
   constructor(
     private repo: Repo, // expect: prefer-readonly
@@ -32,6 +36,9 @@ class UserService {
   find(id: string): User | undefined {
     this.#requests.push(this.retries);
     void this.kind;
+    if (this.region === 'south' || this.started < 0) {
+      return undefined;
+    }
     return this.mode === 'slow' ? undefined : this.cache.get(id);
   }
 }

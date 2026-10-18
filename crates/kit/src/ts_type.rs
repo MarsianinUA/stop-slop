@@ -6,8 +6,9 @@ use oxc_ast::ast::{
     TSTypeOperatorOperator, TSTypeReference, UnaryOperator, VariableDeclarationKind,
 };
 use oxc_semantic::{AstNode, SymbolId};
+use oxc_span::GetSpan;
 
-use crate::File;
+use crate::{File, is_exported};
 
 /// `value as T` or `<T>value`: the value and the asserted type.
 pub fn type_assertion<'a>(kind: AstKind<'a>) -> Option<(&'a Expression<'a>, &'a TSType<'a>)> {
@@ -259,6 +260,98 @@ pub fn is_literal_value(expression: &Expression<'_>) -> bool {
         _ => expression_assertion(expression)
             .is_some_and(|(value, ty)| is_const_assertion(ty) && is_literal_value(value)),
     }
+}
+
+/// A value that a `const` or a `readonly` field types as its own literal, where `let` and a plain
+/// field widen it: `'fast'` is `'fast'`, not `string`; so are `null`, `Kind.User`,
+/// `cond ? 'a' : 'b'`, a name or member that may hold such a literal, and a call or tagged
+/// template given such a value (`pick('fast')` of `pick<T>(value: T): T`), also under `await`.
+/// An object, array, function, class, `new`, another call, regex, `a + b`, a template with
+/// `${}`, `x as T` and `<T>x` keep their type.
+pub fn narrows_to_literal(value: &Expression<'_>) -> bool {
+    match value {
+        Expression::CallExpression(call) => call
+            .arguments
+            .iter()
+            .any(|argument| argument.as_expression().is_none_or(narrows_to_literal)),
+        Expression::TaggedTemplateExpression(tagged) => {
+            tagged.quasi.expressions.iter().any(narrows_to_literal)
+        }
+        Expression::AwaitExpression(awaited) => narrows_to_literal(&awaited.argument),
+        Expression::TemplateLiteral(template) => template.expressions.is_empty(),
+        _ => !matches!(
+            value,
+            Expression::ObjectExpression(_)
+                | Expression::ArrayExpression(_)
+                | Expression::FunctionExpression(_)
+                | Expression::ArrowFunctionExpression(_)
+                | Expression::ClassExpression(_)
+                | Expression::NewExpression(_)
+                | Expression::RegExpLiteral(_)
+                | Expression::BinaryExpression(_)
+                | Expression::TSAsExpression(_)
+                | Expression::TSTypeAssertion(_)
+        ),
+    }
+}
+
+/// A use where a literal type behaves like its primitive (`'open'` like `string`, `5` like
+/// `number`): `${status}`, `count + 1`, `count < limit`, `status.length`, `!flag`, the test of
+/// `if`, a loop or `?:`, a statement of its own, the value of a `let`, `var` or annotated
+/// variable, which widens it again. A comparison, a call argument or a `const` alias sees the
+/// literal type.
+pub fn keeps_primitive(file: &File<'_>, node: &AstNode<'_>) -> bool {
+    let nodes = file.semantic.nodes();
+    let span = node.span();
+    let parent = nodes.parent_node(node.id());
+    match parent.kind() {
+        // A tag function may be generic over its values.
+        AstKind::TemplateLiteral(_) => !matches!(
+            nodes.parent_kind(parent.id()),
+            AstKind::TaggedTemplateExpression(_)
+        ),
+        AstKind::BinaryExpression(binary) => {
+            binary.operator.is_numeric_or_string_binary_operator() || binary.operator.is_compare()
+        }
+        AstKind::UnaryExpression(unary) => unary.operator != UnaryOperator::Delete,
+        AstKind::StaticMemberExpression(member) => member.object.span() == span,
+        AstKind::ComputedMemberExpression(member) => member.object.span() == span,
+        AstKind::PrivateFieldExpression(member) => member.object.span() == span,
+        AstKind::IfStatement(statement) => statement.test.span() == span,
+        AstKind::WhileStatement(statement) => statement.test.span() == span,
+        AstKind::DoWhileStatement(statement) => statement.test.span() == span,
+        AstKind::ForStatement(statement) => statement
+            .test
+            .as_ref()
+            .is_some_and(|test| test.span() == span),
+        AstKind::ConditionalExpression(conditional) => conditional.test.span() == span,
+        AstKind::ExpressionStatement(_) => true,
+        AstKind::VariableDeclarator(declarator) => {
+            declarator.type_annotation.is_some()
+                || matches!(
+                    nodes.parent_kind(parent.id()),
+                    AstKind::VariableDeclaration(declaration)
+                        if matches!(
+                            declaration.kind,
+                            VariableDeclarationKind::Let | VariableDeclarationKind::Var
+                        )
+                )
+        }
+        _ => false,
+    }
+}
+
+/// Another file, or a use of the symbol that is not `keeps_primitive`, may rely on its wide type
+/// and stop compiling when a `const` gives it the literal one: `status === 'closed'`, a generic
+/// call `pick(status)`, an alias `const current = status`.
+pub fn relies_on_wide_type(file: &File<'_>, symbol: SymbolId) -> bool {
+    let nodes = file.semantic.nodes();
+    is_exported(file, symbol)
+        || file
+            .semantic
+            .scoping()
+            .get_resolved_references(symbol)
+            .any(|reference| !keeps_primitive(file, nodes.get_node(reference.node_id())))
 }
 
 /// `key` of the parameter's object is an option: the type is lib `Partial<..>`, or `key?:` in its

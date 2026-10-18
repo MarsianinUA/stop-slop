@@ -2272,6 +2272,54 @@ fn literal_value_is_a_fixed_scalar_also_under_as_const() {
 }
 
 #[test]
+fn literal_type_narrows_a_const_and_uses_that_compare_or_pass_it_notice() {
+    let text = "declare function pick<T>(value: T): T;
+declare function now(): number;
+declare function tag(strings: TemplateStringsArray, ...values: unknown[]): string;
+const a = 'x', b = null, c = a, d = a ? 'y' : 'z', e = pick('k'), f = tag`${a}`, g = now(),
+  h = pick(now()), i = { a }, j = [a], k = () => a, l = new Date(), m = a + a, n = `${a}`, o = a as string,
+  p = /x/, q = `t`, u = tag`plain`;
+export const shared = 1;
+const kept = 'k', compared = 'c', passed = 'p', aliased = 's';
+const uses = [`${kept}`, kept.length, !kept, kept + 1, compared === 'd', pick(passed)];
+const alias = aliased;
+let widened = aliased;
+async function wait(): Promise<void> {
+  const r = await pick('w'), s = await now();
+  if (kept) {}
+}
+export { b, c, d, e, f, g, h, i, j, k, l, m, n, o, p, q, u, uses, alias, widened, wait };";
+    with_file(text, |file| {
+        let narrows: Vec<bool> = file
+            .semantic
+            .nodes()
+            .iter()
+            .filter_map(|node| match node.kind() {
+                AstKind::VariableDeclarator(declarator) => {
+                    declarator.init.as_ref().map(narrows_to_literal)
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            narrows,
+            [
+                true, true, true, true, true, true, false, false, false, false, false, false,
+                false, false, false, false, true, false, true, true, true, true, true, false, true,
+                true, true, false
+            ]
+        );
+        let relies = |name: &str| relies_on_wide_type(file, symbol_named(file, name));
+        assert!(!relies("kept"));
+        assert!(relies("compared"));
+        assert!(relies("passed"));
+        // `const alias = aliased` keeps the literal type; `let` widens it again.
+        assert!(relies("aliased"));
+        assert!(relies("shared"));
+    });
+}
+
+#[test]
 fn boolean_parameter_has_a_boolean_type_or_a_boolean_default() {
     let text = "export function f(a: boolean, b: true | null, c: boolean[], d = false, e = 0, f?: string) {
   return [a, b, c, d, e, f];

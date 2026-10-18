@@ -52,7 +52,8 @@ pub use serde;
 pub use ts_type::{
     expression_assertion, global_references, is_boolean_parameter, is_boolean_type,
     is_const_assertion, is_global, is_known_value, is_literal_value, is_nullable, is_open_key,
-    is_option_key, lib_type, outer_assertion, type_assertion, unwrapped_type,
+    is_option_key, keeps_primitive, lib_type, narrows_to_literal, outer_assertion,
+    relies_on_wide_type, type_assertion, unwrapped_type,
 };
 
 pub mod oxc {
@@ -72,11 +73,12 @@ pub mod prelude {
         is_boolean_type, is_callback, is_const_assertion, is_di_constructor, is_exported,
         is_exported_node, is_global, is_jsx_tag, is_known_value, is_literal_value, is_log_call,
         is_nullable, is_open_key, is_option_key, is_own_name, is_own_type, is_public,
-        is_script_global, is_signature_given, is_similar_name, lib_type, line_start, line_tail,
-        local_callee, member_use, member_write, module_source, mutator_call, one_line,
-        opens_region, outer_assertion, package_name, path_span, private_member, related_symbols,
-        rename, returns_promise, start_after_decorators, this_class, top_bindings, top_classes,
-        type_assertion, unwrapped_type, words,
+        is_script_global, is_signature_given, is_similar_name, keeps_primitive, lib_type,
+        line_start, line_tail, local_callee, member_use, member_write, module_source, mutator_call,
+        narrows_to_literal, one_line, opens_region, outer_assertion, package_name, path_span,
+        private_member, related_symbols, relies_on_wide_type, rename, returns_promise,
+        start_after_decorators, this_class, top_bindings, top_classes, type_assertion,
+        unwrapped_type, words,
     };
     pub use oxc_allocator::Allocator;
     pub use oxc_ast::{AstKind, AstType};

@@ -1,7 +1,6 @@
 use kit::oxc::ast::ast::{
     BindingPattern, Expression, TSType, UnaryOperator, VariableDeclarationKind,
 };
-use kit::oxc::semantic::SymbolId;
 use kit::prelude::*;
 
 #[derive(Deserialize)]
@@ -101,61 +100,4 @@ fn repeated_type(file: &File<'_>, ty: &TSType<'_>, init: &Expression<'_>) -> Opt
 fn same_without_spaces(a: &str, b: &str) -> bool {
     let solid = |c: &char| !c.is_whitespace();
     a.chars().filter(solid).eq(b.chars().filter(solid))
-}
-
-/// Another file, or any use but one that treats a literal like its primitive, may rely on the
-/// wide type and stop compiling with the literal one: `status === 'closed'`, a generic call
-/// `pick(status)`, an alias `const current = status`.
-fn relies_on_wide_type(file: &File<'_>, symbol: SymbolId) -> bool {
-    let nodes = file.semantic.nodes();
-    is_exported(file, symbol)
-        || file
-            .semantic
-            .scoping()
-            .get_resolved_references(symbol)
-            .any(|reference| !keeps_primitive(file, nodes.get_node(reference.node_id())))
-}
-
-/// A use where `'open'` behaves like `string` and `5` like `number`: `${status}`,
-/// `count + 1`, `count < limit`, `status.length`, `!flag`, the test of `if`, a loop or `?:`,
-/// the value of a `let`, `var` or annotated variable, which widens it again.
-fn keeps_primitive(file: &File<'_>, node: &AstNode<'_>) -> bool {
-    let nodes = file.semantic.nodes();
-    let span = node.span();
-    let parent = nodes.parent_node(node.id());
-    match parent.kind() {
-        // A tag function may be generic over its values.
-        AstKind::TemplateLiteral(_) => !matches!(
-            nodes.parent_kind(parent.id()),
-            AstKind::TaggedTemplateExpression(_)
-        ),
-        AstKind::BinaryExpression(binary) => {
-            binary.operator.is_numeric_or_string_binary_operator() || binary.operator.is_compare()
-        }
-        AstKind::UnaryExpression(unary) => unary.operator != UnaryOperator::Delete,
-        AstKind::StaticMemberExpression(member) => member.object.span() == span,
-        AstKind::ComputedMemberExpression(member) => member.object.span() == span,
-        AstKind::PrivateFieldExpression(member) => member.object.span() == span,
-        AstKind::IfStatement(statement) => statement.test.span() == span,
-        AstKind::WhileStatement(statement) => statement.test.span() == span,
-        AstKind::DoWhileStatement(statement) => statement.test.span() == span,
-        AstKind::ForStatement(statement) => statement
-            .test
-            .as_ref()
-            .is_some_and(|test| test.span() == span),
-        AstKind::ConditionalExpression(conditional) => conditional.test.span() == span,
-        AstKind::ExpressionStatement(_) => true,
-        AstKind::VariableDeclarator(declarator) => {
-            declarator.type_annotation.is_some()
-                || matches!(
-                    nodes.parent_kind(parent.id()),
-                    AstKind::VariableDeclaration(declaration)
-                        if matches!(
-                            declaration.kind,
-                            VariableDeclarationKind::Let | VariableDeclarationKind::Var
-                        )
-                )
-        }
-        _ => false,
-    }
 }

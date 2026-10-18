@@ -2,7 +2,7 @@ use std::borrow::Cow;
 
 use kit::oxc::ast::ast::{
     Class, ClassElement, Expression, FormalParameter, MethodDefinitionKind, PropertyDefinition,
-    PropertyDefinitionType, PropertyKey, TSAccessibility, UnaryOperator, VariableDeclarationKind,
+    PropertyDefinitionType, PropertyKey, TSAccessibility, UnaryOperator,
 };
 use kit::oxc::semantic::NodeId;
 use kit::prelude::*;
@@ -228,27 +228,6 @@ fn key_name(key: &PropertyKey<'_>) -> Option<String> {
     }
 }
 
-/// `x` of `.x` and `['x']`, `#x` of `.#x`; `None` for `[key]`.
-/// The value may be a literal (`'fast'`, `null`, `Kind.User`, `cond ? 'a' : 'b'`) that a
-/// `readonly` field types as itself; an object, a call, `new`, `a + b`... keep their type.
-fn narrows_to_literal(value: &Expression<'_>) -> bool {
-    !matches!(
-        value,
-        Expression::ObjectExpression(_)
-            | Expression::ArrayExpression(_)
-            | Expression::FunctionExpression(_)
-            | Expression::ArrowFunctionExpression(_)
-            | Expression::ClassExpression(_)
-            | Expression::NewExpression(_)
-            | Expression::CallExpression(_)
-            | Expression::RegExpLiteral(_)
-            | Expression::TaggedTemplateExpression(_)
-            | Expression::BinaryExpression(_)
-            | Expression::TSAsExpression(_)
-            | Expression::TSTypeAssertion(_)
-    ) && !matches!(value, Expression::TemplateLiteral(template) if !template.expressions.is_empty())
-}
-
 /// The member is assigned, updated, deleted, destructured into or a `for` target, also
 /// through `!`, `as`, `<T>` and `satisfies`.
 fn is_write(file: &File<'_>, node: &AstNode<'_>) -> bool {
@@ -263,51 +242,6 @@ fn is_write(file: &File<'_>, node: &AstNode<'_>) -> bool {
         AstKind::AssignmentTargetRest(_) => true,
         AstKind::ForOfStatement(statement) => statement.left.span() == span,
         AstKind::ForInStatement(statement) => statement.left.span() == span,
-        _ => false,
-    }
-}
-
-/// A read where `'fast'` behaves like `string`: `${this.mode}`, `this.mode + '!'`,
-/// `this.mode.length`, `!this.mode`, the test of `if`, a loop or `?:`, the value of a `let`,
-/// `var` or annotated variable, which widens it again. A comparison, a generic call or a
-/// `const` alias would see the literal type.
-fn keeps_primitive(file: &File<'_>, node: &AstNode<'_>) -> bool {
-    let nodes = file.semantic.nodes();
-    let span = node.span();
-    let parent = nodes.parent_node(node.id());
-    match parent.kind() {
-        // A tag function may be generic over its values.
-        AstKind::TemplateLiteral(_) => !matches!(
-            nodes.parent_kind(parent.id()),
-            AstKind::TaggedTemplateExpression(_)
-        ),
-        AstKind::BinaryExpression(binary) => {
-            binary.operator.is_numeric_or_string_binary_operator() || binary.operator.is_compare()
-        }
-        AstKind::UnaryExpression(unary) => unary.operator != UnaryOperator::Delete,
-        AstKind::StaticMemberExpression(member) => member.object.span() == span,
-        AstKind::ComputedMemberExpression(member) => member.object.span() == span,
-        AstKind::PrivateFieldExpression(member) => member.object.span() == span,
-        AstKind::IfStatement(statement) => statement.test.span() == span,
-        AstKind::WhileStatement(statement) => statement.test.span() == span,
-        AstKind::DoWhileStatement(statement) => statement.test.span() == span,
-        AstKind::ForStatement(statement) => statement
-            .test
-            .as_ref()
-            .is_some_and(|test| test.span() == span),
-        AstKind::ConditionalExpression(conditional) => conditional.test.span() == span,
-        AstKind::ExpressionStatement(_) => true,
-        AstKind::VariableDeclarator(declarator) => {
-            declarator.type_annotation.is_some()
-                || matches!(
-                    nodes.parent_kind(parent.id()),
-                    AstKind::VariableDeclaration(declaration)
-                        if matches!(
-                            declaration.kind,
-                            VariableDeclarationKind::Let | VariableDeclarationKind::Var
-                        )
-                )
-        }
         _ => false,
     }
 }
