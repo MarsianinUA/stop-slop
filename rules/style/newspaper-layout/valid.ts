@@ -109,3 +109,23 @@ export class Order {
 
   constructor(@Inject(token('repo')) readonly repo: object) {}
 }
+
+const toRoute = (item: string): { path: string } => ({ path: `/${item}` });
+
+export const ROUTES = ['orders', 'payments'].map((item) => toRoute(item));
+
+export function route(item: string): { path: string } {
+  return toRoute(item);
+}
+
+const settings = (): { retries: number } => ({ retries: 3 });
+
+export const CONFIG = (() => settings())();
+
+export function retries(): number {
+  return settings().retries;
+}
+
+const toCell = (item: string): string => item.trim();
+
+export const GRID = [['a ']].map((row) => row.map((item) => toCell(item)));

@@ -87,7 +87,13 @@ fn top_functions(file: &File<'_>) -> Vec<(Span, String, String)> {
             let Some(unit) = unit_of(node.span().start) else {
                 continue;
             };
-            if !runs_later(file, node.id()) {
+            // Moving a hoisted `function` below a callback that runs on load is still safe.
+            let is_on_load = if is_hoisted {
+                deferred_by(file, node.id()).is_none()
+            } else {
+                runs_on_load(file, node.id())
+            };
+            if is_on_load {
                 is_used_on_load = true;
                 continue;
             }
@@ -111,10 +117,10 @@ fn top_functions(file: &File<'_>) -> Vec<(Span, String, String)> {
     above_callers(&callees)
 }
 
-/// The reference sits in code that runs after the module loads: inside a function, or in an
-/// instance field's value, which runs for each `new`. A decorator and a field's computed key run
-/// when the class is defined: `@Column(money())`, `constructor(@Inject(token('repo')) ..)`.
-fn runs_later(file: &File<'_>, node: NodeId) -> bool {
+/// What makes the reference run after the module loads: the function it sits in, or the instance
+/// field whose value holds it, which runs for each `new`. A decorator and a field's computed key
+/// run when the class is defined: `@Column(money())`, `constructor(@Inject(token('repo')) ..)`.
+fn deferred_by<'a>(file: &File<'a>, node: NodeId) -> Option<&'a AstNode<'a>> {
     let nodes = file.semantic.nodes();
     let at = nodes.get_node(node).span();
     let holds = |value: &Option<Expression<'_>>| {
@@ -123,21 +129,34 @@ fn runs_later(file: &File<'_>, node: NodeId) -> bool {
             .is_some_and(|value| value.span().contains_inclusive(at))
     };
     let mut in_decorator = false;
-    for kind in nodes.ancestor_kinds(node) {
-        match kind {
+    for ancestor in nodes.ancestors(node) {
+        match ancestor.kind() {
             AstKind::Decorator(_) => in_decorator = true,
             AstKind::Class(_) => in_decorator = false,
             AstKind::PropertyDefinition(field) if !field.r#static && holds(&field.value) => {
-                return true;
+                return Some(ancestor);
             }
             AstKind::AccessorProperty(field) if !field.r#static && holds(&field.value) => {
-                return true;
+                return Some(ancestor);
             }
-            kind if kind.is_function_like() && !in_decorator => return true,
+            kind if kind.is_function_like() && !in_decorator => return Some(ancestor),
             _ => {}
         }
     }
-    false
+    None
+}
+
+/// The reference runs while the module loads: outside any function, or in a callback that such
+/// code passes to a call or calls at once (`ITEMS.map((item) => toRoute(item))`, an IIFE).
+fn runs_on_load(file: &File<'_>, node: NodeId) -> bool {
+    let Some(owner) = deferred_by(file, node) else {
+        return true;
+    };
+    let call = file.semantic.nodes().parent_node(owner.id());
+    matches!(
+        call.kind(),
+        AstKind::CallExpression(_) | AstKind::NewExpression(_)
+    ) && runs_on_load(file, call.id())
 }
 
 /// The name of the top-level declaration that holds the offset: its function, class or variable.
