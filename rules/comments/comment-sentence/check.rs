@@ -1,4 +1,4 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashSet};
 
 use kit::prelude::*;
 
@@ -15,14 +15,15 @@ impl Rule for Check {
             .facts()
             .package(file.path)
             .map(|package| &package.dependencies);
+        let mut names = None;
         for block in comment_blocks(file) {
             // `/* force */` between tokens labels the code after it.
-            if has_code_after(file.text, block.span) {
+            if is_inside_code(file, block.span) {
                 continue;
             }
             for (first, last) in sentences(file.text, &block) {
-                let start = first.source_text(file.text).trim();
-                let starts = starts_as_sentence(file, dependencies, start);
+                let opening = first.source_text(file.text).trim();
+                let starts = starts_as_sentence(file, dependencies, &mut names, opening);
                 let ends = ends_as_sentence(last.source_text(file.text).trim());
                 let problem = match (starts, ends) {
                     (true, true) => continue,
@@ -32,8 +33,7 @@ impl Rule for Check {
                         "starts with a lowercase letter and does not end with a period"
                     }
                 };
-                let body = first.source_text(file.text);
-                let start = first.start + (body.len() - body.trim_start().len()) as u32;
+                let start = first.start + indent(file.text, first) as u32;
                 cx.report(Span::new(start, last.end))
                     .arg("problem", problem);
             }
@@ -41,11 +41,11 @@ impl Rule for Check {
     }
 }
 
-fn has_code_after(text: &str, span: Span) -> bool {
-    let rest = &text[span.end as usize..];
-    !rest[..rest.find('\n').unwrap_or(rest.len())]
-        .trim()
-        .is_empty()
+/// A doc comment before a declaration on its line and a note after the code (with other comments
+/// after it) are judged.
+fn is_inside_code(file: &File<'_>, span: Span) -> bool {
+    let before = &file.text[line_start(file.text, span.start) as usize..span.start as usize];
+    !before.trim().is_empty() && line_tail(file, span.end).is_none()
 }
 
 fn indent(text: &str, line: Span) -> usize {
@@ -59,9 +59,11 @@ fn indent(text: &str, line: Span) -> usize {
 /// (a listing), a list, a table, a fenced example, a Markdown heading, doc tags (`@param`) and
 /// the rest of the block after them, and text without letters (`// -----`).
 fn sentences(text: &str, block: &CommentBlock) -> Vec<(Span, Span)> {
+    // Commented-out code keeps the indent of the code, not of the text around it.
     let base = block
         .parts
         .iter()
+        .filter(|part| part.kind == CommentKind::Prose)
         .flat_map(|part| &part.lines)
         .map(|&line| indent(text, line))
         .min()
@@ -70,16 +72,14 @@ fn sentences(text: &str, block: &CommentBlock) -> Vec<(Span, Span)> {
     let mut fenced = false;
     let mut introduced = false;
     for part in &block.parts {
-        let mut skipped = part.kind != CommentKind::Prose
-            || indent(text, part.lines[0]) > base
-            || is_list_item(part.lines[0].source_text(text).trim());
+        let mut skipped = part.kind != CommentKind::Prose || indent(text, part.lines[0]) > base;
         let mut sentence: Option<(Span, Span)> = None;
         for &line in &part.lines {
             let body = line.source_text(text).trim();
             let fence = body.starts_with("```") || body.starts_with("~~~");
             fenced ^= fence;
             introduced |= body.starts_with('@') && body[1..].starts_with(char::is_alphabetic);
-            skipped |= body.starts_with('|') || is_todo(body);
+            skipped |= body.starts_with('|') || is_todo(body) || is_list_item(body);
             if fence || fenced || introduced || skipped || is_heading(body) {
                 push(&mut sentences, sentence.take(), text);
                 continue;
@@ -127,9 +127,10 @@ fn is_list_item(body: &str) -> bool {
 /// A capital letter, a character with no case (`2^53`, `` `x` ``, `$1`), or a name from the code
 /// as it is written: one only code would spell (`outboxSeq`, `node-redis`, `base64url`), a
 /// literal (`null`), a name the file uses, or a package the file can import (`viem`).
-fn starts_as_sentence(
-    file: &File<'_>,
+fn starts_as_sentence<'a>(
+    file: &File<'a>,
     dependencies: Option<&BTreeSet<String>>,
+    names: &mut Option<HashSet<&'a str>>,
     body: &str,
 ) -> bool {
     if !body.starts_with(char::is_lowercase) {
@@ -144,19 +145,29 @@ fn starts_as_sentence(
         .any(|ch| !ch.is_lowercase() && ch != '\'' && ch != '’')
         || matches!(word, "null" | "undefined" | "true" | "false")
         || dependencies.is_some_and(|names| names.contains(word))
-        || is_name_in_file(file, word)
+        || names
+            .get_or_insert_with(|| names_in_file(file))
+            .contains(word)
 }
 
-fn is_name_in_file(file: &File<'_>, word: &str) -> bool {
-    file.semantic.nodes().iter().any(|node| match node.kind() {
-        AstKind::IdentifierName(name) => name.name == word,
-        AstKind::IdentifierReference(name) => name.name == word,
-        AstKind::BindingIdentifier(name) => name.name == word,
-        AstKind::StringLiteral(literal) => {
-            literal.value == word || package_name(&literal.value) == word
-        }
-        _ => false,
-    })
+/// Collected once per file, on the first sentence that needs it: a lookup per sentence would walk
+/// every node again.
+fn names_in_file<'a>(file: &File<'a>) -> HashSet<&'a str> {
+    file.semantic
+        .nodes()
+        .iter()
+        .flat_map(|node| match node.kind() {
+            AstKind::IdentifierName(name) => [Some(name.name.as_str()), None],
+            AstKind::IdentifierReference(name) => [Some(name.name.as_str()), None],
+            AstKind::BindingIdentifier(name) => [Some(name.name.as_str()), None],
+            AstKind::StringLiteral(literal) => {
+                let value = literal.value.as_str();
+                [Some(value), Some(package_name(value))]
+            }
+            _ => [None, None],
+        })
+        .flatten()
+        .collect()
 }
 
 /// `.`, `?`, `!`, `:` or `…`, also before a closing quote, bracket or backtick; or a link,

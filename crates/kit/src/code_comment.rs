@@ -4,7 +4,7 @@ use oxc_ast::ast::{ClassElement, Expression, ObjectPropertyKind, Program, Statem
 use oxc_parser::{ParseOptions, Parser};
 use oxc_span::{GetSpan, SourceType, Span};
 
-use crate::File;
+use crate::{File, has_blank_line, line_start};
 
 /// What a stretch of comment text is to a reader.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -48,35 +48,15 @@ pub struct CommentPart {
 pub fn comment_blocks(file: &File<'_>) -> Vec<CommentBlock> {
     let text = file.text;
     let comments = file.semantic.comments();
-    let mut parser = CodeParser::new(file.path.extension() == Some("tsx"));
+    let mut parser = CodeParser::new(file.semantic.source_type().is_jsx());
     let mut blocks = Vec::new();
     let mut index = 0;
     while index < comments.len() {
         let first = &comments[index];
         let mut lines = comment_lines(text, first);
         let mut end = index + 1;
-        if is_directive(text, first) {
-            lines.retain(|line| !line.is_empty());
-            let span = lines
-                .first()
-                .zip(lines.last())
-                .map_or(first.content_span(), |(start, end)| {
-                    Span::new(start.start, end.end)
-                });
-            let part = CommentPart {
-                kind: CommentKind::Directive,
-                span,
-                lines,
-            };
-            blocks.push(CommentBlock {
-                span: first.span,
-                doc: false,
-                parts: vec![part],
-            });
-            index = end;
-            continue;
-        }
-        if first.is_line() && is_own_line(text, first.span) {
+        let directive = is_directive(text, first);
+        if !directive && first.is_line() && is_own_line(text, first.span) {
             while let Some(next) = comments.get(end)
                 && next.is_line()
                 && is_own_line(text, next.span)
@@ -90,10 +70,18 @@ pub fn comment_blocks(file: &File<'_>) -> Vec<CommentBlock> {
                 end += 1;
             }
         }
+        let parts = if directive {
+            lines.retain(|line| !line.is_empty());
+            let mut parts = Vec::new();
+            flush(&mut parts, &mut lines, CommentKind::Directive, text);
+            parts
+        } else {
+            parts(&mut parser, text, &lines)
+        };
         blocks.push(CommentBlock {
             span: Span::new(first.span.start, comments[end - 1].span.end),
-            doc: first.is_jsdoc(),
-            parts: parts(&mut parser, text, &lines),
+            doc: !directive && first.is_jsdoc(),
+            parts,
         });
         index = end;
     }
@@ -127,26 +115,20 @@ fn comment_lines(text: &str, comment: &Comment) -> Vec<Span> {
 }
 
 fn trim_end(text: &str, span: Span) -> Span {
-    let body = span.source_text(text);
-    let trimmed = body.trim_end();
-    if trimmed.trim_start().is_empty() {
-        return Span::empty(span.start);
-    }
-    Span::new(span.start, span.start + trimmed.len() as u32)
+    Span::sized(span.start, span.source_text(text).trim_end().len() as u32)
 }
 
 fn is_own_line(text: &str, span: Span) -> bool {
-    let before = &text[..span.start as usize];
-    let line_start = before.rfind('\n').map_or(0, |at| at + 1);
+    let before = &text[line_start(text, span.start) as usize..span.start as usize];
     let after = &text[span.end as usize..];
     let line_end = after.find('\n').unwrap_or(after.len());
-    before[line_start..].trim().is_empty() && after[..line_end].trim().is_empty()
+    before.trim().is_empty() && after[..line_end].trim().is_empty()
 }
 
 /// `Some(has a blank line)` when only spaces and line breaks part two comments.
 fn blank_gap(text: &str, end: u32, start: u32) -> Option<bool> {
     let gap = &text[end as usize..start as usize];
-    gap.trim().is_empty().then(|| gap.matches('\n').count() > 1)
+    gap.trim().is_empty().then(|| has_blank_line(gap))
 }
 
 /// Markers a tool reads at the start of a comment. oxc already marks `/*! */`, `@license`,
@@ -230,7 +212,8 @@ fn parts(parser: &mut CodeParser, text: &str, lines: &[Span]) -> Vec<CommentPart
                 .iter()
                 .position(|line| is_fence(line) || ends_sentence(line))
                 .map_or(lines.len(), |offset| index + offset);
-            if let Some(end) = code_run(parser, text, &lines[..limit], index) {
+            if let Some(end) = code_run(parser, text, &lines[index..limit]).map(|last| index + last)
+            {
                 flush(&mut parts, &mut prose, CommentKind::Prose, text);
                 let mut code: Vec<Span> = lines[index..=end]
                     .iter()
@@ -262,31 +245,43 @@ fn flush(parts: &mut Vec<CommentPart>, lines: &mut Vec<Span>, kind: CommentKind,
     });
 }
 
-/// The last line of the longest run from `start` that parses as code. A parse that fails on line
-/// `k` of the run fails the same way for every longer run, so the next try ends before `k`.
-fn code_run(parser: &mut CodeParser, text: &str, lines: &[Span], start: usize) -> Option<usize> {
-    if starts_as_words(lines[start].source_text(text)) {
+/// The last line of the longest run from the first line that parses as code. A parse that fails
+/// on line `k` of the run fails the same way for every longer run, so the next try ends before `k`.
+fn code_run(parser: &mut CodeParser, text: &str, lines: &[Span]) -> Option<usize> {
+    if starts_as_words(lines[0].source_text(text)) {
         return None;
     }
+    let mut source = String::new();
     let mut end = lines.len() - 1;
     loop {
-        while end > start && lines[end].is_empty() {
+        while end > 0 && lines[end].is_empty() {
             end -= 1;
         }
-        let source: Vec<&str> = lines[start..=end]
-            .iter()
-            .map(|line| line.source_text(text))
-            .collect();
-        let next_end = match parser.read(&source.join("\n")) {
-            Reading::Code => return Some(end),
-            Reading::Other => end.checked_sub(1)?,
-            Reading::Fails { line: 0 } => return None,
-            Reading::Fails { line } => (start + line - 1).min(end.checked_sub(1)?),
-        };
-        if next_end < start {
-            return None;
+        source.clear();
+        for (index, line) in lines[..=end].iter().enumerate() {
+            if index > 0 {
+                source.push('\n');
+            }
+            source.push_str(line.source_text(text));
         }
-        end = next_end;
+        let ends_with_comma = |at: usize| lines[at].source_text(text).ends_with(',');
+        end = match parser.read(&source) {
+            Reading::Code => return Some(end),
+            _ if end == 0 => return None,
+            Reading::Other => end - 1,
+            Reading::Fails { line } => {
+                // Only a run that ends with `,` is read as properties, so a shorter one past the
+                // error may still be: `retries: 3,` + `cause: pgCause,` above `see the docs`.
+                let properties = (!ends_with_comma(end))
+                    .then(|| (line..end).rev().find(|&at| ends_with_comma(at)))
+                    .flatten();
+                match properties {
+                    Some(at) => at,
+                    None if line == 0 => return None,
+                    None => (line - 1).min(end - 1),
+                }
+            }
+        };
     }
 }
 
@@ -303,17 +298,15 @@ enum Reading {
 struct CodeParser {
     allocator: Allocator,
     source_type: SourceType,
+    wrapped: String,
 }
 
 impl CodeParser {
-    fn new(tsx: bool) -> CodeParser {
+    fn new(jsx: bool) -> CodeParser {
         CodeParser {
             allocator: Allocator::default(),
-            source_type: if tsx {
-                SourceType::tsx()
-            } else {
-                SourceType::ts()
-            },
+            source_type: SourceType::ts().with_jsx(jsx),
+            wrapped: String::new(),
         }
     }
 
@@ -353,9 +346,11 @@ impl CodeParser {
             Wrap::Properties => ("({\n", "\n})"),
             Wrap::Decorators => ("", "\nclass _ {}"),
         };
-        let wrapped = format!("{before}{source}{after}");
+        self.wrapped.clear();
+        self.wrapped.extend([before, source, after]);
+        let wrapped = self.wrapped.as_str();
         self.allocator.reset();
-        let parsed = Parser::new(&self.allocator, &wrapped, self.source_type)
+        let parsed = Parser::new(&self.allocator, wrapped, self.source_type)
             .with_options(ParseOptions {
                 allow_return_outside_function: true,
                 preserve_parens: false,
@@ -379,7 +374,7 @@ impl CodeParser {
             let shift = before.matches('\n').count();
             return Err(line.saturating_sub(shift));
         }
-        Ok(is_code(&parsed.program, &wrapped, wrap))
+        Ok(is_code(&parsed.program, wrapped, wrap))
     }
 }
 
@@ -488,9 +483,6 @@ fn is_code_statement(statement: &Statement<'_>, source: &str) -> bool {
         Statement::BreakStatement(_)
         | Statement::ContinueStatement(_)
         | Statement::DebuggerStatement(_) => terminated,
-        Statement::LabeledStatement(_)
-        | Statement::EmptyStatement(_)
-        | Statement::WithStatement(_) => false,
         _ => statement.is_declaration() || statement.is_module_declaration(),
     }
 }
@@ -513,9 +505,13 @@ fn is_code_expression(expression: &Expression<'_>, terminated: bool, source: &st
         Expression::AwaitExpression(expression) => {
             terminated || is_code_expression(&expression.argument, false, source)
         }
-        // `- item()` is a list item; `void run()` and `!ready()` are code.
+        // `- item()` is a list item; `void run()` and `!ready()` are code. TypeScript deletes
+        // only a member, so `delete it` is words.
         Expression::UnaryExpression(expression) => {
+            let member = expression.argument.get_inner_expression();
             expression.operator.is_delete()
+                && (member.is_member_expression()
+                    || matches!(member, Expression::ChainExpression(_)))
                 || terminated
                 || !expression.operator.is_arithmetic()
                     && is_code_expression(&expression.argument, false, source)

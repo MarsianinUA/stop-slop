@@ -100,3 +100,10 @@ export const internal = true;
 // (Not used by the API.)
 //
 // Use `saveAll` for more than one user, not `saveUser` in a loop (`map`).
+
+export const LISTS = 2;
+
+// The cache keeps two lists.
+// - users by id
+// - users by name
+export const USER_LISTS = LISTS;

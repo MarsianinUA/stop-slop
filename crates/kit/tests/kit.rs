@@ -2415,6 +2415,16 @@ const COMMENT_CASES: &[(&str, &[&str])] = &[
         &[r#"Code [" await run();"] + Prose [" done"]"#],
     ),
     ("f(/* force */ true);", &[r#"Prose [" force"]"#]),
+    (
+        "// Options\n// retries: 3,\n// cause: pgCause,\n// see the docs\nx();",
+        &[
+            r#"Prose [" Options"] + Code [" retries: 3,", " cause: pgCause,"] + Prose [" see the docs"]"#,
+        ],
+    ),
+    (
+        "// delete it\n// delete cache.key\nx();",
+        &[r#"Prose [" delete it"] + Code [" delete cache.key"]"#],
+    ),
 ];
 
 #[test]

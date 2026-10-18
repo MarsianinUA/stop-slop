@@ -40,3 +40,12 @@ export function saveUser(id: UserId, name: string): void {
   // Disabled until the store is back // expect: comment-sentence
   // store.save(id, name);
 }
+
+// Fallback when the cache misses // expect: comment-sentence
+//cache.clear();
+export const FALLBACK = 'cache';
+
+// Steps // expect: comment-sentence
+// - read the cache
+// - write the store
+/** The name of the user */ export type UserName = string; // expect: comment-sentence
