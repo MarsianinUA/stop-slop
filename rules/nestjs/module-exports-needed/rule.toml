@@ -1,0 +1,8 @@
+description = "A Nest module exports a provider that no other module injects"
+kind = "agent"
+files = "code"
+source = ["personal"]
+message = "This module exports a provider that no other module injects: the export widens the module's public surface for nothing, other modules can start to lean on its internals, and a reader cannot tell which providers are the module's contract. Export only what another module resolves across the boundary."
+agent = """
+Check the `@Module({ exports: [..] })` that the branch adds or changes. For each exported provider, class or token, search the modules that import this module (directly, or through a module that re-exports it) for a constructor, `@Inject(..)`, `inject: [..]` or `moduleRef.get(..)` that resolves it. Fix: drop from `exports` what nothing outside resolves, and keep it in `providers`. Leave it, and say why, for a `@Global()` module, a module a library publishes for other apps, the public API of a dynamic module (`forRoot` / `register`), and a module that re-exports an imported module on purpose.
+"""

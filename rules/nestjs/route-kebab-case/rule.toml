@@ -1,0 +1,5 @@
+description = "A route segment of a Nest controller or handler not in kebab-case"
+kind = "error"
+files = "code"
+source = ["project"]
+message = "The route segment `{segment}` is not in kebab-case: URLs are case-sensitive and the others read as lowercase words joined by `-`, so a client that writes `{kebab}` after them gets a 404, and the API spells one convention two ways. Name it `{kebab}`; a route that clients already call keeps the old path as an alias or moves in a new version."

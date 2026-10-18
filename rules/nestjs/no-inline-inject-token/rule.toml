@@ -1,0 +1,5 @@
+description = "`@Inject('TOKEN')` with a string instead of a token constant"
+kind = "error"
+files = "code"
+source = ["personal", "direct"]
+message = "`{decorator}` names the dependency by a string typed here and again where the provider is registered: nothing links the two, so a typo or a rename fails only when Nest boots and cannot resolve the dependency, and a reader cannot jump from this parameter to its provider. Export one token constant next to the provider (`export const PAYMENTS_CLIENT = Symbol('PAYMENTS_CLIENT')`) and use it in both places."
