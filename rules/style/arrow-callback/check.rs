@@ -1,3 +1,5 @@
+use std::collections::HashSet;
+
 use kit::oxc::ast::ast::{
     AccessorProperty, Function, FunctionType, PropertyDefinition, PropertyKind,
 };
@@ -11,42 +13,40 @@ pub struct Check {}
 impl Rule for Check {
     fn on_file<'a>(&self, cx: &mut Cx<'_, 'a>) {
         let file = cx.file();
-        let nodes = file.semantic.nodes();
-        let scoping = file.semantic.scoping();
-        // Functions whose own `this`, `arguments`, `super` or `new.target` the code uses: an
-        // arrow has none of them.
-        let mut bound: Vec<NodeId> = Vec::new();
-        for node in nodes.iter() {
-            let binds = match node.kind() {
-                AstKind::ThisExpression(_) | AstKind::Super(_) | AstKind::NewTarget(_) => true,
-                AstKind::IdentifierReference(id) => {
-                    id.name == "arguments"
-                        && scoping
-                            .get_reference(id.reference_id())
-                            .symbol_id()
-                            .is_none()
+        let mut candidates = Vec::new();
+        let mut binds = Vec::new();
+        for node in file.semantic.nodes().iter() {
+            match node.kind() {
+                // A generator has no arrow form; `this: T` declares the `this` the caller binds;
+                // a name says the function is meant as one: `function Pool() {}` is constructed
+                // with `new`, `function retry() {}` calls itself, and a stack trace or `.name`
+                // shows it.
+                AstKind::Function(function)
+                    if function.r#type == FunctionType::FunctionExpression
+                        && !function.generator
+                        && function.this_param.is_none()
+                        && function.id.is_none() =>
+                {
+                    candidates.push((node, function));
                 }
-                _ => false,
-            };
-            if binds {
-                bound.extend(binder(file, node));
+                AstKind::ThisExpression(_) | AstKind::Super(_) | AstKind::NewTarget(_) => {
+                    binds.push(node);
+                }
+                _ => {}
             }
         }
-        for node in nodes.iter() {
-            let AstKind::Function(function) = node.kind() else {
-                continue;
-            };
-            // A generator has no arrow form; `this: T` declares the `this` the caller binds; a
-            // name says the function is meant as one: `function Pool() {}` is constructed with
-            // `new`, `function retry() {}` calls itself, and a stack trace or `.name` shows it.
-            if function.r#type != FunctionType::FunctionExpression
-                || function.generator
-                || function.this_param.is_some()
-                || function.id.is_some()
-                || bound.contains(&node.id())
-                || !is_callback(file, node)
-                || is_class_slot(file, node)
-            {
+        if candidates.is_empty() {
+            return;
+        }
+        // Functions whose own `this`, `arguments`, `super` or `new.target` the code uses: an
+        // arrow has none of them.
+        let bound: HashSet<NodeId> = binds
+            .into_iter()
+            .chain(global_references(file, "arguments"))
+            .filter_map(|node| binder(file, node))
+            .collect();
+        for (node, function) in candidates {
+            if bound.contains(&node.id()) || !is_callback(file, node) || is_class_slot(file, node) {
                 continue;
             }
             let reported = cx.report(function.span);
@@ -95,7 +95,7 @@ fn is_class_slot(file: &File<'_>, node: &AstNode<'_>) -> bool {
 /// `function (a): T {` -> `(a): T => {`: `=>` goes right after the head, on its last line. `None`
 /// when more than the keywords stands before the parameters: type parameters (`<T>(` reads as JSX
 /// in a `.tsx` file) or a comment.
-fn arrow(file: &File<'_>, function: &Function<'_>) -> Option<Vec<Edit>> {
+fn arrow(file: &File<'_>, function: &Function<'_>) -> Option<[Edit; 2]> {
     let head = Span::new(function.span.start, function.params.span.start);
     let keywords: Vec<&str> = head.source_text(file.text).split_whitespace().collect();
     let prefix = match keywords.as_slice() {
@@ -107,7 +107,7 @@ fn arrow(file: &File<'_>, function: &Function<'_>) -> Option<Vec<Edit>> {
         .return_type
         .as_ref()
         .map_or(function.params.span.end, |annotation| annotation.span.end);
-    Some(vec![
+    Some([
         Edit {
             span: head,
             text: prefix.into(),

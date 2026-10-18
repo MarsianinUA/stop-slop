@@ -23,10 +23,20 @@ impl Rule for Check {
 
     fn on_node<'a>(&self, node: &AstNode<'a>, cx: &mut Cx<'_, 'a>) {
         let file = cx.file();
+        let skipped = match node.kind() {
+            // `else if` stays on the level of its `if`, which reports the chain.
+            AstKind::IfStatement(_) => is_else_if(file, node),
+            AstKind::Function(_) | AstKind::ArrowFunctionExpression(_) => {
+                block_body(node).is_none() || !is_callback(file, node)
+            }
+            _ => false,
+        };
+        // Its body is one level deeper than the blocks around it.
+        if skipped || depth(file, node, self.max) != self.max {
+            return;
+        }
         // The head tells one block from another; a block without a head is told by its body.
         let span = match node.kind() {
-            // `else if` stays on the level of its `if`, which reports the chain.
-            AstKind::IfStatement(_) if is_else_if(file, node) => return,
             AstKind::IfStatement(statement) => {
                 head(file, statement.span, statement.consequent.span())
             }
@@ -35,26 +45,17 @@ impl Rule for Check {
             AstKind::ForOfStatement(statement) => head(file, statement.span, statement.body.span()),
             AstKind::WhileStatement(statement) => head(file, statement.span, statement.body.span()),
             AstKind::SwitchStatement(statement) => {
-                let rest = &file.text[statement.discriminant.span().end as usize..];
-                let close = rest.find(')').map_or(0, |index| index as u32 + 1);
-                Span::new(
-                    statement.span.start,
-                    statement.discriminant.span().end + close,
-                )
-            }
-            AstKind::Function(_) | AstKind::ArrowFunctionExpression(_)
-                if !is_block_callback(file, node) =>
-            {
-                return;
+                let end = statement.discriminant.span().end;
+                let close = file.text[end as usize..]
+                    .find(')')
+                    .map_or(0, |index| index as u32 + 1);
+                Span::new(statement.span.start, end + close)
             }
             _ => node.span(),
         };
-        // Its body is one level deeper than the blocks around it.
-        if depth(file, node) == self.max {
-            cx.report(span)
-                .arg("depth", self.max + 1)
-                .arg("max", self.max);
-        }
+        cx.report(span)
+            .arg("depth", self.max + 1)
+            .arg("max", self.max);
     }
 }
 
@@ -69,21 +70,10 @@ fn head(file: &File<'_>, statement: Span, body: Span) -> Span {
     Span::sized(statement.start, text.trim_end().len() as u32)
 }
 
-/// A callback with a block body; `(item) => item.id` holds no block.
-fn is_block_callback(file: &File<'_>, node: &AstNode<'_>) -> bool {
-    match node.kind() {
-        AstKind::Function(_) => is_callback(file, node),
-        AstKind::ArrowFunctionExpression(arrow) => {
-            matches!(arrow.body, ArrowFunctionBody::FunctionBody(_)) && is_callback(file, node)
-        }
-        _ => false,
-    }
-}
-
 /// How many blocks hold the node: the body of `if` and `else` (not `else if`), of a loop, of a
 /// `switch`, of `try`, `catch` and `finally`, and of a callback, counted up to the function that
-/// is not a callback, a field initializer or a static block.
-fn depth(file: &File<'_>, node: &AstNode<'_>) -> u32 {
+/// is not a callback, a field initializer or a static block. The count stops past `max`.
+fn depth(file: &File<'_>, node: &AstNode<'_>, max: u32) -> u32 {
     let mut depth = 0;
     let mut child = node.span();
     for ancestor in file.semantic.nodes().ancestors(node.id()) {
@@ -101,13 +91,10 @@ fn depth(file: &File<'_>, node: &AstNode<'_>) -> u32 {
             AstKind::DoWhileStatement(statement) => statement.body.span() == child,
             AstKind::SwitchStatement(statement) => statement.discriminant.span() != child,
             AstKind::TryStatement(_) => true,
-            AstKind::Function(function) if is_callback(file, ancestor) => function
-                .body
-                .as_ref()
-                .is_some_and(|body| body.span == child),
-            AstKind::ArrowFunctionExpression(arrow) if is_callback(file, ancestor) => {
-                matches!(arrow.body, ArrowFunctionBody::FunctionBody(_))
-                    && arrow.body.span() == child
+            AstKind::Function(_) | AstKind::ArrowFunctionExpression(_)
+                if is_callback(file, ancestor) =>
+            {
+                block_body(ancestor) == Some(child)
             }
             AstKind::Function(_)
             | AstKind::ArrowFunctionExpression(_)
@@ -117,7 +104,22 @@ fn depth(file: &File<'_>, node: &AstNode<'_>) -> u32 {
             _ => false,
         };
         depth += u32::from(level);
+        if depth > max {
+            break;
+        }
         child = ancestor.span();
     }
     depth
+}
+
+/// The block of a function; `(item) => item.id` holds none.
+fn block_body(node: &AstNode<'_>) -> Option<Span> {
+    match node.kind() {
+        AstKind::Function(function) => function.body.as_ref().map(|body| body.span),
+        AstKind::ArrowFunctionExpression(arrow) => match &arrow.body {
+            ArrowFunctionBody::FunctionBody(body) => Some(body.span),
+            _ => None,
+        },
+        _ => None,
+    }
 }

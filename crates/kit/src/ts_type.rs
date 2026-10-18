@@ -314,9 +314,6 @@ pub fn keeps_primitive(file: &File<'_>, node: &AstNode<'_>) -> bool {
             binary.operator.is_numeric_or_string_binary_operator() || binary.operator.is_compare()
         }
         AstKind::UnaryExpression(unary) => unary.operator != UnaryOperator::Delete,
-        AstKind::StaticMemberExpression(member) => member.object.span() == span,
-        AstKind::ComputedMemberExpression(member) => member.object.span() == span,
-        AstKind::PrivateFieldExpression(member) => member.object.span() == span,
         AstKind::IfStatement(statement) => statement.test.span() == span,
         AstKind::WhileStatement(statement) => statement.test.span() == span,
         AstKind::DoWhileStatement(statement) => statement.test.span() == span,
@@ -337,7 +334,9 @@ pub fn keeps_primitive(file: &File<'_>, node: &AstNode<'_>) -> bool {
                         )
                 )
         }
-        _ => false,
+        kind => kind
+            .as_member_expression_kind()
+            .is_some_and(|member| member.object().span() == span),
     }
 }
 

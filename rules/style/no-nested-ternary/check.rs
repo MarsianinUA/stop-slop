@@ -23,10 +23,10 @@ impl Rule for Check {
                     _ => {}
                 }
             }
-            if let Some(span) = outer.filter(|span| !outermost.contains(span)) {
-                outermost.push(span);
-            }
+            outermost.extend(outer);
         }
+        outermost.sort_unstable();
+        outermost.dedup();
         for span in outermost {
             cx.report(span);
         }

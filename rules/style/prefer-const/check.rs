@@ -1,4 +1,4 @@
-use kit::oxc::ast::ast::{Expression, ForStatementLeft, VariableDeclarationKind};
+use kit::oxc::ast::ast::VariableDeclarationKind;
 use kit::prelude::*;
 
 #[derive(Deserialize)]
@@ -20,14 +20,16 @@ impl Rule for Check {
         {
             return;
         }
-        // `for (let item of items)`: a fresh binding on every turn, with no initializer.
+        // `for (let item of items)`: a fresh binding on every turn, with no initializer. A `let`
+        // under `for..of` / `for..in` can only be its binding: a body of one statement cannot
+        // be a declaration.
         let looped = match file.semantic.nodes().parent_kind(node.id()) {
-            AstKind::ForOfStatement(statement) => looped_over(&statement.left, &statement.right),
-            AstKind::ForInStatement(statement) => looped_over(&statement.left, &statement.right),
+            AstKind::ForOfStatement(statement) => Some(statement.right.span()),
+            AstKind::ForInStatement(statement) => Some(statement.right.span()),
             _ => None,
         };
         let mut names = Vec::new();
-        let mut noticed = false;
+        let mut narrowed = Vec::new();
         for declarator in &declaration.declarations {
             // `let total;` gets its value later, and `const` needs it here.
             if declarator.init.is_none() && looped.is_none() {
@@ -39,17 +41,12 @@ impl Rule for Check {
                     return;
                 };
                 // A top-level `let` of a script is global: another script may assign it.
-                if scoping
-                    .get_resolved_references(symbol)
-                    .any(|reference| reference.is_write())
-                    || is_script_global(file, symbol)
-                {
+                if scoping.symbol_is_mutated(symbol) || is_script_global(file, symbol) {
                     return;
                 }
-                // `const` keeps `let mode = 'fast'` as `'fast'`, and `mode === 'slow'` would
-                // stop compiling. The annotation does not count: `no-trivial-annotation` may
-                // remove it in the same pass.
-                noticed |= narrows && relies_on_wide_type(file, symbol);
+                if narrows {
+                    narrowed.push(symbol);
+                }
                 names.push(id.name.as_str());
             }
         }
@@ -57,6 +54,12 @@ impl Rule for Check {
             Span::new(declaration.span.start, right.end)
         });
         let reported = cx.report(span).arg("name", names.join("`, `"));
+        // `const` keeps `let mode = 'fast'` as `'fast'`, and `mode === 'slow'` would stop
+        // compiling. The annotation does not count: `no-trivial-annotation` may remove it in the
+        // same pass.
+        let noticed = narrowed
+            .into_iter()
+            .any(|symbol| relies_on_wide_type(file, symbol));
         if !noticed {
             reported.fix([Edit {
                 span: Span::sized(declaration.span.start, 3),
@@ -64,9 +67,4 @@ impl Rule for Check {
             }]);
         }
     }
-}
-
-/// The span of what the loop goes over, when the declaration is the loop's binding.
-fn looped_over(left: &ForStatementLeft<'_>, right: &Expression<'_>) -> Option<Span> {
-    matches!(left, ForStatementLeft::VariableDeclaration(_)).then(|| right.span())
 }

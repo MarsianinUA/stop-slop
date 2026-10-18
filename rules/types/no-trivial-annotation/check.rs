@@ -71,10 +71,7 @@ fn repeated_type(file: &File<'_>, ty: &TSType<'_>, init: &Expression<'_>) -> Opt
         _ => false,
     };
     if primitive {
-        // `hello ${name}` is a `string` even in a `const`.
-        return Some(
-            !matches!(init, Expression::TemplateLiteral(template) if !template.expressions.is_empty()),
-        );
+        return Some(narrows_to_literal(init));
     }
     let same = match init {
         Expression::RegExpLiteral(_) => {
