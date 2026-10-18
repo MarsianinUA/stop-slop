@@ -70,6 +70,13 @@ fn ids() -> Vec<&'static str> {
     RULESET.rules.iter().map(|def| def.meta.id).collect()
 }
 
+/// A rule of the group that works only under a `package.json` with `@nestjs/core`.
+fn is_nestjs(id: &str) -> bool {
+    meta(id).group == "nestjs"
+}
+
+const NEST_PACKAGE: &str = r#"{"dependencies": {"@nestjs/core": "11.0.0"}}"#;
+
 fn list(rules: &Value) -> &[Value] {
     rules.as_array().expect("an array of rules")
 }
@@ -173,7 +180,8 @@ fn rules_json_lists_every_rule() {
         let rule_keys: BTreeSet<&str> = object.keys().map(String::as_str).collect();
         assert_eq!(rule_keys, keys, "{rule}");
     }
-    let expected: Vec<_> = ids().into_iter().map(|id| (id, true)).collect();
+    // No `package.json` depends on `@nestjs/core`.
+    let expected: Vec<_> = ids().into_iter().map(|id| (id, !is_nestjs(id))).collect();
     assert_eq!(active(&rules), expected);
 
     let no_any = rule(&rules, "no-any");
@@ -196,8 +204,35 @@ fn rules_json_shows_a_disabled_rule_as_inactive() {
     write_config(&t, "disabled = [\"no-any\"]\n");
     let out = run(t.path(), &["rules", "--json"]);
     assert_eq!(code(&out), 0, "{}", stderr(&out));
-    let expected: Vec<_> = ids().into_iter().map(|id| (id, id != "no-any")).collect();
+    let expected: Vec<_> = ids()
+        .into_iter()
+        .map(|id| (id, id != "no-any" && !is_nestjs(id)))
+        .collect();
     assert_eq!(active(&json(&out)), expected);
+}
+
+#[test]
+fn rules_json_turns_the_nestjs_group_on_when_one_package_json_has_nestjs_core() {
+    let nestjs_states = |t: &TempRepo| -> Vec<bool> {
+        let out = run(t.path(), &["rules", "--json"]);
+        assert_eq!(code(&out), 0, "{}", stderr(&out));
+        active(&json(&out))
+            .into_iter()
+            .filter(|(id, _)| is_nestjs(id))
+            .map(|(_, active)| active)
+            .collect()
+    };
+    let t = TempRepo::new();
+    t.write("package.json", "{}")
+        .write("apps/api/package.json", NEST_PACKAGE)
+        .write("apps/web/package.json", "{}");
+    let on = nestjs_states(&t);
+    assert!(!on.is_empty());
+    assert!(on.iter().all(|&active| active), "{on:?}");
+
+    t.write("apps/api/package.json", "{}");
+    let off = nestjs_states(&t);
+    assert!(off.iter().all(|&active| !active), "{off:?}");
 }
 
 #[test]
@@ -664,6 +699,27 @@ fn check_finds_a_raw_value_of_an_enum_from_outside_the_diff() {
     assert_eq!(finding["kind"], "candidate");
     let message = finding["message"].as_str().expect("a message");
     assert!(message.contains("`Source.Dashboard`"), "{message}");
+}
+
+#[test]
+fn check_runs_the_nestjs_rules_only_under_a_package_with_nestjs_core() {
+    let controller = "import { Controller, Get } from '@nestjs/common';\n\n\
+                      @Controller('reports')\nexport class ReportsController {\n  \
+                      @Get()\n  list(): string[] {\n    return [];\n  }\n}\n";
+    let t = TempRepo::new();
+    t.write("apps/api/package.json", NEST_PACKAGE)
+        .write("apps/api/src/reports.controller.ts", controller)
+        .write("apps/web/package.json", "{}")
+        .write("apps/web/src/reports.controller.ts", controller)
+        .commit("main");
+
+    let report = check(t.path(), &["check", "--all", "--json"], 1);
+    let files: Vec<&str> = findings(&report)
+        .iter()
+        .filter(|finding| finding["rule"] == "nest-http-code")
+        .map(|finding| finding["file"].as_str().expect("file"))
+        .collect();
+    assert_eq!(files, ["apps/api/src/reports.controller.ts"]);
 }
 
 const IO_FEAT: &str = "import { readFileSync } from 'fs'; export const read: any = readFileSync;\n\

@@ -1,5 +1,5 @@
 use oxc_ast::AstKind;
-use oxc_ast::ast::{Argument, Expression, StringLiteral};
+use oxc_ast::ast::{Argument, Expression, IdentifierReference, StringLiteral};
 
 use crate::{Facts, File};
 
@@ -164,6 +164,32 @@ pub fn module_source<'a>(file: &File<'a>, kind: AstKind<'a>) -> Option<&'a Strin
             }
             _ => None,
         },
+        _ => None,
+    }
+}
+
+/// The import a reference names: the module text and the name the module exports it under.
+/// `Get` after `import { Get } from '@nestjs/common'` or `import { Get as Route } from ..` gives
+/// `("@nestjs/common", "Get")`, a default import `"default"`; `import type` counts too, since a
+/// type reference names it. `None` for a namespace import (`common.Get` is a member, not a
+/// name), `import x = require(..)`, a declaration of the file and a global.
+pub fn imported_name<'a>(
+    file: &File<'a>,
+    reference: &IdentifierReference<'_>,
+) -> Option<(&'a str, &'a str)> {
+    let scoping = file.semantic.scoping();
+    let symbol = scoping
+        .get_reference(reference.reference_id.get()?)
+        .symbol_id()?;
+    let nodes = file.semantic.nodes();
+    let declaration = scoping.symbol_declaration(symbol);
+    let name = match nodes.kind(declaration) {
+        AstKind::ImportSpecifier(specifier) => specifier.imported.name().as_str(),
+        AstKind::ImportDefaultSpecifier(_) => "default",
+        _ => return None,
+    };
+    match nodes.parent_kind(declaration) {
+        AstKind::ImportDeclaration(import) => Some((import.source.value.as_str(), name)),
         _ => None,
     }
 }

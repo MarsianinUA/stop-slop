@@ -36,7 +36,7 @@ pub use exported::{is_exported, is_exported_node};
 pub use facts::{EnumIndex, EnumMember, Fact, Facts, Package, StaticFacts};
 pub use file::{File, Role, RoleDef, Roles, is_cli_script, path_span, suffix_of};
 pub use import_block::{import_blocks, import_group};
-pub use import_kind::{ImportKind, import_kind, module_source, package_name};
+pub use import_kind::{ImportKind, import_kind, imported_name, module_source, package_name};
 pub use lines::{
     LineIndex, Position, has_blank_line, line_start, line_tail, one_line, opens_region,
 };
@@ -69,7 +69,7 @@ pub mod prelude {
         COLLECTIONS, Case, Cx, Edit, Fact, File, ImportKind, MemberUse, PRIVATE_MEMBER_NODES, Role,
         Rule, TopBinding, TopClass, TopKind, add_import, call_of, class_file_classes,
         expression_assertion, global_references, has_blank_line, has_safety_comment, if_runs,
-        import_blocks, import_group, import_kind, is_ambient, is_boolean_parameter,
+        import_blocks, import_group, import_kind, imported_name, is_ambient, is_boolean_parameter,
         is_boolean_type, is_callback, is_cli_script, is_const_assertion, is_di_constructor,
         is_exported, is_exported_node, is_global, is_jsx_tag, is_known_array, is_known_value,
         is_literal_value, is_log_call, is_nullable, is_open_key, is_option_key, is_own_name,

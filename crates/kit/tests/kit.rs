@@ -2187,6 +2187,44 @@ export const all = [a, d, f, g] as unknown as E;";
 }
 
 #[test]
+fn imported_name_is_the_module_and_the_exported_name_of_an_import() {
+    let text = "import { Get, Post as Create } from '@nestjs/common';
+import Joi from 'joi';
+import * as common from '@nestjs/common';
+import type { ConfigService } from '@nestjs/config';
+import { type Logger } from '@nestjs/common';
+import legacy = require('legacy');
+const local = 1;
+export const all = [Get, Create, Joi, common, legacy, local, Proxy];
+export let config: ConfigService | Logger;";
+    with_file(text, |file| {
+        let names: Vec<Option<(&str, &str)>> = file
+            .semantic
+            .nodes()
+            .iter()
+            .filter_map(|node| match node.kind() {
+                AstKind::IdentifierReference(id) => Some(imported_name(file, id)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            names,
+            [
+                Some(("@nestjs/common", "Get")),
+                Some(("@nestjs/common", "Post")),
+                Some(("joi", "default")),
+                None,
+                None,
+                None,
+                None,
+                Some(("@nestjs/config", "ConfigService")),
+                Some(("@nestjs/common", "Logger")),
+            ]
+        );
+    });
+}
+
+#[test]
 fn line_helpers_find_line_starts_blank_lines_regions_and_line_tails() {
     assert_eq!(line_start("ab\ncd", 4), 3);
     assert_eq!(line_start("ab", 1), 0);
