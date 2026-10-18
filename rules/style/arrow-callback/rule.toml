@@ -1,0 +1,5 @@
+description = "A `function () {}` callback that does not use its own `this`"
+kind = "error"
+fix = true
+source = ["personal"]
+message = "This callback is a `function` expression, which gets its own `this`, `arguments` and `new`: a reader checks the body to learn that none of them is used, and a `this` added later points at whatever the caller binds, not at the enclosing class. Write the callback as an arrow function."
