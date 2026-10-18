@@ -2320,6 +2320,77 @@ export { b, c, d, e, f, g, h, i, j, k, l, m, n, o, p, q, u, uses, alias, widened
 }
 
 #[test]
+fn known_array_is_an_array_by_its_own_syntax() {
+    let text = "declare function load(): number[];
+declare const rows: { filter(): number[] };
+export function arrays(typed: number[], frozen: readonly number[], lib: Array<number>,
+  read: ReadonlyArray<number>, pair: [number, number], maybe: number[] | undefined,
+  untyped: unknown, set: Set<number>) {
+  const literal = [1];
+  const alias = literal;
+  let written = [1];
+  written = [2];
+  let unwritten = [1];
+  let grown: number[] = [];
+  grown = [3];
+  const [head]: [string, number[]] = ['a', [1]];
+  const loaded = load();
+  return [
+    [1, 2], literal, alias, typed, frozen, lib, read, pair, maybe, typed.filter(Boolean),
+    typed?.slice(), typed.map(String).sort(), Array.from(set), Array.of(1), Object.keys({}),
+    Object.entries({}), literal as number[], literal!, grown,
+    written, unwritten, head, loaded, untyped, set, rows.filter(), load(), typed.find(Boolean),
+    typed.at(0),
+  ];
+}
+export function shadowed(Array: { from(value: unknown): number[] }) {
+  const first = second;
+  const second = first;
+  return [Array.from([]), first];
+}";
+    with_file(text, |file| {
+        let known: Vec<bool> = file
+            .semantic
+            .nodes()
+            .iter()
+            .filter_map(|node| match node.kind() {
+                AstKind::ReturnStatement(statement) => match &statement.argument {
+                    Some(Expression::ArrayExpression(array)) => Some(array),
+                    _ => None,
+                },
+                _ => None,
+            })
+            .flat_map(|array| array.elements.iter().filter_map(|e| e.as_expression()))
+            .map(|element| is_known_array(file, element))
+            .collect();
+        assert_eq!(
+            known,
+            [
+                true, true, true, true, true, true, true, true, true, true, true, true, true, true,
+                true, true, true, true, true, false, false, false, false, false, false, false,
+                false, false, false, false, false
+            ]
+        );
+    });
+}
+
+#[test]
+fn cli_script_starts_with_a_hashbang_or_sits_in_a_script_folder() {
+    let dirs = ["scripts".to_string(), "bin".to_string()];
+    for (path, text, is_script) in [
+        ("src/seed.ts", "#!/usr/bin/env node\nexport {};", true),
+        ("packages/db/scripts/seed.ts", "export {};", true),
+        ("bin/cli.ts", "export {};", true),
+        ("src/scripts-legacy/seed.ts", "export {};", false),
+        ("src/scripts.ts", "export {};", false),
+    ] {
+        with_file_at(path, text, |file| {
+            assert_eq!(is_cli_script(file, &dirs), is_script, "{path}");
+        });
+    }
+}
+
+#[test]
 fn boolean_parameter_has_a_boolean_type_or_a_boolean_default() {
     let text = "export function f(a: boolean, b: true | null, c: boolean[], d = false, e = 0, f?: string) {
   return [a, b, c, d, e, f];

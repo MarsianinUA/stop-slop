@@ -75,3 +75,13 @@ pub fn path_span(file: &File<'_>) -> Span {
         .unwrap_or(0);
     Span::empty(start)
 }
+
+/// A command run from a shell: the file starts with `#!`, or a folder on its path is one of
+/// `dirs` (`scripts/seed.ts`). Its top level is its `main`, its output the console.
+pub fn is_cli_script(file: &File<'_>, dirs: &[String]) -> bool {
+    file.semantic.nodes().program().hashbang.is_some()
+        || file
+            .path
+            .parent()
+            .is_some_and(|parent| parent.iter().any(|dir| dirs.iter().any(|d| d == dir)))
+}

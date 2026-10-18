@@ -8,7 +8,7 @@ use oxc_ast::ast::{
 use oxc_semantic::{AstNode, SymbolId};
 use oxc_span::GetSpan;
 
-use crate::{File, is_exported};
+use crate::{File, call_of, is_exported};
 
 /// `value as T` or `<T>value`: the value and the asserted type.
 pub fn type_assertion<'a>(kind: AstKind<'a>) -> Option<(&'a Expression<'a>, &'a TSType<'a>)> {
@@ -351,6 +351,96 @@ pub fn relies_on_wide_type(file: &File<'_>, symbol: SymbolId) -> bool {
             .scoping()
             .get_resolved_references(symbol)
             .any(|reference| !keeps_primitive(file, nodes.get_node(reference.node_id())))
+}
+
+/// Methods that give an array when called on one.
+const ARRAY_METHODS: &[&str] = &[
+    "map",
+    "filter",
+    "flatMap",
+    "flat",
+    "slice",
+    "concat",
+    "sort",
+    "reverse",
+    "toSorted",
+    "toReversed",
+    "toSpliced",
+];
+
+/// The value is an array, as its syntax shows: an array literal; one of `ARRAY_METHODS` called on
+/// such a value; the global `Array.from(..)`, `Array.of(..)`, `Object.keys(..)`, `.values(..)`,
+/// `.entries(..)`; a name annotated as an array or a tuple (`T[]`, `readonly T[]`, lib
+/// `Array<T>` / `ReadonlyArray<T>`, also with `null` / `undefined`), or a `const` without an
+/// annotation that holds such a value. Also through `?.`, `!`, `as` and `satisfies`. A parameter
+/// without a type, a destructured name, an import and another call's result are not seen:
+/// `rows.filter(..)` may be a query builder's.
+pub fn is_known_array(file: &File<'_>, expression: &Expression<'_>) -> bool {
+    is_array(file, expression, &mut HashSet::new())
+}
+
+/// `seen` holds the names already followed, so `const a = b; const b = a;` ends.
+fn is_array(file: &File<'_>, expression: &Expression<'_>, seen: &mut HashSet<SymbolId>) -> bool {
+    if let Some(call) = call_of(expression) {
+        let Some(member) = call.callee.get_inner_expression().get_member_expr() else {
+            return false;
+        };
+        let Some(method) = member.static_property_name() else {
+            return false;
+        };
+        let object = member.object().get_inner_expression();
+        return ARRAY_METHODS.contains(&method) && is_array(file, object, seen)
+            || matches!(method, "from" | "of") && is_global(file, object, "Array")
+            || matches!(method, "keys" | "values" | "entries")
+                && is_global(file, object, "Object");
+    }
+    let id = match expression.get_inner_expression() {
+        Expression::ArrayExpression(_) => return true,
+        Expression::Identifier(id) => id,
+        _ => return false,
+    };
+    let scoping = file.semantic.scoping();
+    let Some(symbol) = scoping.get_reference(id.reference_id()).symbol_id() else {
+        return false;
+    };
+    if !seen.insert(symbol) {
+        return false;
+    }
+    let nodes = file.semantic.nodes();
+    let declaration = scoping.symbol_declaration(symbol);
+    // The annotation of a destructuring pattern types the whole value, not this name.
+    let (pattern, annotation) = match nodes.kind(declaration) {
+        AstKind::VariableDeclarator(declarator) => (&declarator.id, &declarator.type_annotation),
+        AstKind::FormalParameter(parameter) => (&parameter.pattern, &parameter.type_annotation),
+        _ => return false,
+    };
+    if !matches!(pattern, BindingPattern::BindingIdentifier(_)) {
+        return false;
+    }
+    if let Some(annotation) = annotation {
+        // Whatever is written to the name later is of this type too.
+        return is_array_type(file, &annotation.type_annotation);
+    }
+    match (nodes.kind(declaration), nodes.parent_kind(declaration)) {
+        (AstKind::VariableDeclarator(declarator), AstKind::VariableDeclaration(statement)) => {
+            statement.kind.is_const()
+                && declarator
+                    .init
+                    .as_ref()
+                    .is_some_and(|init| is_array(file, init, seen))
+        }
+        _ => false,
+    }
+}
+
+fn is_array_type(file: &File<'_>, ty: &TSType<'_>) -> bool {
+    is_nullable(ty, |ty| {
+        let ty = unwrapped_type(file, ty);
+        matches!(ty, TSType::TSArrayType(_) | TSType::TSTupleType(_))
+            || ["Array", "ReadonlyArray"]
+                .into_iter()
+                .any(|name| lib_type(file, ty, name).is_some())
+    })
 }
 
 /// `key` of the parameter's object is an option: the type is lib `Partial<..>`, or `key?:` in its

@@ -11,7 +11,7 @@ pub struct Check {
 impl Rule for Check {
     fn on_file<'a>(&self, cx: &mut Cx<'_, 'a>) {
         let file = cx.file();
-        if self.is_script(file) {
+        if is_cli_script(file, &self.dirs) {
             return;
         }
         let nodes = file.semantic.nodes();
@@ -30,17 +30,6 @@ impl Rule for Check {
             cx.report(span)
                 .arg("use", one_line(used.source_text(file.text)));
         }
-    }
-}
-
-impl Check {
-    /// A file in a script folder, or one that starts with `#!`: a command run from a shell.
-    fn is_script(&self, file: &File<'_>) -> bool {
-        file.semantic.nodes().program().hashbang.is_some()
-            || file
-                .path
-                .parent()
-                .is_some_and(|dirs| dirs.iter().any(|dir| self.dirs.iter().any(|d| d == dir)))
     }
 }
 
