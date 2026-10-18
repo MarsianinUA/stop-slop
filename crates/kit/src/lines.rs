@@ -1,4 +1,5 @@
 use crate::File;
+use crate::code_comment::{DIRECTIVES, Reach, mentions};
 
 #[derive(Debug)]
 pub struct Position {
@@ -96,16 +97,9 @@ pub fn line_tail(file: &File<'_>, mut at: u32) -> Option<(u32, bool)> {
 }
 
 /// A directive about the line or node under the comment: `eslint-disable-next-line` and the like,
-/// `@ts-expect-error`, `@ts-ignore`, `biome-ignore <rule>: ..`.
+/// `@ts-expect-error`, `@ts-ignore`, `biome-ignore <rule>: ..`, `prettier-ignore`.
 pub(crate) fn speaks_of_next_line(comment: &str) -> bool {
-    [
-        "-next-line",
-        "@ts-expect-error",
-        "@ts-ignore",
-        "biome-ignore ",
-    ]
-    .iter()
-    .any(|directive| comment.contains(directive))
+    comment.contains("-next-line") || mentions(comment, Reach::NextLine)
 }
 
 /// A comment whose place decides what it covers beyond its own line and the next: a lint range
@@ -113,29 +107,13 @@ pub(crate) fn speaks_of_next_line(comment: &str) -> bool {
 /// `-end`), a file-wide `biome-ignore-all`, or a `#region` / `#endregion` fold. Code moved across
 /// it changes sides; the `-line` and `-next-line` forms move with their code.
 pub fn opens_region(comment: &str) -> bool {
-    let ranges = [
-        "eslint-disable",
-        "eslint-enable",
-        "oxlint-disable",
-        "oxlint-enable",
-        "tslint:disable",
-        "tslint:enable",
-    ];
-    [
-        "#region",
-        "#endregion",
-        "biome-ignore-start",
-        "biome-ignore-end",
-        "biome-ignore-all",
-    ]
-    .iter()
-    .any(|marker| comment.contains(marker))
-        || ranges.iter().any(|directive| {
-            comment
-                .split(directive)
+    DIRECTIVES.iter().any(|&(marker, reach)| {
+        reach == Reach::Region
+            && comment
+                .split(marker)
                 .skip(1)
                 .any(|rest| !rest.starts_with("-line") && !rest.starts_with("-next-line"))
-        })
+    })
 }
 
 /// Source text on one line for a message's `{arg}`: each run of spaces and line breaks is one

@@ -3,15 +3,13 @@ use oxc_ast::ast::{ImportDeclaration, ImportDeclarationSpecifier, Statement};
 use oxc_semantic::SymbolId;
 use oxc_span::{GetSpan, Span};
 
+use crate::code_comment::{Reach, mentions};
 use crate::lines::speaks_of_next_line;
 use crate::rename::{RESERVED, is_identifier, is_module};
 use crate::{
     Edit, Facts, File, ImportKind, has_blank_line, import_blocks, import_group, import_kind,
     line_start, line_tail,
 };
-
-/// TypeScript reads these only in the comments before the first statement.
-const FILE_PRAGMAS: [&str; 5] = ["<reference", "<amd-", "@ts-nocheck", "@ts-check", "@jsx"];
 
 /// Edits that import `names` from `source` by name. `Some([])` when the file already imports
 /// every name from that module, as a value and under its own name. `None` when a name is not an
@@ -230,8 +228,9 @@ fn new_line(file: &File<'_>, facts: &dyn Facts, source: &str, names: &[&str]) ->
         },
         // A module has a statement: an import or an export.
         None => Edit {
+            // TypeScript reads a file pragma only in the comments before the first statement.
             span: Span::empty(line_above(file, program.body[0].span().start, |comment| {
-                !FILE_PRAGMAS.iter().any(|pragma| comment.contains(pragma))
+                !mentions(comment, Reach::File)
             })),
             text: format!("{}\n\n", line(None)),
         },

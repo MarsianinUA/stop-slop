@@ -6,31 +6,32 @@ use kit::prelude::*;
 pub struct Check {}
 
 struct Mocker {
-    /// Vitest gives `vi` as `vitest` too.
+    /// The names `modules` export it under.
     names: &'static [&'static str],
     modules: &'static [&'static str],
-    /// Tests see `names` without an import too.
-    global: bool,
+    /// The names tests see it under without an import.
+    globals: &'static [&'static str],
     methods: &'static [&'static str],
 }
 
-const MOCKERS: [Mocker; 3] = [
+const MOCKERS: &[Mocker] = &[
     Mocker {
         names: &["jest"],
         modules: &["@jest/globals"],
-        global: true,
+        globals: &["jest"],
         methods: &["mock", "doMock", "setMock", "unstable_mockModule"],
     },
+    // Vitest gives `vi` as `vitest` too.
     Mocker {
         names: &["vi", "vitest"],
         modules: &["vitest"],
-        global: true,
+        globals: &["vi", "vitest"],
         methods: &["mock", "doMock"],
     },
     Mocker {
         names: &["mock"],
         modules: &["bun:test", "node:test"],
-        global: false,
+        globals: &[],
         methods: &["module"],
     },
 ];
@@ -77,8 +78,7 @@ fn is_mocker(file: &File<'_>, object: &Expression<'_>, mocker: &Mocker) -> bool 
     let Expression::Identifier(id) = object else {
         return false;
     };
-    let global = mocker.global && mocker.names.contains(&id.name.as_str());
-    (global && is_global(file, object, &id.name))
+    (mocker.globals.contains(&id.name.as_str()) && is_global(file, object, &id.name))
         || imported_name(file, id).is_some_and(|(module, name)| {
             mocker.names.contains(&name) && mocker.modules.contains(&package_name(module))
         })
@@ -87,11 +87,9 @@ fn is_mocker(file: &File<'_>, object: &Expression<'_>, mocker: &Mocker) -> bool 
 /// The module a mock names; Vitest also takes `import('./x')`.
 fn module_text<'a>(file: &File<'a>, module: &'a Expression<'a>) -> Option<&'a str> {
     match module {
-        Expression::StringLiteral(literal) => Some(literal.value.as_str()),
-        Expression::TemplateLiteral(template) => template.single_quasi().map(|text| text.as_str()),
         Expression::ImportExpression(import) => {
             module_source(file, AstKind::ImportExpression(import)).map(|s| s.value.as_str())
         }
-        _ => None,
+        _ => static_text(module),
     }
 }

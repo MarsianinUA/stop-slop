@@ -2,6 +2,8 @@
 import pw, { test as e2e } from '@playwright/test';
 import run, { test as nodeTest } from 'node:test';
 import { it as check, test } from 'vitest';
+import { it as bunIt } from 'bun:test';
+import { it as mochaIt } from 'mocha';
 
 check('works fine', () => { // expect: test-name
   expect(toOrder({ id: 1 }).id).toBe(1);
@@ -34,6 +36,10 @@ run('should work properly', () => { // expect: test-name
 pw.skip('test 8', async () => { // expect: test-name
   expect(toOrder({ id: 8 }).id).toBe(8);
 });
+
+bunIt('works ok', () => {}); // expect: test-name
+mochaIt('test 9', () => {}); // expect: test-name
+pw.fail('it works', async () => {}); // expect: test-name
 
 function toOrder(row: { id: number }): { id: number } {
   return { id: row.id };

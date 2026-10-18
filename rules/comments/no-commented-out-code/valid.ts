@@ -10,6 +10,8 @@
 // return early
 // break
 // e.g. options.timeout
+// e.g. refresh()
+// config?.retries (3)
 // public API
 // Note: important,
 // - refresh(options)
@@ -42,3 +44,8 @@ export function refresh(options: { timeout: number }): number {
 
 /* istanbul ignore next */
 export const fallback = refresh({ timeout: 1 });
+
+// We wait for
+// init()
+// before reading the config.
+export const READY = true;

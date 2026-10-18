@@ -11,7 +11,8 @@ pub enum ImportKind {
     External,
     /// A `workspace:` package of the same monorepo, with or without a subpath.
     Workspace,
-    /// A key of `paths` in the nearest `tsconfig.json`, like `@/*`.
+    /// A key of `paths` in the nearest `tsconfig.json`, like `@/*`, or a subpath import of
+    /// `package.json` (`#db/client`).
     Alias,
     /// `./x`, `../x`, `.`, `..`, `/x`.
     Relative,
@@ -102,11 +103,15 @@ const BUILTINS: &[&str] = &[
 ];
 
 /// Without `Fact::Packages` in the rule's `USES` a declared polyfill reads as `Node` and a
-/// workspace package as `External`; without `Fact::Aliases` an alias reads as `External`.
+/// workspace package as `External`; without `Fact::Aliases` a key of `paths` reads as `External`.
 pub fn import_kind(file: &File<'_>, facts: &dyn Facts, source: &str) -> ImportKind {
     // An npm package name never starts with `.`.
     if source.starts_with('.') || source.starts_with('/') {
         return ImportKind::Relative;
+    }
+    // Nor with `#`: that is a key of `imports` in the package's own `package.json`.
+    if source.starts_with('#') {
+        return ImportKind::Alias;
     }
     if source.starts_with("node:") {
         return ImportKind::Node;

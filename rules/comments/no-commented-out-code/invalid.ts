@@ -45,3 +45,6 @@ export interface Label {
 }
 
 /* await refresh(options); */ // expect: no-commented-out-code
+
+export const TIMEOUT = 30;
+// const timeout = 30; // In seconds. // expect: no-commented-out-code

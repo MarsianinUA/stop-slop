@@ -621,6 +621,7 @@ fn import_kind_takes_relative_node_workspace_alias_then_external() {
             ("@/orders/x", ImportKind::Alias),
             ("@acme/shared/types", ImportKind::Alias),
             ("~config", ImportKind::Alias),
+            ("#db/client", ImportKind::Alias),
             ("./order", ImportKind::Relative),
             ("../lib/x", ImportKind::Relative),
             (".", ImportKind::Relative),
@@ -633,6 +634,7 @@ fn import_kind_takes_relative_node_workspace_alias_then_external() {
             ("events", ImportKind::Node),
             ("@acme/db", ImportKind::External),
             ("@/x", ImportKind::External),
+            ("#db/client", ImportKind::Alias),
         ] {
             assert_eq!(
                 import_kind(file, &none, source),
@@ -2378,6 +2380,14 @@ const COMMENT_CASES: &[(&str, &[&str])] = &[
         ],
     ),
     (
+        "// @ts-nocheck\n// biome-ignore-all lint: generated\n// prettier-ignore\nx();",
+        &[
+            r#"Directive [" @ts-nocheck"]"#,
+            r#"Directive [" biome-ignore-all lint: generated"]"#,
+            r#"Directive [" prettier-ignore"]"#,
+        ],
+    ),
+    (
         "/* global window */\n// global state is shared.\nx();",
         &[
             r#"Directive [" global window"]"#,
@@ -2425,6 +2435,39 @@ const COMMENT_CASES: &[(&str, &[&str])] = &[
         "// delete it\n// delete cache.key\nx();",
         &[r#"Prose [" delete it"] + Code [" delete cache.key"]"#],
     ),
+    (
+        "// const timeout = 30; // In seconds.\nx();",
+        &[r#"Code [" const timeout = 30; // In seconds."]"#],
+    ),
+    (
+        "// e.g. refresh()\n// config?.retries (3)\nx();",
+        &[r#"Prose [" e.g. refresh()", " config?.retries (3)"]"#],
+    ),
+    (
+        "// We wait for\n// init()\n// before reading the config.\nx();",
+        &[r#"Prose [" We wait for", " init()", " before reading the config."]"#],
+    ),
+    (
+        "// simple\n// const a = 1;\n// no leap years\nx();",
+        &[r#"Prose [" simple"] + Code [" const a = 1;"] + Prose [" no leap years"]"#],
+    ),
+    (
+        "/**\n * my-lib v1.2.3\n * @license MIT\n */\nx();",
+        &[r#"Directive [" my-lib v1.2.3", " @license MIT"]"#],
+    ),
+    (
+        "// Copyright 2024 Acme Inc\n//\n// Licensed under the MIT License\n// no default\n// NOSONAR\nx();",
+        &[
+            r#"Directive [" Copyright 2024 Acme Inc", " Licensed under the MIT License"]"#,
+            r#"Directive [" no default"]"#,
+            r#"Directive [" NOSONAR"]"#,
+        ],
+    ),
+    ("/// Reads it.\nx();", &[r#"Prose [" Reads it."]"#]),
+    (
+        "// Кэш живёт минуту.\n// cache.clear();\nx();",
+        &[r#"Prose [" Кэш живёт минуту."] + Code [" cache.clear();"]"#],
+    ),
 ];
 
 #[test]
@@ -2435,6 +2478,31 @@ fn comment_blocks_cut_comments_into_prose_code_and_directives() {
             assert_eq!(comment_parts_of(&text), expected, "{case:?}");
         }
     }
+    with_file(
+        "//   const a = 1;\n// The note\n// goes on.\nx();",
+        |file| {
+            let blocks = comment_blocks(file);
+            let parts: Vec<&str> = blocks
+                .iter()
+                .flat_map(|block| &block.parts)
+                .map(|part| part.span.source_text(file.text))
+                .collect();
+            assert_eq!(parts, ["const a = 1;", "The note\n// goes on."]);
+            assert_eq!(
+                blocks[0].span.source_text(file.text),
+                "//   const a = 1;\n// The note\n// goes on."
+            );
+        },
+    );
+    // Each name ends the run it starts, so the code under a long list is still in reach.
+    let names = "// abc\n".repeat(100);
+    with_file(&format!("{names}// const a = 1;\nx();"), |file| {
+        let parts = &comment_blocks(file)[0].parts;
+        assert_eq!(parts.last().map(|part| part.kind), Some(CommentKind::Code));
+    });
+    with_file_at("src/a.tsx", "// <Header title=\"x\" />\nx();", |file| {
+        assert_eq!(comment_blocks(file)[0].parts[0].kind, CommentKind::Code);
+    });
 }
 
 #[test]
@@ -2465,6 +2533,9 @@ fn line_helpers_find_line_starts_blank_lines_regions_and_line_tails() {
         ("// biome-ignore-all lint: generated", true),
         ("// biome-ignore lint: legacy", false),
         ("// #region output", true),
+        ("/* stylelint-disable */", true),
+        ("// jscpd:ignore-start", true),
+        ("// prettier-ignore", false),
         ("// a note", false),
     ] {
         assert_eq!(opens_region(comment), region, "{comment}");
@@ -2475,6 +2546,10 @@ fn line_helpers_find_line_starts_blank_lines_regions_and_line_tails() {
         ("a(); b();", None),
         ("a(); // biome-ignore lint/style: x\nb();", None),
         ("a(); // @ts-expect-error\nb();", None),
+        ("a(); // prettier-ignore\nb();", None),
+        ("a(); // language=SQL\nb();", None),
+        ("a(); // cspell:disable-next-line\nb();", None),
+        ("a(); // @ts-nocheck\nb();", Some((19, true))),
     ] {
         with_file(text, |file| {
             assert_eq!(line_tail(file, 3), tail, "{text}");
@@ -2493,6 +2568,27 @@ fn one_line_joins_the_text_with_single_spaces() {
         "{ REDIS_HOST, REDIS_PORT }"
     );
     assert_eq!(one_line("a  +\tb"), "a + b");
+}
+
+#[test]
+fn static_text_is_a_string_or_a_template_without_substitutions() {
+    with_file("f('a', `b`, `c${d}`, d, 'e' + d, 1);", |file| {
+        let texts: Vec<Option<&str>> = file
+            .semantic
+            .nodes()
+            .iter()
+            .find_map(|node| match node.kind() {
+                AstKind::CallExpression(call) => Some(
+                    call.arguments
+                        .iter()
+                        .map(|argument| argument.as_expression().and_then(static_text))
+                        .collect(),
+                ),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(texts, [Some("a"), Some("b"), None, None, None, None]);
+    });
 }
 
 #[test]

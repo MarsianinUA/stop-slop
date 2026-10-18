@@ -4,9 +4,9 @@ use kit::prelude::*;
 #[derive(Deserialize)]
 #[serde(crate = "kit::serde", deny_unknown_fields)]
 pub struct Check {
-    /// Words that only say the test works or is a test (`works`, `test`), without case.
+    /// Words that only say the test works or is a test (`works`, `test`), case-insensitive.
     vague: Vec<String>,
-    /// Words that add nothing around them (`should`, `correctly`, `case`), without case. Alone
+    /// Words that add nothing around them (`should`, `correctly`, `case`), case-insensitive. Alone
     /// they may name a case (`it('ok')` for the status `ok`); with a number they number one
     /// (`case 2`).
     filler: Vec<String>,
@@ -14,9 +14,8 @@ pub struct Check {
 
 /// The functions that declare a test: Jest's and Vitest's `it` and `test`, Jasmine's `xit` and
 /// `fit`, Jest's `xtest`, Mocha's `specify`.
-const TESTS: [&str; 6] = ["it", "test", "xit", "fit", "xtest", "specify"];
-/// Modules that export them.
-const RUNNERS: [&str; 6] = [
+const TESTS: &[&str] = &["it", "test", "xit", "fit", "xtest", "specify"];
+const RUNNERS: &[&str] = &[
     "vitest",
     "@jest/globals",
     "bun:test",
@@ -25,9 +24,9 @@ const RUNNERS: [&str; 6] = [
     "mocha",
 ];
 /// Runners whose default export is `test`: `import test from 'node:test'`.
-const DEFAULT_TEST: [&str; 2] = ["node:test", "@playwright/test"];
+const DEFAULT_TEST: &[&str] = &["node:test", "@playwright/test"];
 /// Members that still take the name first: `it.only(name, ..)`, `test.concurrent.skip(..)`.
-const MODIFIERS: [&str; 9] = [
+const MODIFIERS: &[&str] = &[
     "only",
     "skip",
     "todo",
@@ -40,7 +39,7 @@ const MODIFIERS: [&str; 9] = [
 ];
 /// Members that take a table or a condition and give back the test that takes the name:
 /// `it.each(rows)(name, ..)`, `test.skipIf(ci)(name, ..)`.
-const CURRIED: [&str; 6] = ["each", "for", "skipIf", "runIf", "if", "todoIf"];
+const CURRIED: &[&str] = &["each", "for", "skipIf", "runIf", "if", "todoIf"];
 
 impl Rule for Check {
     const NODES: &'static [AstType] = &[AstType::CallExpression];
@@ -52,13 +51,8 @@ impl Rule for Check {
         let Some(title) = call.arguments.first().and_then(Argument::as_expression) else {
             return;
         };
-        let name = match title {
-            Expression::StringLiteral(literal) => literal.value.as_str(),
-            Expression::TemplateLiteral(template) => match template.single_quasi() {
-                Some(text) => text.as_str(),
-                None => return,
-            },
-            _ => return,
+        let Some(name) = static_text(title) else {
+            return;
         };
         let file = cx.file();
         if self.is_vague(name) && declares_test(file, call) {
@@ -83,7 +77,9 @@ impl Check {
         }
         let is_in =
             |list: &[String], word: &str| list.iter().any(|item| item.eq_ignore_ascii_case(word));
-        let index = ["%#", "$#", "%$"].iter().any(|index| name.contains(index));
+        let index = ["%#", "$#", "%$"]
+            .iter()
+            .any(|marker| name.contains(marker));
         let mut digits = false;
         let mut any_word = false;
         let mut any_vague = false;

@@ -2,6 +2,7 @@
 /// <reference types="node" />
 /* eslint-disable no-console */
 import { z } from 'zod';
+import { stringify } from 'yaml/util';
 
 // The limit for one batch.
 export const BATCH_LIMIT = 100;
@@ -107,3 +108,64 @@ export const LISTS = 2;
 // - users by id
 // - users by name
 export const USER_LISTS = LISTS;
+
+export class UserStore {
+  // get reads the cache and never the store.
+  get(userId: string): string | undefined {
+    return cache.get(userId);
+  }
+}
+
+// yaml writes the lists to disk.
+export const dump = stringify;
+
+export function ignoreErrors(): void {
+  try {
+    saveUser('a', 'b');
+  } catch { /* ignore */ }
+  [1].forEach(() => { /* noop */ });
+}
+
+// ------
+// Helpers.
+// ------
+
+/*****
+ * Section Title.
+ *****/
+
+/**
+ * my-lib v1.2.3
+ * @license MIT
+ */
+
+// Copyright 2024 Acme Inc
+//
+// Licensed under the MIT License
+
+export function kindOf(kind: string): number {
+  switch (kind) {
+    case 'a':
+      return 1;
+    // no default
+  }
+  return 0; // NOSONAR
+}
+
+export class AuditStore extends UserStore {
+  /** {@inheritDoc UserStore.get} */
+  override get(userId: string): string | undefined {
+    return super.get(userId);
+  }
+}
+
+// キャッシュを読む。
+export const CACHE_NOTE = 1;
+
+// We wait for
+// init()
+// before reading the config.
+export const READY = true;
+
+// 2^53 - 1
+export const MAX = 2 ** 53 - 1;

@@ -1,9 +1,9 @@
 use camino::{Utf8Path, Utf8PathBuf};
 use kit::oxc::allocator::Allocator;
-use kit::oxc::ast::ast::{Declaration, Expression, Statement};
+use kit::oxc::ast::ast::{Declaration, Statement};
 use kit::oxc::parser::{ParseOptions, Parser};
 use kit::oxc::span::SourceType;
-use kit::{EnumIndex, EnumMember};
+use kit::{EnumIndex, EnumMember, static_text};
 use repo::{RepoError, Snapshot};
 
 const EXTENSIONS: [&str; 4] = [".ts", ".tsx", ".mts", ".cts"];
@@ -71,12 +71,9 @@ fn collect(
             _ => continue,
         };
         for member in &declaration.body.members {
-            let value = match &member.initializer {
-                Some(Expression::StringLiteral(literal)) => Some(literal.value),
-                Some(Expression::TemplateLiteral(template)) => template.single_quasi(),
-                _ => None,
+            let Some(value) = member.initializer.as_ref().and_then(static_text) else {
+                continue;
             };
-            let Some(value) = value else { continue };
             let member = EnumMember {
                 enum_name: declaration.id.name.to_string(),
                 member: member.id.static_name().to_string(),

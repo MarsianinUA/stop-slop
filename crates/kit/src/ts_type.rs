@@ -317,6 +317,16 @@ pub fn is_literal_value(expression: &Expression<'_>) -> bool {
     }
 }
 
+/// The text of a string or of a template without `${}`: `'works'`, `` `./mailer` ``. A template
+/// with `${}`, a constant or `'a' + b` have none.
+pub fn static_text<'a>(expression: &Expression<'a>) -> Option<&'a str> {
+    match expression {
+        Expression::StringLiteral(literal) => Some(literal.value.as_str()),
+        Expression::TemplateLiteral(template) => template.single_quasi().map(|text| text.as_str()),
+        _ => None,
+    }
+}
+
 /// A value that a `const` or a `readonly` field types as its own literal, where `let` and a plain
 /// field widen it: `'fast'` is `'fast'`, not `string`; so are `null`, `Kind.User`,
 /// `cond ? 'a' : 'b'`, a name or member that may hold such a literal, and a call or tagged

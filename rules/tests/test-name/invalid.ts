@@ -56,4 +56,13 @@ describe('OrdersService', () => {
   test.each([[10]])('case %$', (value) => { // expect: test-name
     expect(value).toBe(10);
   });
+
+  fit('test 12', () => {}); // expect: test-name
+  xtest('test 11', () => {}); // expect: test-name
+  specify('basic spec', () => {}); // expect: test-name
+  it.sequential('works fine', () => {}); // expect: test-name
+  test.fails('should work', () => {}); // expect: test-name
+  test.runIf(true)('test 13', () => {}); // expect: test-name
+  test.if(true)('testing 14', () => {}); // expect: test-name
+  test.todoIf(false)('simple test 15', () => {}); // expect: test-name
 });

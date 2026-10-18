@@ -46,11 +46,9 @@ impl Check {
             .get_member_expr()
             .and_then(|member| member.static_property_name())
             .is_some_and(|key| self.keys.iter().any(|k| k == key))
-            && tests.iter().all(|test| match test.get_inner_expression() {
-                Expression::StringLiteral(_) => true,
-                Expression::TemplateLiteral(template) => template.expressions.is_empty(),
-                _ => false,
-            })
+            && tests
+                .iter()
+                .all(|test| static_text(test.get_inner_expression()).is_some())
     }
 }
 

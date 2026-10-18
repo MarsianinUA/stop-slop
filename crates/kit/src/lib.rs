@@ -59,8 +59,8 @@ pub use ts_type::{
     Declared, declared, expression_assertion, global_member, global_references,
     is_boolean_parameter, is_boolean_type, is_const_assertion, is_global, is_known_array,
     is_known_value, is_literal_value, is_nullable, is_open_key, is_option_key, keeps_primitive,
-    lib_type, narrows_to_literal, outer_assertion, relies_on_wide_type, type_assertion,
-    unwrapped_type,
+    lib_type, narrows_to_literal, outer_assertion, relies_on_wide_type, static_text,
+    type_assertion, unwrapped_type,
 };
 
 pub mod oxc {
@@ -86,7 +86,7 @@ pub mod prelude {
         local_callee, member_use, member_write, module_source, mutator_call, narrows_to_literal,
         one_line, opens_region, outer_assertion, package_name, path_span, private_member,
         related_symbols, relies_on_wide_type, rename, returns_promise, start_after_decorators,
-        this_class, top_bindings, top_classes, type_assertion, unwrapped_type, words,
+        static_text, this_class, top_bindings, top_classes, type_assertion, unwrapped_type, words,
     };
     pub use oxc_allocator::Allocator;
     pub use oxc_ast::{AstKind, AstType};

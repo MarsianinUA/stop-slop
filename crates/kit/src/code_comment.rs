@@ -1,6 +1,8 @@
 use oxc_allocator::Allocator;
-use oxc_ast::Comment;
-use oxc_ast::ast::{ClassElement, Expression, ObjectPropertyKind, Program, Statement};
+use oxc_ast::ast::{
+    ChainElement, ClassElement, Expression, ObjectPropertyKind, Program, Statement,
+};
+use oxc_ast::{Comment, CommentContent};
 use oxc_parser::{ParseOptions, Parser};
 use oxc_span::{GetSpan, SourceType, Span};
 
@@ -40,7 +42,8 @@ pub struct CommentPart {
 
 /// The comments of the file in text order. `//` comments, each alone on its line, on consecutive
 /// lines are one block; any other comment (`/* */`, `/** */`, `//` after code) is a block of its
-/// own. A directive is a block of its own too, so it also ends a run of `//` comments. In a block,
+/// own. A directive is a block of its own too, so it also ends a run of `//` comments; a license
+/// (`// Copyright ..`) takes the `//` lines under it. In a block,
 /// the longest runs of lines that parse as code are `Code`, and blank lines cut the rest into
 /// `Prose` paragraphs. Blank lines between `//` comments stay in the block, as an editor leaves
 /// them in commented-out code. A fenced example (```` ``` ````) is prose, and a run of code does not
@@ -55,12 +58,14 @@ pub fn comment_blocks(file: &File<'_>) -> Vec<CommentBlock> {
         let first = &comments[index];
         let mut lines = comment_lines(text, first);
         let mut end = index + 1;
-        let directive = is_directive(text, first);
-        if !directive && first.is_line() && is_own_line(text, first.span) {
+        let reach = directive(text, first);
+        let is_directive = reach.is_some();
+        let runs = !is_directive || reach == Some(Reach::License);
+        if runs && first.is_line() && is_own_line(text, first.span) {
             while let Some(next) = comments.get(end)
                 && next.is_line()
                 && is_own_line(text, next.span)
-                && !is_directive(text, next)
+                && directive(text, next).is_none()
                 && let Some(gap) = blank_gap(text, comments[end - 1].span.end, next.span.start)
             {
                 if gap {
@@ -70,7 +75,7 @@ pub fn comment_blocks(file: &File<'_>) -> Vec<CommentBlock> {
                 end += 1;
             }
         }
-        let parts = if directive {
+        let parts = if is_directive {
             lines.retain(|line| !line.is_empty());
             let mut parts = Vec::new();
             flush(&mut parts, &mut lines, CommentKind::Directive, text);
@@ -80,7 +85,7 @@ pub fn comment_blocks(file: &File<'_>) -> Vec<CommentBlock> {
         };
         blocks.push(CommentBlock {
             span: Span::new(first.span.start, comments[end - 1].span.end),
-            doc: !directive && first.is_jsdoc(),
+            doc: !is_directive && first.is_jsdoc(),
             parts,
         });
         index = end;
@@ -131,33 +136,75 @@ fn blank_gap(text: &str, end: u32, start: u32) -> Option<bool> {
     gap.trim().is_empty().then(|| has_blank_line(gap))
 }
 
-/// Markers a tool reads at the start of a comment. oxc already marks `/*! */`, `@license`,
-/// `#__PURE__`, webpack and Vite hints and coverage ignores (`istanbul ignore next`).
-const DIRECTIVES: &[&str] = &[
-    "eslint-disable",
-    "eslint-enable",
-    "oxlint-disable",
-    "oxlint-enable",
-    "tslint:",
-    "biome-ignore",
-    "prettier-ignore",
-    "dprint-ignore",
-    "deno-lint-ignore",
-    "deno-fmt-ignore",
-    "@ts-",
-    "#region",
-    "#endregion",
-    "<reference ",
-    "<amd-",
-    "@jsx",
-    "cspell:",
-    "spell-checker:",
-    "noinspection",
-    "type-coverage:",
-    "@formatter:",
-    "# sourceMappingURL=",
-    "@ sourceMappingURL=",
+/// How far a directive reaches past its comment, for code that moves.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Reach {
+    /// The line or node under the comment.
+    NextLine,
+    /// The code up to its pair or the end of the file. A range with `-line` or `-next-line`
+    /// (`eslint-disable-next-line`) covers only that line.
+    Region,
+    /// The file, read only in the comments before its first statement: `@ts-nocheck`.
+    File,
+    /// A license: `/*! */`, `@license`, `// Copyright ..` and the `//` lines under it.
+    License,
+    /// Its own line, or no code at all: `NOSONAR`, a note to a spell checker, a source map.
+    Other,
+}
+
+/// Markers a tool reads at the start of a comment, for `comment_blocks`, `line_tail`,
+/// `opens_region` and `add_import`. oxc already marks `/*! */`, `@license`, `#__PURE__`, webpack
+/// and Vite hints and coverage ignores (`istanbul ignore next`).
+pub(crate) const DIRECTIVES: &[(&str, Reach)] = &[
+    ("eslint-disable", Reach::Region),
+    ("eslint-enable", Reach::Region),
+    ("oxlint-disable", Reach::Region),
+    ("oxlint-enable", Reach::Region),
+    ("tslint:disable", Reach::Region),
+    ("tslint:enable", Reach::Region),
+    ("stylelint-disable", Reach::Region),
+    ("stylelint-enable", Reach::Region),
+    ("biome-ignore-start", Reach::Region),
+    ("biome-ignore-end", Reach::Region),
+    ("biome-ignore-all", Reach::Region),
+    ("jscpd:ignore-", Reach::Region),
+    ("#region", Reach::Region),
+    ("#endregion", Reach::Region),
+    ("biome-ignore ", Reach::NextLine),
+    ("@ts-expect-error", Reach::NextLine),
+    ("@ts-ignore", Reach::NextLine),
+    ("prettier-ignore", Reach::NextLine),
+    ("dprint-ignore", Reach::NextLine),
+    ("deno-lint-ignore", Reach::NextLine),
+    ("deno-fmt-ignore", Reach::NextLine),
+    ("noinspection", Reach::NextLine),
+    ("language=", Reach::NextLine),
+    ("@ts-nocheck", Reach::File),
+    ("@ts-check", Reach::File),
+    ("<reference ", Reach::File),
+    ("<amd-", Reach::File),
+    ("@jsx", Reach::File),
+    ("Copyright ", Reach::License),
+    ("SPDX-License-Identifier:", Reach::License),
+    ("NOSONAR", Reach::Other),
+    ("nosemgrep", Reach::Other),
+    ("gitleaks:allow", Reach::Other),
+    ("cspell:", Reach::Other),
+    ("spell-checker:", Reach::Other),
+    ("type-coverage:", Reach::Other),
+    ("@formatter:", Reach::Other),
+    ("# sourceMappingURL=", Reach::Other),
+    ("@ sourceMappingURL=", Reach::Other),
+    ("# sourceURL=", Reach::Other),
+    ("@ sourceURL=", Reach::Other),
 ];
+
+/// Anywhere in the comment, not only at its start: `// see eslint-disable` counts too.
+pub(crate) fn mentions(comment: &str, reach: Reach) -> bool {
+    DIRECTIVES
+        .iter()
+        .any(|&(marker, of)| of == reach && comment.contains(marker))
+}
 
 /// Markers ESLint and JSHint read only in a `/* */` comment: `// global state` is prose.
 const BLOCK_DIRECTIVES: &[&str] = &[
@@ -170,29 +217,62 @@ const BLOCK_DIRECTIVES: &[&str] = &[
     "jslint ",
 ];
 
-fn is_directive(text: &str, comment: &Comment) -> bool {
-    if comment.is_annotation() || comment.content == oxc_ast::CommentContent::Legal {
-        return true;
+fn directive(text: &str, comment: &Comment) -> Option<Reach> {
+    if comment.is_annotation() {
+        return Some(Reach::Other);
+    }
+    if matches!(
+        comment.content,
+        CommentContent::Legal | CommentContent::JsdocLegal
+    ) {
+        return Some(Reach::License);
     }
     let content = comment
         .content_span()
         .source_text(text)
         .trim_start_matches(|ch: char| ch == '*' || ch == '/' || ch.is_whitespace());
-    DIRECTIVES.iter().any(|marker| content.starts_with(marker))
-        || comment.is_block()
-            && BLOCK_DIRECTIVES
-                .iter()
-                .any(|marker| content.starts_with(marker))
+    // ESLint's `default-case` takes only this whole comment: `No default.` would not do.
+    let whole = content.trim_end().eq_ignore_ascii_case("no default");
+    let block = comment.is_block()
+        && BLOCK_DIRECTIVES
+            .iter()
+            .any(|marker| content.starts_with(marker));
+    DIRECTIVES
+        .iter()
+        .find(|(marker, _)| content.starts_with(marker))
+        .map(|&(_, reach)| reach)
+        .or((whole || block).then_some(Reach::Other))
 }
 
 fn parts(parser: &mut CodeParser, text: &str, lines: &[Span]) -> Vec<CommentPart> {
+    parser.budget = PARSE_BUDGET
+        * lines
+            .iter()
+            .map(|line| line.size() as usize + 1)
+            .sum::<usize>();
     let is_fence = |line: &Span| {
         let body = line.source_text(text).trim_start();
         body.starts_with("```") || body.starts_with("~~~")
     };
     // A line of code does not end with `.`, and a sentence that does would read on into the code
-    // below it as a member: `Adds.` + `add(1, 2)` is `Adds.add(1, 2)`.
-    let ends_sentence = |line: &Span| line.source_text(text).ends_with('.');
+    // below it as a member: `Adds.` + `add(1, 2)` is `Adds.add(1, 2)`. A note after the code
+    // (`run(); // Runs it.`) reads on into nothing.
+    let ends_sentence = |line: &Span| {
+        let body = line.source_text(text);
+        body.find(" //")
+            .map_or(body, |at| &body[..at])
+            .trim_end()
+            .ends_with('.')
+    };
+    // A call inside a wrapped sentence is a word of it: `We wait for` + `init()` + `before ..`.
+    // A line that ends with `;` or `,` is code all the same.
+    let continues = |line: &Span| line.source_text(text).ends_with(char::is_alphanumeric);
+    let open = |line: &Span| !line.source_text(text).ends_with([';', ',']);
+    let goes_on = |line: &Span| {
+        line.source_text(text)
+            .trim_start()
+            .starts_with(char::is_lowercase)
+    };
     let mut parts = Vec::new();
     let mut prose: Vec<Span> = Vec::new();
     let mut fenced = false;
@@ -204,7 +284,6 @@ fn parts(parser: &mut CodeParser, text: &str, lines: &[Span]) -> Vec<CommentPart
             index += 1;
             continue;
         }
-        // A Markdown fence marks an example: what it holds stays prose.
         let fence = is_fence(&line);
         fenced ^= fence;
         if !fence && !fenced && !ends_sentence(&line) {
@@ -212,7 +291,14 @@ fn parts(parser: &mut CodeParser, text: &str, lines: &[Span]) -> Vec<CommentPart
                 .iter()
                 .position(|line| is_fence(line) || ends_sentence(line))
                 .map_or(lines.len(), |offset| index + offset);
-            if let Some(end) = code_run(parser, text, &lines[index..limit]).map(|last| index + last)
+            if let Some(end) = code_run(parser, text, &lines[index..limit])
+                .map(|last| index + last)
+                .filter(|&end| {
+                    end > index
+                        || !open(&line)
+                        || !prose.last().is_some_and(continues)
+                        || !lines.get(end + 1).is_some_and(goes_on)
+                })
             {
                 flush(&mut parts, &mut prose, CommentKind::Prose, text);
                 let mut code: Vec<Span> = lines[index..=end]
@@ -245,12 +331,14 @@ fn flush(parts: &mut Vec<CommentPart>, lines: &mut Vec<Span>, kind: CommentKind,
     });
 }
 
-/// The last line of the longest run from the first line that parses as code. A parse that fails
-/// on line `k` of the run fails the same way for every longer run, so the next try ends before `k`.
+/// The last line of the longest run from the first line that parses as code. A run that is not
+/// code on line `k` (the parse fails there, or a node that is not code ends there) is not code in
+/// a shorter run that still holds line `k` either, so the next try ends before `k`.
 fn code_run(parser: &mut CodeParser, text: &str, lines: &[Span]) -> Option<usize> {
     if starts_as_words(lines[0].source_text(text)) {
         return None;
     }
+    let ends_with_comma = |at: usize| lines[at].source_text(text).ends_with(',');
     let mut source = String::new();
     let mut end = lines.len() - 1;
     loop {
@@ -264,14 +352,15 @@ fn code_run(parser: &mut CodeParser, text: &str, lines: &[Span]) -> Option<usize
             }
             source.push_str(line.source_text(text));
         }
-        let ends_with_comma = |at: usize| lines[at].source_text(text).ends_with(',');
+        if parser.budget < source.len() {
+            return None;
+        }
         end = match parser.read(&source) {
             Reading::Code => return Some(end),
             _ if end == 0 => return None,
-            Reading::Other => end - 1,
-            Reading::Fails { line } => {
-                // Only a run that ends with `,` is read as properties, so a shorter one past the
-                // error may still be: `retries: 3,` + `cause: pgCause,` above `see the docs`.
+            Reading::NotCode { line } => {
+                // Only a run that ends with `,` is read as properties, so a shorter one past `line`
+                // may still be: `retries: 3,` + `cause: pgCause,` above `see the docs`.
                 let properties = (!ends_with_comma(end))
                     .then(|| (line..end).rev().find(|&at| ends_with_comma(at)))
                     .flatten();
@@ -287,18 +376,22 @@ fn code_run(parser: &mut CodeParser, text: &str, lines: &[Span]) -> Option<usize
 
 enum Reading {
     Code,
-    /// Parses, but as words that only look like code: a name, a label, `a - b`.
-    Other,
-    /// No reading parses; the furthest error is on this line of the text.
-    Fails {
+    /// No reading is code, nor in a run that ends on this line of the text or past it.
+    NotCode {
         line: usize,
     },
 }
+
+/// Bytes a block may parse per byte of its text. A run that stops parsing only at its end
+/// (`// a(` on every line) gets one line shorter per try, and every line starts a run, so a long
+/// block of such lines would cost the cube of its length; past the budget the rest is prose.
+const PARSE_BUDGET: usize = 256;
 
 struct CodeParser {
     allocator: Allocator,
     source_type: SourceType,
     wrapped: String,
+    budget: usize,
 }
 
 impl CodeParser {
@@ -307,39 +400,33 @@ impl CodeParser {
             allocator: Allocator::default(),
             source_type: SourceType::ts().with_jsx(jsx),
             wrapped: String::new(),
+            budget: 0,
         }
     }
 
-    /// Reads `source` as statements, as class members, as object properties (a run that ends
-    /// with `,`) and as decorators (a run that starts with `@`).
     fn read(&mut self, source: &str) -> Reading {
-        let readings: [(Wrap, bool); 4] = [
+        let readings = [
             (Wrap::Statements, true),
             (Wrap::Members, true),
             (Wrap::Properties, source.trim_end().ends_with(',')),
             (Wrap::Decorators, source.trim_start().starts_with('@')),
         ];
-        let mut parsed = false;
         let mut furthest = 0;
         for (wrap, applies) in readings {
             if !applies {
                 continue;
             }
             match self.parse(source, wrap) {
-                Ok(true) => return Reading::Code,
-                Ok(false) => parsed = true,
+                Ok(()) => return Reading::Code,
                 Err(line) => furthest = furthest.max(line),
             }
         }
-        if parsed {
-            Reading::Other
-        } else {
-            Reading::Fails { line: furthest }
-        }
+        Reading::NotCode { line: furthest }
     }
 
-    /// `Ok(is code)` when the wrapped source parses, else `Err(line of the first error)`.
-    fn parse(&mut self, source: &str, wrap: Wrap) -> Result<bool, usize> {
+    /// `Ok` when the wrapped source reads as code, else `Err` with the line of the first error or
+    /// of the end of the first node that is not code.
+    fn parse(&mut self, source: &str, wrap: Wrap) -> Result<(), usize> {
         let (before, after) = match wrap {
             Wrap::Statements => ("", ""),
             Wrap::Members => ("class _ {\n", "\n}"),
@@ -348,6 +435,7 @@ impl CodeParser {
         };
         self.wrapped.clear();
         self.wrapped.extend([before, source, after]);
+        self.budget = self.budget.saturating_sub(self.wrapped.len());
         let wrapped = self.wrapped.as_str();
         self.allocator.reset();
         let parsed = Parser::new(&self.allocator, wrapped, self.source_type)
@@ -358,7 +446,7 @@ impl CodeParser {
                 ..ParseOptions::default()
             })
             .parse();
-        if let Some(offset) = parsed
+        let error = parsed
             .diagnostics
             .iter()
             .flat_map(|diagnostic| {
@@ -368,13 +456,21 @@ impl CodeParser {
                     .map(|label| label.offset() as usize)
             })
             .min()
-            .or_else(|| parsed.diagnostics.first().map(|_| wrapped.len()))
-        {
-            let line = wrapped[..offset.min(wrapped.len())].matches('\n').count();
-            let shift = before.matches('\n').count();
-            return Err(line.saturating_sub(shift));
-        }
-        Ok(is_code(&parsed.program, wrapped, wrap))
+            .or_else(|| parsed.diagnostics.first().map(|_| wrapped.len()));
+        let offset = match error {
+            Some(offset) => offset,
+            None => match not_code_end(&parsed.program, wrapped, wrap) {
+                Some(end) => end as usize,
+                None => return Ok(()),
+            },
+        };
+        // In bytes: an offset of oxc may fall inside a char.
+        let line = wrapped.as_bytes()[..offset.min(wrapped.len())]
+            .iter()
+            .filter(|&&byte| byte == b'\n')
+            .count();
+        let shift = before.matches('\n').count();
+        Err(line.saturating_sub(shift))
     }
 }
 
@@ -386,59 +482,68 @@ enum Wrap {
     Decorators,
 }
 
-fn is_code(program: &Program<'_>, source: &str, wrap: Wrap) -> bool {
+/// `None` when the reading is code, else where its first node that is not code ends: the end of
+/// the text when the reading holds no nodes of its kind.
+fn not_code_end(program: &Program<'_>, source: &str, wrap: Wrap) -> Option<u32> {
     let body: Vec<&Statement> = program
         .body
         .iter()
         .filter(|statement| !matches!(statement, Statement::EmptyStatement(_)))
         .collect();
+    let whole = Some(source.len() as u32);
     match (wrap, body.as_slice()) {
-        (Wrap::Statements, []) => false,
+        (Wrap::Statements, []) => whole,
         (Wrap::Statements, statements) => statements
             .iter()
-            .all(|statement| is_code_statement(statement, source)),
-        (Wrap::Members, [Statement::ClassDeclaration(class)]) => {
-            !class.body.body.is_empty()
-                && class
-                    .body
-                    .body
-                    .iter()
-                    .all(|member| is_code_member(member, source))
+            .find(|statement| !is_code_statement(statement, source))
+            .map(|statement| statement.span().end),
+        (Wrap::Members, [Statement::ClassDeclaration(class)]) if !class.body.body.is_empty() => {
+            class
+                .body
+                .body
+                .iter()
+                .find(|member| !is_code_member(member, source))
+                .map(|member| member.span().end)
         }
         (Wrap::Properties, [Statement::ExpressionStatement(statement)]) => {
-            match statement.expression.without_parentheses() {
-                Expression::ObjectExpression(object) => {
-                    !object.properties.is_empty()
-                        && object.properties.iter().all(|property| match property {
-                            ObjectPropertyKind::ObjectProperty(property) => {
-                                match &property.value {
-                                    // `Note: important,` is words; `cause: pgCause,` and
-                                    // `'x-api-key': key,` are a property.
-                                    Expression::Identifier(value) => {
-                                        is_code_name(&value.name)
-                                            || !property.shorthand
-                                                && property.key.static_name().is_none_or(|key| {
-                                                    is_code_name(&key)
-                                                        || !property.key.is_identifier()
-                                                })
-                                    }
-                                    _ => true,
-                                }
-                            }
-                            ObjectPropertyKind::SpreadProperty(_) => false,
-                        })
-                }
-                _ => false,
+            match &statement.expression {
+                Expression::ObjectExpression(object) if !object.properties.is_empty() => object
+                    .properties
+                    .iter()
+                    .find(|property| !is_code_property(property))
+                    .map(|property| property.span().end),
+                _ => whole,
             }
         }
-        (Wrap::Decorators, [Statement::ClassDeclaration(class)]) => {
-            !class.decorators.is_empty()
-                && class
-                    .decorators
-                    .iter()
-                    .all(|decorator| matches!(decorator.expression, Expression::CallExpression(_)))
+        (Wrap::Decorators, [Statement::ClassDeclaration(class)])
+            if !class.decorators.is_empty() =>
+        {
+            class
+                .decorators
+                .iter()
+                .find(|decorator| !matches!(decorator.expression, Expression::CallExpression(_)))
+                .map(|decorator| decorator.span.end)
         }
-        _ => false,
+        _ => whole,
+    }
+}
+
+fn is_code_property(property: &ObjectPropertyKind<'_>) -> bool {
+    match property {
+        ObjectPropertyKind::ObjectProperty(property) => match &property.value {
+            // `Note: important,` is words; `cause: pgCause,` and `'x-api-key': key,` are a
+            // property.
+            Expression::Identifier(value) => {
+                is_code_name(&value.name)
+                    || !property.shorthand
+                        && property
+                            .key
+                            .static_name()
+                            .is_none_or(|key| is_code_name(&key) || !property.key.is_identifier())
+            }
+            _ => true,
+        },
+        ObjectPropertyKind::SpreadProperty(_) => false,
     }
 }
 
@@ -488,12 +593,15 @@ fn is_code_statement(statement: &Statement<'_>, source: &str) -> bool {
 }
 
 fn is_code_expression(expression: &Expression<'_>, terminated: bool, source: &str) -> bool {
-    // `Retries (3)` and ``overwrites `species` `` are words; code writes `retry(3)`.
+    // `Retries (3)` and ``overwrites `species` `` are words; code writes `retry(3)`. Nor does code
+    // put a space after the `.` of a member: `e.g. refresh()` is words too.
     let touches = |callee: &Expression<'_>| {
         !source[callee.span().end as usize..].starts_with(char::is_whitespace)
+            && !callee.span().source_text(source).contains(". ")
     };
     match expression.get_inner_expression() {
         Expression::CallExpression(call) => terminated || touches(&call.callee),
+        Expression::JSXElement(_) | Expression::JSXFragment(_) => true,
         Expression::TaggedTemplateExpression(tagged) => terminated || touches(&tagged.tag),
         Expression::ImportExpression(_)
         | Expression::UpdateExpression(_)
@@ -516,12 +624,10 @@ fn is_code_expression(expression: &Expression<'_>, terminated: bool, source: &st
                 || !expression.operator.is_arithmetic()
                     && is_code_expression(&expression.argument, false, source)
         }
-        Expression::ChainExpression(chain) => {
-            matches!(
-                chain.expression,
-                oxc_ast::ast::ChainElement::CallExpression(_)
-            )
-        }
+        Expression::ChainExpression(chain) => match &chain.expression {
+            ChainElement::CallExpression(call) => terminated || touches(&call.callee),
+            _ => false,
+        },
         Expression::AssignmentExpression(assignment) => {
             terminated
                 || assignment.left.is_member_expression()

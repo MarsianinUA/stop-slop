@@ -1,4 +1,5 @@
-use std::collections::{BTreeSet, HashSet};
+use std::cell::LazyCell;
+use std::collections::HashSet;
 
 use kit::prelude::*;
 
@@ -15,15 +16,18 @@ impl Rule for Check {
             .facts()
             .package(file.path)
             .map(|package| &package.dependencies);
-        let mut names = None;
+        // Collected on the first sentence that needs them: a lookup per sentence would walk every
+        // node again.
+        let names = LazyCell::new(|| names_in_file(file));
+        let known = |word: &str| {
+            dependencies.is_some_and(|packages| packages.contains(word)) || names.contains(word)
+        };
         for block in comment_blocks(file) {
-            // `/* force */` between tokens labels the code after it.
             if is_inside_code(file, block.span) {
                 continue;
             }
             for (first, last) in sentences(file.text, &block) {
-                let opening = first.source_text(file.text).trim();
-                let starts = starts_as_sentence(file, dependencies, &mut names, opening);
+                let starts = starts_as_sentence(first.source_text(file.text).trim(), known);
                 let ends = ends_as_sentence(last.source_text(file.text).trim());
                 let problem = match (starts, ends) {
                     (true, true) => continue,
@@ -41,11 +45,17 @@ impl Rule for Check {
     }
 }
 
-/// A doc comment before a declaration on its line and a note after the code (with other comments
-/// after it) are judged.
+/// A `/* */` between the tokens of a line labels the code next to it: `f(/* force */ true)`,
+/// `catch { /* ignore */ }`. A doc comment before a declaration on its line and a note after the
+/// code are comments of their own.
 fn is_inside_code(file: &File<'_>, span: Span) -> bool {
     let before = &file.text[line_start(file.text, span.start) as usize..span.start as usize];
-    !before.trim().is_empty() && line_tail(file, span.end).is_none()
+    !before.trim().is_empty()
+        && line_tail(file, span.end).is_none_or(|(end, _)| {
+            file.text[end as usize..]
+                .trim_start_matches([' ', '\t'])
+                .starts_with('}')
+        })
 }
 
 fn indent(text: &str, line: Span) -> usize {
@@ -53,11 +63,18 @@ fn indent(text: &str, line: Span) -> usize {
     body.len() - body.trim_start().len()
 }
 
+/// Where the line's text stands on its line of the file: the lines of a block line up by it,
+/// whether they follow `//`, a ` * ` gutter or the `/*` itself.
+fn column(text: &str, line: Span) -> usize {
+    (line.start - line_start(text, line.start)) as usize + indent(text, line)
+}
+
 /// The first and last line of each sentence in the block. Not sentences: code and directives,
 /// a `TODO` and the rest of its paragraph, everything after a line that ends with `:`
-/// (`Example:`, `Steps:` introduce what follows), a paragraph indented deeper than the block
-/// (a listing), a list, a table, a fenced example, a Markdown heading, doc tags (`@param`) and
-/// the rest of the block after them, and text without letters (`// -----`).
+/// (`Example:`, `Steps:` introduce what follows), a paragraph indented two columns or more
+/// deeper than the block (a listing), a list, a table, a fenced example, a Markdown heading, doc
+/// tags (`@param`) and the rest of the block after them, a lone inline tag (`{@inheritDoc}`),
+/// and lines without letters or digits (`// -----` over and under a title).
 fn sentences(text: &str, block: &CommentBlock) -> Vec<(Span, Span)> {
     // Commented-out code keeps the indent of the code, not of the text around it.
     let base = block
@@ -65,22 +82,28 @@ fn sentences(text: &str, block: &CommentBlock) -> Vec<(Span, Span)> {
         .iter()
         .filter(|part| part.kind == CommentKind::Prose)
         .flat_map(|part| &part.lines)
-        .map(|&line| indent(text, line))
+        .map(|&line| column(text, line))
         .min()
         .unwrap_or(0);
     let mut sentences = Vec::new();
     let mut fenced = false;
     let mut introduced = false;
     for part in &block.parts {
-        let mut skipped = part.kind != CommentKind::Prose || indent(text, part.lines[0]) > base;
+        // One column deeper is a habit of the writer (` *  more`), not a listing.
+        let listing = part.kind != CommentKind::Prose || column(text, part.lines[0]) > base + 1;
+        let mut skipped = listing;
         let mut sentence: Option<(Span, Span)> = None;
         for &line in &part.lines {
             let body = line.source_text(text).trim();
             let fence = body.starts_with("```") || body.starts_with("~~~");
             fenced ^= fence;
-            introduced |= body.starts_with('@') && body[1..].starts_with(char::is_alphabetic);
+            // A decorator in commented-out code or in an example is no doc tag.
+            introduced |= !listing && !fence && !fenced && is_tag(body);
             skipped |= body.starts_with('|') || is_todo(body) || is_list_item(body);
-            if fence || fenced || introduced || skipped || is_heading(body) {
+            let aside = !body.contains(char::is_alphanumeric)
+                || body.starts_with("{@") && body.ends_with('}')
+                || is_heading(body);
+            if fence || fenced || introduced || skipped || aside {
                 push(&mut sentences, sentence.take(), text);
                 continue;
             }
@@ -100,6 +123,12 @@ fn push(sentences: &mut Vec<(Span, Span)>, sentence: Option<(Span, Span)>, text:
     {
         sentences.push((first, last));
     }
+}
+
+/// `@param`, `@returns`.
+fn is_tag(body: &str) -> bool {
+    body.strip_prefix('@')
+        .is_some_and(|rest| rest.starts_with(char::is_alphabetic))
 }
 
 /// `## Example`.
@@ -126,13 +155,8 @@ fn is_list_item(body: &str) -> bool {
 
 /// A capital letter, a character with no case (`2^53`, `` `x` ``, `$1`), or a name from the code
 /// as it is written: one only code would spell (`outboxSeq`, `node-redis`, `base64url`), a
-/// literal (`null`), a name the file uses, or a package the file can import (`viem`).
-fn starts_as_sentence<'a>(
-    file: &File<'a>,
-    dependencies: Option<&BTreeSet<String>>,
-    names: &mut Option<HashSet<&'a str>>,
-    body: &str,
-) -> bool {
+/// literal (`null`), or a `known` name (the file declares or imports it, a dependency: `viem`).
+fn starts_as_sentence(body: &str, known: impl Fn(&str) -> bool) -> bool {
     if !body.starts_with(char::is_lowercase) {
         return true;
     }
@@ -144,40 +168,59 @@ fn starts_as_sentence<'a>(
     word.chars()
         .any(|ch| !ch.is_lowercase() && ch != '\'' && ch != '’')
         || matches!(word, "null" | "undefined" | "true" | "false")
-        || dependencies.is_some_and(|names| names.contains(word))
-        || names
-            .get_or_insert_with(|| names_in_file(file))
-            .contains(word)
+        || known(word)
 }
 
-/// Collected once per file, on the first sentence that needs it: a lookup per sentence would walk
-/// every node again.
+/// The names the file declares or imports, and the modules it imports. A member the file only
+/// reads or calls (`cache.get(..)`) is not one of them: `get`, `set` and `map` are words as well.
 fn names_in_file<'a>(file: &File<'a>) -> HashSet<&'a str> {
-    file.semantic
-        .nodes()
+    let nodes = file.semantic.nodes();
+    nodes
         .iter()
         .flat_map(|node| match node.kind() {
-            AstKind::IdentifierName(name) => [Some(name.name.as_str()), None],
-            AstKind::IdentifierReference(name) => [Some(name.name.as_str()), None],
             AstKind::BindingIdentifier(name) => [Some(name.name.as_str()), None],
-            AstKind::StringLiteral(literal) => {
-                let value = literal.value.as_str();
-                [Some(value), Some(package_name(value))]
+            AstKind::IdentifierName(name) if declares(nodes.parent_kind(node.id())) => {
+                [Some(name.name.as_str()), None]
             }
-            _ => [None, None],
+            kind => match module_source(file, kind) {
+                Some(source) => {
+                    let value = source.value.as_str();
+                    [Some(value), Some(package_name(value))]
+                }
+                None => [None, None],
+            },
         })
         .flatten()
         .collect()
 }
 
-/// `.`, `?`, `!`, `:` or `…`, also before a closing quote, bracket or backtick; or a link,
-/// which a period would break.
+/// The parent of a name declares it: a key of an object, a class, an interface or an enum, or a
+/// name an import or an export lists.
+fn declares(parent: AstKind<'_>) -> bool {
+    matches!(
+        parent,
+        AstKind::ObjectProperty(_)
+            | AstKind::PropertyDefinition(_)
+            | AstKind::MethodDefinition(_)
+            | AstKind::AccessorProperty(_)
+            | AstKind::TSPropertySignature(_)
+            | AstKind::TSMethodSignature(_)
+            | AstKind::TSEnumMember(_)
+            | AstKind::ImportSpecifier(_)
+            | AstKind::ExportSpecifier(_)
+    )
+}
+
+/// `.`, `?`, `!`, `:` or `…` (and `。`, `？`, `！`), also before a closing quote, bracket or
+/// backtick; or a link, which a period would break.
 fn ends_as_sentence(body: &str) -> bool {
     let last_word = body.rsplit(char::is_whitespace).next().unwrap_or("");
     let link = last_word.trim_start_matches(['(', '<', '[']);
     link.starts_with("https://")
         || link.starts_with("http://")
         || body
-            .trim_end_matches([')', ']', '"', '\'', '`', '*', '_', '”', '’', '»'])
-            .ends_with(['.', '?', '!', ':', '…'])
+            .trim_end_matches([
+                ')', ']', '"', '\'', '`', '*', '_', '”', '’', '»', '」', '』',
+            ])
+            .ends_with(['.', '?', '!', ':', '…', '。', '？', '！'])
 }
