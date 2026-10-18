@@ -1229,6 +1229,88 @@ fn global_value_nullable_type_and_outer_assertion_read_through_the_syntax() {
 }
 
 #[test]
+fn global_member_is_a_static_member_of_a_global_value() {
+    let text = "import { Reflect as R } from 'reflect';
+const JSON = { parse: (text: string) => text };
+export const calls = [Reflect.get(a, 'k'), Reflect['apply'](f, a, []), Reflect?.get(a, 'k'),
+  (Reflect as any).get(a, 'k'), (Object.freeze)({}), Reflect[key](a), R.get(a, 'k'),
+  JSON.parse('1'), get(a), (Reflect.get as typeof Reflect.get)(a, 'k')];";
+    with_file(text, |file| {
+        let members: Vec<Option<(&str, &str)>> = file
+            .semantic
+            .nodes()
+            .iter()
+            .filter_map(|node| match node.kind() {
+                AstKind::CallExpression(call) => Some(global_member(file, &call.callee)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            members,
+            [
+                Some(("Reflect", "get")),
+                Some(("Reflect", "apply")),
+                Some(("Reflect", "get")),
+                Some(("Reflect", "get")),
+                Some(("Object", "freeze")),
+                None,
+                None,
+                None,
+                None,
+                Some(("Reflect", "get")),
+            ]
+        );
+    });
+}
+
+#[test]
+fn declared_is_the_annotation_or_the_value_of_a_const() {
+    let text = "export function f(typed: number[], untyped, { part }: { part: number[] }, ...rest: string[]) {
+  const value = [1];
+  const marked: string[] = [];
+  let open = [1];
+  let typedLet: number[] = [];
+  const { taken } = { taken: [1] };
+  return [typed, untyped, part, rest, value, marked, open, typedLet, taken, f, Math];
+}";
+    with_file(text, |file| {
+        let declared: Vec<Option<String>> = file
+            .semantic
+            .nodes()
+            .iter()
+            .filter_map(|node| match node.kind() {
+                AstKind::ArrayExpression(array) if array.elements.len() > 2 => Some(array),
+                _ => None,
+            })
+            .flat_map(|array| array.elements.iter().filter_map(|e| e.as_expression()))
+            .map(|element| {
+                let Expression::Identifier(id) = element else {
+                    return None;
+                };
+                declared(file, id).map(|(_, declared)| match declared {
+                    Declared::Annotation(ty) => format!("type {}", source(file, ty)),
+                    Declared::Const(value) => format!("const {}", source(file, value)),
+                })
+            })
+            .collect();
+        let expected = [
+            Some("type number[]"),
+            None,
+            None,
+            Some("type string[]"),
+            Some("const [1]"),
+            Some("type string[]"),
+            None,
+            Some("type number[]"),
+            None,
+            None,
+            None,
+        ];
+        assert_eq!(declared, expected.map(|text| text.map(String::from)));
+    });
+}
+
+#[test]
 fn global_references_are_the_references_no_declaration_or_import_holds() {
     let text = "import { log } from './log';
 console.log(1);
@@ -2225,6 +2307,28 @@ export let config: ConfigService | Logger;";
 }
 
 #[test]
+fn imported_from_is_the_name_a_package_or_its_subpath_exports() {
+    let text = "import { Get as Route } from '@nestjs/common';
+import { Scope } from '@nestjs/common/interfaces';
+import { Inject } from '@nestjs/commonx';
+import { Get } from './common';
+import * as common from '@nestjs/common';
+export const all = [Route, Scope, Inject, Get, common];";
+    with_file(text, |file| {
+        let names: Vec<Option<&str>> = file
+            .semantic
+            .nodes()
+            .iter()
+            .filter_map(|node| match node.kind() {
+                AstKind::IdentifierReference(id) => Some(imported_from(file, id, "@nestjs/common")),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(names, [Some("Get"), Some("Scope"), None, None, None]);
+    });
+}
+
+#[test]
 fn line_helpers_find_line_starts_blank_lines_regions_and_line_tails() {
     assert_eq!(line_start("ab\ncd", 4), 3);
     assert_eq!(line_start("ab", 1), 0);
@@ -2316,7 +2420,7 @@ declare function now(): number;
 declare function tag(strings: TemplateStringsArray, ...values: unknown[]): string;
 const a = 'x', b = null, c = a, d = a ? 'y' : 'z', e = pick('k'), f = tag`${a}`, g = now(),
   h = pick(now()), i = { a }, j = [a], k = () => a, l = new Date(), m = a + a, n = `${a}`, o = a as string,
-  p = /x/, q = `t`, u = tag`plain`;
+  p = /x/, q = `t`, u = tag`plain`, v = this, w = pick(this);
 export const shared = 1;
 const kept = 'k', compared = 'c', passed = 'p', aliased = 's';
 const uses = [`${kept}`, kept.length, !kept, kept + 1, compared === 'd', pick(passed)];
@@ -2326,7 +2430,7 @@ async function wait(): Promise<void> {
   const r = await pick('w'), s = await now();
   if (kept) {}
 }
-export { b, c, d, e, f, g, h, i, j, k, l, m, n, o, p, q, u, uses, alias, widened, wait };";
+export { b, c, d, e, f, g, h, i, j, k, l, m, n, o, p, q, u, v, w, uses, alias, widened, wait };";
     with_file(text, |file| {
         let narrows: Vec<bool> = file
             .semantic
@@ -2343,8 +2447,8 @@ export { b, c, d, e, f, g, h, i, j, k, l, m, n, o, p, q, u, uses, alias, widened
             narrows,
             [
                 true, true, true, true, true, true, false, false, false, false, false, false,
-                false, false, false, false, true, false, true, true, true, true, true, false, true,
-                true, true, false
+                false, false, false, false, true, false, false, false, true, true, true, true,
+                true, false, true, true, true, false
             ]
         );
         let relies = |name: &str| relies_on_wide_type(file, symbol_named(file, name));
@@ -2376,7 +2480,7 @@ export function arrays(typed: number[], frozen: readonly number[], lib: Array<nu
   return [
     [1, 2], literal, alias, typed, frozen, lib, read, pair, maybe, typed.filter(Boolean),
     typed?.slice(), typed.map(String).sort(), Array.from(set), Array.of(1), Object.keys({}),
-    Object.entries({}), literal as number[], literal!, grown, more,
+    Object.entries({}), literal as number[], literal!, grown, more, typed.with(0, 1),
     written, unwritten, head, loaded, untyped, set, rows.filter(), load(), typed.find(Boolean),
     typed.at(0),
   ];
@@ -2405,7 +2509,7 @@ export function shadowed(Array: { from(value: unknown): number[] }) {
             known,
             [
                 true, true, true, true, true, true, true, true, true, true, true, true, true, true,
-                true, true, true, true, true, true, false, false, false, false, false, false,
+                true, true, true, true, true, true, true, false, false, false, false, false, false,
                 false, false, false, false, false, false
             ]
         );
@@ -2424,6 +2528,24 @@ fn cli_script_starts_with_a_hashbang_or_sits_in_a_script_folder() {
     ] {
         with_file_at(path, text, |file| {
             assert_eq!(is_cli_script(file, &dirs), is_script, "{path}");
+        });
+    }
+}
+
+#[test]
+fn file_name_has_a_word_of_the_list_in_one_of_its_dotted_parts() {
+    let list = ["env".to_string(), "Response".to_string()];
+    for (path, has) in [
+        ("src/require-env.ts", true),
+        ("src/ENV.ts", true),
+        ("src/order.response.dto.ts", true),
+        ("src/orderResponse.ts", true),
+        ("src/environment.ts", false),
+        ("src/responses.ts", false),
+        ("src/env/client.ts", false),
+    ] {
+        with_file_at(path, "export {};", |file| {
+            assert_eq!(file_name_has_word(file, &list), has, "{path}");
         });
     }
 }

@@ -57,11 +57,9 @@ fn top_functions(file: &File<'_>) -> Vec<(Span, String, String)> {
     let nodes = file.semantic.nodes();
     let scoping = file.semantic.scoping();
     let body = &nodes.program().body;
-    let unit_of = |at: u32| {
-        let index = body.partition_point(|statement| statement.span().end <= at);
-        body.get(index)
-            .filter(|statement| statement.span().start <= at)
-    };
+    // The first statement that ends after the offset: the one that holds it, or the class whose
+    // decorators stand before its `export` (`@Injectable() export class A`), outside its span.
+    let unit_of = |at: u32| body.get(body.partition_point(|statement| statement.span().end <= at));
     let mut callees = Vec::new();
     for binding in top_bindings(file) {
         let [symbol] = binding.symbols[..] else {
@@ -73,40 +71,31 @@ fn top_functions(file: &File<'_>) -> Vec<(Span, String, String)> {
         let Some(own) = unit_of(binding.span.start).map(|unit| unit.span().start) else {
             continue;
         };
+        let references: Vec<&AstNode<'_>> = scoping
+            .get_resolved_references(symbol)
+            .filter(|reference| !reference.is_type())
+            .map(|reference| nodes.get_node(reference.node_id()))
+            .filter(|node| !matches!(nodes.parent_kind(node.id()), AstKind::ExportSpecifier(_)))
+            .collect();
         // A `const` function is not hoisted: code that runs on load must find it above.
         let is_hoisted = binding.init.is_none();
-        let mut callers = Vec::new();
-        let mut is_used_on_load = false;
-        for reference in scoping.get_resolved_references(symbol) {
-            let node = nodes.get_node(reference.node_id());
-            if reference.is_type()
-                || matches!(nodes.parent_kind(node.id()), AstKind::ExportSpecifier(_))
-            {
-                continue;
-            }
-            let Some(unit) = unit_of(node.span().start) else {
-                continue;
-            };
-            // Moving a hoisted `function` below a callback that runs on load is still safe.
-            let is_on_load = if is_hoisted {
-                deferred_by(file, node.id()).is_none()
-            } else {
-                runs_on_load(file, node.id())
-            };
-            if is_on_load {
-                is_used_on_load = true;
-                continue;
-            }
-            if unit.span().start == own {
-                continue;
-            }
-            if let Some(name) = unit_name(file, unit, node.span().start) {
-                callers.push((unit.span().start, name));
-            }
-        }
-        if is_used_on_load && !is_hoisted {
+        if !is_hoisted && references.iter().any(|node| runs_on_load(file, node.id())) {
             continue;
         }
+        // Only code that runs after the load calls; a hoisted `function` may still move below a
+        // callback that runs on load.
+        let callers = references
+            .iter()
+            .filter(|node| deferred_by(file, node.id()).is_some())
+            .filter_map(|node| {
+                let unit = unit_of(node.span().start)?;
+                let start = unit.span().start;
+                (start != own)
+                    .then(|| unit_name(file, unit, node.span().start))
+                    .flatten()
+                    .map(|name| (start, name))
+            })
+            .collect();
         callees.push(Callee {
             unit: own,
             span: binding.span,

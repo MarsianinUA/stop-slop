@@ -84,6 +84,7 @@ fn reducer(callback: &Expression<'_>) -> Option<(NodeId, SymbolId)> {
 /// `const alias = acc`: another name for the accumulator; a `let` may change what it holds.
 fn alias_of(file: &File<'_>, value: &AstNode<'_>) -> Option<SymbolId> {
     let nodes = file.semantic.nodes();
+    // A reference whose parent is the declarator is its `init`.
     let AstKind::VariableDeclarator(declarator) = nodes.parent_kind(value.id()) else {
         return None;
     };
@@ -94,7 +95,6 @@ fn alias_of(file: &File<'_>, value: &AstNode<'_>) -> Option<SymbolId> {
     let BindingPattern::BindingIdentifier(alias) = &declarator.id else {
         return None;
     };
-    // The value's parent is the declarator, so the value is its `init`.
     if !declaration.kind.is_const() {
         return None;
     }
@@ -121,27 +121,23 @@ fn copy_of(file: &File<'_>, value: &AstNode<'_>, is_array: bool) -> Option<Span>
             _ => None,
         },
         AstKind::CallExpression(call) => {
-            let callee = call.callee.get_inner_expression();
-            let is_copy = match callee.get_member_expr() {
-                Some(member) => {
-                    let owner = member.object().get_inner_expression();
-                    let target = call.arguments.first().and_then(Argument::as_expression);
-                    match member.static_property_name()? {
-                        // `Object.assign(acc, item)` fills the accumulator itself.
-                        "assign" => {
-                            is_global(file, owner, "Object")
-                                && target.is_some_and(|target| {
-                                    matches!(
-                                        target.get_inner_expression(),
-                                        Expression::ObjectExpression(_)
-                                    )
-                                })
-                        }
-                        "from" => is_global(file, owner, "Array") && is_first(&call.arguments),
-                        _ => false,
-                    }
+            let is_copy = match global_member(file, &call.callee) {
+                // `Object.assign(acc, item)` fills the accumulator itself.
+                Some(("Object", "assign")) => call
+                    .arguments
+                    .first()
+                    .and_then(Argument::as_expression)
+                    .is_some_and(|target| {
+                        matches!(
+                            target.get_inner_expression(),
+                            Expression::ObjectExpression(_)
+                        )
+                    }),
+                Some(("Array", "from")) => is_first(&call.arguments),
+                _ => {
+                    is_global(file, call.callee.get_inner_expression(), "structuredClone")
+                        && is_first(&call.arguments)
                 }
-                None => is_global(file, callee, "structuredClone") && is_first(&call.arguments),
             };
             is_copy.then_some(call.span)
         }

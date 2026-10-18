@@ -37,8 +37,8 @@ impl Rule for Check {
             return;
         };
         let file = cx.file();
-        let is_route = matches!(imported_name(file, callee),
-            Some((module, name)) if package_name(module) == "@nestjs/common" && ROUTES.contains(&name));
+        let is_route = imported_from(file, callee, "@nestjs/common")
+            .is_some_and(|name| ROUTES.contains(&name));
         if !is_route {
             return;
         }

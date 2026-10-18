@@ -154,15 +154,14 @@ fn is_number(file: &File<'_>, expression: &Expression<'_>, seen: &mut HashSet<Sy
         Expression::BinaryExpression(binary) => {
             binary.operator.is_arithmetic() || binary.operator.is_bitwise()
         }
-        Expression::CallExpression(call) => match &call.callee {
-            Expression::StaticMemberExpression(member) => {
-                is_global(file, &member.object, "Math")
-                    || (is_global(file, &member.object, "Date") && member.property.name == "now")
-            }
-            callee => ["Number", "parseInt", "parseFloat"]
+        Expression::CallExpression(call) => {
+            matches!(
+                global_member(file, &call.callee),
+                Some(("Math", _) | ("Date", "now"))
+            ) || ["Number", "parseInt", "parseFloat"]
                 .iter()
-                .any(|name| is_global(file, callee, name)),
-        },
+                .any(|name| is_global(file, &call.callee, name))
+        }
         Expression::Identifier(id) => file
             .semantic
             .scoping()

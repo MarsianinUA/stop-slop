@@ -13,10 +13,7 @@ impl Rule for Check {
         let AstKind::CallExpression(call) = node.kind() else {
             return;
         };
-        let Expression::StaticMemberExpression(callee) = call.callee.get_inner_expression() else {
-            return;
-        };
-        if callee.property.name != "all" || !is_global(file, &callee.object, "Promise") {
+        if global_member(file, &call.callee) != Some(("Promise", "all")) {
             return;
         }
         let Some(map) = call

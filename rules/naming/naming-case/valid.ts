@@ -74,3 +74,13 @@ export function pick(isAdmin: boolean): object {
   const Model = isAdmin ? Admin : Guest;
   return new Model();
 }
+
+declare function randomBytes(size: number): Uint8Array;
+let PEPPER = randomBytes(32);
+export const digest = [PEPPER];
+
+let attempts = 0;
+export function retry(): number {
+  attempts += 1;
+  return attempts;
+}

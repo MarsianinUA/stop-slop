@@ -55,3 +55,9 @@ export function both(isOn: boolean): boolean {
   const joined = first && second; // expect: boolean-prefix
   return joined;
 }
+
+export function kinds(input: unknown): boolean {
+  const list = Array.isArray(input); // expect: boolean-prefix
+  const whole = Number.isInteger(input); // expect: boolean-prefix
+  return list && whole;
+}

@@ -25,13 +25,10 @@ impl Rule for Check {
             return;
         };
         let file = cx.file();
-        let optional = match imported_name(file, callee) {
-            Some((module, name)) if package_name(module) == "@nestjs/swagger" => match name {
-                "ApiPropertyOptional" => true,
-                // `@ApiPropertyOptional()` is `@ApiProperty({ required: false })`.
-                "ApiProperty" => call.arguments.first().is_some_and(is_not_required),
-                _ => false,
-            },
+        let optional = match imported_from(file, callee, "@nestjs/swagger") {
+            Some("ApiPropertyOptional") => true,
+            // `@ApiPropertyOptional()` is `@ApiProperty({ required: false })`.
+            Some("ApiProperty") => call.arguments.first().is_some_and(is_not_required),
             _ => false,
         };
         if !optional {
@@ -68,11 +65,7 @@ impl Check {
         if has(&self.inputs, &class_words) {
             return false;
         }
-        file.path
-            .file_stem()
-            .unwrap_or_default()
-            .split('.')
-            .any(|part| has(&self.responses, &words(part)))
+        file_name_has_word(file, &self.responses)
     }
 }
 

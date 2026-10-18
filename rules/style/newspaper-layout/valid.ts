@@ -129,3 +129,18 @@ export function retries(): number {
 const toCell = (item: string): string => item.trim();
 
 export const GRID = [['a ']].map((row) => row.map((item) => toCell(item)));
+
+const tag = (): ClassDecorator => () => undefined;
+
+@tag()
+export class Tagged {
+  copy(): ClassDecorator {
+    return tag();
+  }
+}
+
+function seed(): number {
+  return 1;
+}
+
+export const SEED = seed();

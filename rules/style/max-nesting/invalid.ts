@@ -127,3 +127,17 @@ export function labels(): string[][] {
   }
   return all;
 }
+
+export function drain(queue: string[][]): void {
+  do {
+    for (const batch of queue) {
+      for (const item of batch) {
+        if (item) {
+          while (queue.length > 9) { // expect: max-nesting
+            queue.pop();
+          }
+        }
+      }
+    }
+  } while (queue.length > 0);
+}

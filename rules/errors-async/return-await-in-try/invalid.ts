@@ -41,3 +41,13 @@ export class Reader {
     }
   }
 }
+
+export async function retry(id: string): Promise<string> {
+  try {
+    return await load(id);
+  } catch {
+    return load(`retry:${id}`); // expect: return-await-in-try
+  } finally {
+    release();
+  }
+}

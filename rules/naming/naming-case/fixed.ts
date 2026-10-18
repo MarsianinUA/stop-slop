@@ -60,3 +60,9 @@ export { shared_label };
 
 const RUN_E2E_TIMEOUT_MS = 1000;
 export const limits = [RUN_E2E_TIMEOUT_MS];
+
+let RETRY_COUNT = 3;
+export const retries = [RETRY_COUNT];
+
+let pendingJob;
+export const jobs = [pendingJob];

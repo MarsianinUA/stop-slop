@@ -1,4 +1,4 @@
-use kit::oxc::ast::ast::{Decorator, Expression, MethodDefinitionKind};
+use kit::oxc::ast::ast::{Decorator, Expression, IdentifierReference, MethodDefinitionKind};
 use kit::prelude::*;
 
 #[derive(Deserialize)]
@@ -37,21 +37,21 @@ impl Rule for Check {
             return;
         }
         let file = cx.file();
-        let imports: Vec<Option<(&str, &str)>> = method
+        let names: Vec<Option<&str>> = method
             .decorators
             .iter()
-            .map(|decorator| called_import(file, decorator))
+            .map(|decorator| called(decorator).and_then(|callee| imported_from(file, callee, NEST)))
             .collect();
-        let names = || imports.iter().map(|&import| from_nest(import));
         // `@Redirect` answers with a status of its own.
-        if names()
+        if names
+            .iter()
             .flatten()
-            .any(|name| matches!(name, "HttpCode" | "Redirect"))
+            .any(|name| matches!(*name, "HttpCode" | "Redirect"))
         {
             return;
         }
-        let mut routes = names().enumerate().filter_map(|(index, name)| {
-            let (_, status) = ROUTES.iter().find(|(route, _)| Some(*route) == name)?;
+        let mut routes = names.iter().enumerate().filter_map(|(index, name)| {
+            let (_, status) = ROUTES.iter().find(|(route, _)| Some(*route) == *name)?;
             Some((index, *status))
         });
         let Some((first, status)) = routes.next() else {
@@ -63,10 +63,11 @@ impl Rule for Check {
         // route decorator the new one applies after those below it, so only Nest's own may stand
         // there; else it goes last, applies first, and a `HttpCode` hidden in a decorator of the
         // project still overrides it.
-        let anchor = if imports[first + 1..]
-            .iter()
-            .all(|import| import.is_some_and(|(module, _)| module.starts_with("@nestjs/")))
-        {
+        let anchor = if method.decorators[first + 1..].iter().all(|decorator| {
+            called(decorator)
+                .and_then(|callee| imported_name(file, callee))
+                .is_some_and(|(module, _)| module.starts_with("@nestjs/"))
+        }) {
             first
         } else {
             method.decorators.len() - 1
@@ -84,21 +85,15 @@ impl Rule for Check {
     }
 }
 
-/// The import a decorator calls: `@Get(':id')` -> `("@nestjs/common", "Get")`.
-fn called_import<'a>(file: &File<'a>, decorator: &Decorator<'_>) -> Option<(&'a str, &'a str)> {
+/// The name a decorator calls: `Get` of `@Get(':id')`.
+fn called<'d, 'a>(decorator: &'d Decorator<'a>) -> Option<&'d IdentifierReference<'a>> {
     let Expression::CallExpression(call) = &decorator.expression else {
         return None;
     };
     let Expression::Identifier(callee) = &call.callee else {
         return None;
     };
-    imported_name(file, callee)
-}
-
-fn from_nest<'a>(import: Option<(&'a str, &'a str)>) -> Option<&'a str> {
-    import
-        .filter(|(module, _)| package_name(module) == NEST)
-        .map(|(_, name)| name)
+    Some(callee)
 }
 
 /// `@HttpCode(HttpStatus.<status>)` on a line of its own under `anchor`, or after it on its line

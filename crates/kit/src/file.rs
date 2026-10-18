@@ -2,7 +2,7 @@ use camino::Utf8Path;
 use oxc_semantic::Semantic;
 use oxc_span::{GetSpan, Span};
 
-use crate::LineIndex;
+use crate::{LineIndex, words};
 
 pub struct File<'a> {
     /// Relative to the repo root, with `/`.
@@ -84,4 +84,14 @@ pub fn is_cli_script(file: &File<'_>, dirs: &[String]) -> bool {
             .path
             .parent()
             .is_some_and(|parent| parent.iter().any(|dir| dirs.iter().any(|d| d == dir)))
+}
+
+/// A word of the file's name is one of `list`, ignoring case: each part between dots goes through
+/// `words` (`require-env.ts` holds `env`, `order.response.dto.ts` holds `response`).
+pub fn file_name_has_word(file: &File<'_>, list: &[String]) -> bool {
+    file.path.file_stem().is_some_and(|stem| {
+        stem.split('.')
+            .flat_map(words)
+            .any(|word| list.iter().any(|item| item.eq_ignore_ascii_case(word)))
+    })
 }

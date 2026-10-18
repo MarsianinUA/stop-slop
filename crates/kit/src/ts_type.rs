@@ -2,8 +2,9 @@ use std::collections::HashSet;
 
 use oxc_ast::AstKind;
 use oxc_ast::ast::{
-    BindingPattern, Expression, FormalParameter, TSLiteral, TSSignature, TSType, TSTypeName,
-    TSTypeOperatorOperator, TSTypeReference, UnaryOperator, VariableDeclarationKind,
+    BindingPattern, Expression, FormalParameter, IdentifierReference, TSLiteral, TSSignature,
+    TSType, TSTypeName, TSTypeOperatorOperator, TSTypeReference, UnaryOperator,
+    VariableDeclarationKind,
 };
 use oxc_semantic::{AstNode, SymbolId};
 use oxc_span::GetSpan;
@@ -55,6 +56,23 @@ pub fn lib_type<'a>(
 pub fn is_global(file: &File<'_>, expression: &Expression<'_>, name: &str) -> bool {
     matches!(expression, Expression::Identifier(id)
         if id.name == name && file.semantic.is_reference_to_global_variable(id))
+}
+
+/// The global value and its member that the expression reads by a static name, through
+/// parentheses and assertions around both: `Reflect.get`, `Reflect['get']`, `Reflect?.get` and
+/// `(Reflect as any).get` give `("Reflect", "get")`.
+pub fn global_member<'a>(
+    file: &File<'_>,
+    expression: &'a Expression<'a>,
+) -> Option<(&'a str, &'a str)> {
+    let member = expression.get_member_expr()?;
+    let Expression::Identifier(object) = member.object().get_inner_expression() else {
+        return None;
+    };
+    let name = member.static_property_name()?;
+    file.semantic
+        .is_reference_to_global_variable(object)
+        .then_some((object.name.as_str(), name))
 }
 
 /// Every reference to the global value `name` (`process`, `console`) in the file: the
@@ -208,32 +226,69 @@ fn is_known(file: &File<'_>, expression: &Expression<'_>, seen: &mut HashSet<Sym
         | Expression::RegExpLiteral(_) => true,
         // `void 0` is `undefined`, which is not known, like `null`.
         Expression::UnaryExpression(unary) => unary.operator != UnaryOperator::Void,
-        Expression::Identifier(id) => {
-            let scoping = file.semantic.scoping();
-            let Some(symbol) = scoping.get_reference(id.reference_id()).symbol_id() else {
-                return false;
-            };
-            let nodes = file.semantic.nodes();
-            let declaration = scoping.symbol_declaration(symbol);
-            let (AstKind::VariableDeclarator(declarator), AstKind::VariableDeclaration(statement)) =
-                (nodes.kind(declaration), nodes.parent_kind(declaration))
-            else {
-                return false;
-            };
-            statement.kind == VariableDeclarationKind::Const
-                && matches!(declarator.id, BindingPattern::BindingIdentifier(_))
-                && declarator.type_annotation.is_none()
-                && seen.insert(symbol)
-                && !scoping
-                    .get_resolved_references(symbol)
-                    .any(|r| r.is_write())
-                && declarator
-                    .init
-                    .as_ref()
-                    .is_some_and(|init| is_known(file, init, seen))
-        }
+        Expression::Identifier(id) => match declared(file, id) {
+            Some((symbol, Declared::Const(value))) => {
+                seen.insert(symbol)
+                    && !file
+                        .semantic
+                        .scoping()
+                        .get_resolved_references(symbol)
+                        .any(|r| r.is_write())
+                    && is_known(file, value, seen)
+            }
+            _ => false,
+        },
         _ => false,
     }
+}
+
+/// What the declaration of a name in the file shows of its value.
+#[derive(Debug, Clone, Copy)]
+pub enum Declared<'a> {
+    /// Of a variable or a parameter: `rows: Row[]`.
+    Annotation(&'a TSType<'a>),
+    /// Of a `const` without one: `const limit = 10`.
+    Const(&'a Expression<'a>),
+}
+
+/// The symbol a name reads and what its declaration shows of the value: the annotation of the
+/// variable or parameter, else the value of a `const`. `None` for a name destructured from a
+/// pattern (an annotation types the whole pattern), a `let`, `var` or parameter without an
+/// annotation, an import, a function, a class and a global.
+pub fn declared<'a>(
+    file: &File<'a>,
+    id: &IdentifierReference<'_>,
+) -> Option<(SymbolId, Declared<'a>)> {
+    let scoping = file.semantic.scoping();
+    let symbol = scoping.get_reference(id.reference_id()).symbol_id()?;
+    let nodes = file.semantic.nodes();
+    let declaration = scoping.symbol_declaration(symbol);
+    let (pattern, annotation, const_value) =
+        match (nodes.kind(declaration), nodes.parent_kind(declaration)) {
+            (AstKind::VariableDeclarator(declarator), AstKind::VariableDeclaration(statement)) => (
+                &declarator.id,
+                &declarator.type_annotation,
+                declarator
+                    .init
+                    .as_ref()
+                    .filter(|_| statement.kind.is_const()),
+            ),
+            (AstKind::FormalParameter(parameter), _) => {
+                (&parameter.pattern, &parameter.type_annotation, None)
+            }
+            (AstKind::FormalParameterRest(parameter), _) => {
+                (&parameter.rest.argument, &parameter.type_annotation, None)
+            }
+            _ => return None,
+        };
+    if !matches!(pattern, BindingPattern::BindingIdentifier(_)) {
+        return None;
+    }
+    let declared = match annotation {
+        Some(annotation) => Declared::Annotation(&annotation.type_annotation),
+        None => Declared::Const(const_value?),
+    };
+    Some((symbol, declared))
 }
 
 /// A literal value: `'orders'`, `50`, `-1`, `60 * 1000`, `true`, a template without `${}`, also
@@ -266,8 +321,8 @@ pub fn is_literal_value(expression: &Expression<'_>) -> bool {
 /// field widen it: `'fast'` is `'fast'`, not `string`; so are `null`, `Kind.User`,
 /// `cond ? 'a' : 'b'`, a name or member that may hold such a literal, and a call or tagged
 /// template given such a value (`pick('fast')` of `pick<T>(value: T): T`), also under `await`.
-/// An object, array, function, class, `new`, another call, regex, `a + b`, a template with
-/// `${}`, `x as T` and `<T>x` keep their type.
+/// An object, array, function, class, `new`, `this` (never a literal type), another call, regex,
+/// `a + b`, a template with `${}`, `x as T` and `<T>x` keep their type.
 pub fn narrows_to_literal(value: &Expression<'_>) -> bool {
     match value {
         Expression::CallExpression(call) => call
@@ -287,6 +342,7 @@ pub fn narrows_to_literal(value: &Expression<'_>) -> bool {
                 | Expression::ArrowFunctionExpression(_)
                 | Expression::ClassExpression(_)
                 | Expression::NewExpression(_)
+                | Expression::ThisExpression(_)
                 | Expression::RegExpLiteral(_)
                 | Expression::BinaryExpression(_)
                 | Expression::TSAsExpression(_)
@@ -366,6 +422,7 @@ const ARRAY_METHODS: &[&str] = &[
     "toSorted",
     "toReversed",
     "toSpliced",
+    "with",
 ];
 
 /// The value is an array, as its syntax shows: an array literal; one of `ARRAY_METHODS` called on
@@ -388,53 +445,29 @@ fn is_array(file: &File<'_>, expression: &Expression<'_>, seen: &mut HashSet<Sym
         let Some(method) = member.static_property_name() else {
             return false;
         };
-        let object = member.object().get_inner_expression();
-        return ARRAY_METHODS.contains(&method) && is_array(file, object, seen)
-            || matches!(method, "from" | "of") && is_global(file, object, "Array")
-            || matches!(method, "keys" | "values" | "entries")
-                && is_global(file, object, "Object");
+        return ARRAY_METHODS.contains(&method)
+            && is_array(file, member.object().get_inner_expression(), seen)
+            || matches!(
+                global_member(file, &call.callee),
+                Some(("Array", "from" | "of") | ("Object", "keys" | "values" | "entries"))
+            );
     }
     let id = match expression.get_inner_expression() {
         Expression::ArrayExpression(_) => return true,
         Expression::Identifier(id) => id,
         _ => return false,
     };
-    let scoping = file.semantic.scoping();
-    let Some(symbol) = scoping.get_reference(id.reference_id()).symbol_id() else {
+    let Some((symbol, declared)) = declared(file, id) else {
         return false;
     };
     if !seen.insert(symbol) {
         return false;
     }
-    let nodes = file.semantic.nodes();
-    let declaration = scoping.symbol_declaration(symbol);
-    let (pattern, annotation, const_init) =
-        match (nodes.kind(declaration), nodes.parent_kind(declaration)) {
-            (AstKind::VariableDeclarator(declarator), AstKind::VariableDeclaration(statement)) => (
-                &declarator.id,
-                &declarator.type_annotation,
-                declarator
-                    .init
-                    .as_ref()
-                    .filter(|_| statement.kind.is_const()),
-            ),
-            (AstKind::FormalParameter(parameter), _) => {
-                (&parameter.pattern, &parameter.type_annotation, None)
-            }
-            (AstKind::FormalParameterRest(parameter), _) => {
-                (&parameter.rest.argument, &parameter.type_annotation, None)
-            }
-            _ => return false,
-        };
-    // The annotation of a destructuring pattern types the whole value, not this name.
-    if !matches!(pattern, BindingPattern::BindingIdentifier(_)) {
-        return false;
-    }
-    if let Some(annotation) = annotation {
+    match declared {
         // Whatever is written to the name later is of this type too.
-        return is_array_type(file, &annotation.type_annotation);
+        Declared::Annotation(ty) => is_array_type(file, ty),
+        Declared::Const(value) => is_array(file, value, seen),
     }
-    const_init.is_some_and(|init| is_array(file, init, seen))
 }
 
 fn is_array_type(file: &File<'_>, ty: &TSType<'_>) -> bool {

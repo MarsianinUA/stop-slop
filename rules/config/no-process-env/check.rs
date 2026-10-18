@@ -12,7 +12,7 @@ pub struct Check {
 impl Rule for Check {
     fn on_file<'a>(&self, cx: &mut Cx<'_, 'a>) {
         let file = cx.file();
-        if kit::suffix_of(file.path) == Some("config") || self.is_helper(file) {
+        if kit::suffix_of(file.path) == Some("config") || file_name_has_word(file, &self.helpers) {
             return;
         }
         let scoping = file.semantic.scoping();
@@ -30,18 +30,6 @@ impl Rule for Check {
             cx.report(span)
                 .arg("access", one_line(span.source_text(file.text)));
         }
-    }
-}
-
-impl Check {
-    fn is_helper(&self, file: &File<'_>) -> bool {
-        file.path.file_stem().is_some_and(|stem| {
-            stem.split('.').flat_map(words).any(|word| {
-                self.helpers
-                    .iter()
-                    .any(|helper| helper.eq_ignore_ascii_case(word))
-            })
-        })
     }
 }
 

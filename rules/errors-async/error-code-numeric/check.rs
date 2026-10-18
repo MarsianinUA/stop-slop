@@ -70,10 +70,7 @@ fn code_object<'a>(file: &File<'_>, value: &'a Expression<'a>) -> Option<&'a Obj
         return Some(object);
     }
     let call = call_of(value)?;
-    let Expression::StaticMemberExpression(method) = call.callee.get_inner_expression() else {
-        return None;
-    };
-    if method.property.name != "freeze" || !is_global(file, &method.object, "Object") {
+    if global_member(file, &call.callee) != Some(("Object", "freeze")) {
         return None;
     }
     code_object(file, call.arguments.first()?.as_expression()?)

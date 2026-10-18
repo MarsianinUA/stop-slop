@@ -27,14 +27,21 @@ impl Rule for Check {
     }
 }
 
-/// The node sits in the block of a `try` of its own function, and that function is `async`:
-/// only there can the return be awaited.
+/// The node sits in the block of a `try` of its own function, or in its `catch` when a `finally`
+/// follows (it runs before the work ends), and that function is `async`: only there can the
+/// return be awaited.
 fn in_try_of_async(file: &File<'_>, node: &AstNode<'_>) -> bool {
     let mut in_try = false;
+    let span = node.span();
     for ancestor in file.semantic.nodes().ancestors(node.id()) {
         match ancestor.kind() {
             AstKind::TryStatement(statement) => {
-                in_try = in_try || statement.block.span.contains_inclusive(node.span());
+                let in_catch = statement.finalizer.is_some()
+                    && statement
+                        .handler
+                        .as_ref()
+                        .is_some_and(|handler| handler.body.span.contains_inclusive(span));
+                in_try = in_try || statement.block.span.contains_inclusive(span) || in_catch;
             }
             // An async generator's `return` already awaits its value.
             AstKind::Function(function) => {

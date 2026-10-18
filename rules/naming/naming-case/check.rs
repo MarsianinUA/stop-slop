@@ -174,10 +174,21 @@ fn variable_cases(
         return ANY;
     }
     let scoping = file.semantic.scoping();
-    let is_const = matches!(
-        file.semantic.nodes().parent_kind(declarator.node_id.get()),
-        AstKind::VariableDeclaration(declaration) if declaration.kind == VariableDeclarationKind::Const
-    );
+    // A `let` with a value that nothing reassigns is a constant but for the keyword, which
+    // `prefer-const` changes in the same pass: judged by the keyword, the two fixes would turn
+    // `let PEPPER = randomBytes(32)` into `const pepper`.
+    let is_const = match file.semantic.nodes().parent_kind(declarator.node_id.get()) {
+        AstKind::VariableDeclaration(declaration) => match declaration.kind {
+            VariableDeclarationKind::Const => true,
+            VariableDeclarationKind::Let => {
+                declarator.init.is_some()
+                    && !scoping.symbol_is_mutated(symbol)
+                    && !is_script_global(file, symbol)
+            }
+            _ => false,
+        },
+        _ => false,
+    };
     let in_module = scoping.symbol_scope_id(symbol) == scoping.root_scope_id();
     // The value with its assertion: `'a' as string` is not a fixed value.
     let value = declarator.init.as_ref();

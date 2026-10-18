@@ -14,22 +14,13 @@ impl Rule for Check {
     fn on_file<'a>(&self, cx: &mut Cx<'_, 'a>) {
         let file = cx.file();
         let body = &file.semantic.nodes().program().body;
-        if !exports_something(body) || self.is_entry(file) || is_cli_script(file, &self.dirs) {
+        if !exports_something(body)
+            || file_name_has_word(file, &self.entries)
+            || is_cli_script(file, &self.dirs)
+        {
             return;
         }
         report_load_time_work(body, cx);
-    }
-}
-
-impl Check {
-    fn is_entry(&self, file: &File<'_>) -> bool {
-        file.path.file_stem().is_some_and(|stem| {
-            stem.split('.').flat_map(words).any(|word| {
-                self.entries
-                    .iter()
-                    .any(|entry| entry.eq_ignore_ascii_case(word))
-            })
-        })
     }
 }
 

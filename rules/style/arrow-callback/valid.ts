@@ -65,3 +65,14 @@ export const helper = function () {
 export function declared(): number {
   return orders.length;
 }
+
+declare function Arg(value: unknown): ParameterDecorator;
+
+each(orders, function () {
+  class Reader {
+    read(@Arg(this) order: Order): string {
+      return order.id;
+    }
+  }
+  return new Reader();
+});

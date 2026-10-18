@@ -1,7 +1,6 @@
 use kit::oxc::ast::ast::{
-    AssignmentOperator, AssignmentTarget, BinaryOperator, BindingPattern, CallExpression,
-    ChainElement, Expression, IdentifierReference, LogicalOperator, TSType, TSTypeAnnotation,
-    UnaryOperator, VariableDeclarationKind,
+    AssignmentOperator, AssignmentTarget, BinaryOperator, CallExpression, ChainElement, Expression,
+    IdentifierReference, LogicalOperator, TSType, TSTypeAnnotation, UnaryOperator,
 };
 use kit::prelude::*;
 
@@ -161,31 +160,10 @@ fn is_boolean_binding(file: &File<'_>, id: &IdentifierReference<'_>, depth: u32)
     if depth >= MAX_DEPTH {
         return false;
     }
-    let scoping = file.semantic.scoping();
-    let Some(symbol) = scoping.get_reference(id.reference_id()).symbol_id() else {
-        return false;
-    };
-    let nodes = file.semantic.nodes();
-    let declaration = scoping.symbol_declaration(symbol);
-    match nodes.kind(declaration) {
-        AstKind::VariableDeclarator(declarator) if declarator.type_annotation.is_some() => {
-            is_boolean_type(declarator.type_annotation.as_deref())
-        }
-        AstKind::VariableDeclarator(declarator) => {
-            matches!(
-                nodes.parent_kind(declaration),
-                AstKind::VariableDeclaration(statement)
-                    if statement.kind == VariableDeclarationKind::Const
-            ) && matches!(declarator.id, BindingPattern::BindingIdentifier(_))
-                && declarator
-                    .init
-                    .as_ref()
-                    .is_some_and(|init| is_boolean(file, init, depth + 1))
-        }
-        AstKind::FormalParameter(parameter) => {
-            is_boolean_type(parameter.type_annotation.as_deref())
-        }
-        _ => false,
+    match declared(file, id) {
+        Some((_, Declared::Annotation(ty))) => matches!(ty, TSType::TSBooleanKeyword(_)),
+        Some((_, Declared::Const(value))) => is_boolean(file, value, depth + 1),
+        None => false,
     }
 }
 

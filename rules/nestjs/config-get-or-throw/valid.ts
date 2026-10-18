@@ -76,3 +76,13 @@ export function reassigned(app: INestApplication, other: { get(key: string): unk
 export function shadow(settings: Map<string, string>): string | undefined {
   return settings.get('ConfigService');
 }
+
+declare module '@nestjs/config' {
+  interface ConfigService<K = Record<string | symbol, unknown>, WasValidated extends boolean = false> {
+    readonly store: Map<string, string>;
+  }
+}
+
+export function unpacked({ store }: ConfigService): string | undefined {
+  return store.get('key');
+}

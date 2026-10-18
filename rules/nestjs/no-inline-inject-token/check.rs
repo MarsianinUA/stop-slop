@@ -27,9 +27,7 @@ impl Rule for Check {
             return;
         }
         let file = cx.file();
-        if matches!(imported_name(file, callee),
-            Some((module, "Inject")) if package_name(module) == "@nestjs/common")
-        {
+        if imported_from(file, callee, "@nestjs/common") == Some("Inject") {
             cx.report(decorator.span)
                 .arg("decorator", one_line(decorator.span.source_text(file.text)));
         }

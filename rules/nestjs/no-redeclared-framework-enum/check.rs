@@ -20,20 +20,36 @@ impl Rule for Check {
 
     fn on_node<'a>(&self, node: &AstNode<'a>, cx: &mut Cx<'_, 'a>) {
         let file = cx.file();
-        let name = match node.kind() {
-            AstKind::TSEnumDeclaration(declaration) => declaration.id.span,
+        // From the keyword to the name: `enum HttpStatus`, `const HttpStatus`.
+        let (start, name) = match node.kind() {
+            AstKind::TSEnumDeclaration(declaration) => {
+                (declaration.span.start, declaration.id.span)
+            }
             // `type HttpStatus = common.HttpStatus` names the framework's own type.
             AstKind::TSTypeAliasDeclaration(alias) => match &alias.type_annotation {
                 TSType::TSTypeReference(reference) if reference.type_arguments.is_none() => return,
                 TSType::TSImportType(_) => return,
-                _ => alias.id.span,
+                _ => (alias.span.start, alias.id.span),
             },
             AstKind::Class(class) => match &class.id {
-                Some(id) => id.span,
+                Some(id) => (
+                    start_after_decorators(file, class.span, &class.decorators),
+                    id.span,
+                ),
                 None => return,
             },
             AstKind::VariableDeclarator(declarator) => match &declarator.id {
-                BindingPattern::BindingIdentifier(id) => id.span,
+                BindingPattern::BindingIdentifier(id)
+                    if declarator
+                        .init
+                        .as_ref()
+                        .is_some_and(|init| is_object(file, init)) =>
+                {
+                    (
+                        file.semantic.nodes().parent_node(node.id()).span().start,
+                        id.span,
+                    )
+                }
                 _ => return,
             },
             _ => return,
@@ -41,21 +57,6 @@ impl Rule for Check {
         let text = name.source_text(file.text);
         let Some(module) = self.enums.get(text) else {
             return;
-        };
-        // From the keyword to the name: `enum HttpStatus`, `const HttpStatus`.
-        let start = match node.kind() {
-            AstKind::Class(class) => start_after_decorators(file, class.span, &class.decorators),
-            AstKind::VariableDeclarator(declarator) => {
-                if !declarator
-                    .init
-                    .as_ref()
-                    .is_some_and(|init| is_object(file, init))
-                {
-                    return;
-                }
-                file.semantic.nodes().parent_node(node.id()).span().start
-            }
-            _ => node.span().start,
         };
         // `declare module '@nestjs/common' { .. }` describes the framework's own enum.
         if is_ambient(file, node.id()) {
@@ -76,13 +77,11 @@ fn is_object(file: &File<'_>, value: &Expression<'_>) -> bool {
         return true;
     }
     call_of(value).is_some_and(|call| {
-        call.callee.get_member_expr().is_some_and(|member| {
-            member.static_property_name() == Some("freeze")
-                && is_global(file, member.object().get_inner_expression(), "Object")
-        }) && call
-            .arguments
-            .first()
-            .and_then(|argument| argument.as_expression())
-            .is_some_and(|argument| is_object(file, argument))
+        global_member(file, &call.callee) == Some(("Object", "freeze"))
+            && call
+                .arguments
+                .first()
+                .and_then(|argument| argument.as_expression())
+                .is_some_and(|argument| is_object(file, argument))
     })
 }

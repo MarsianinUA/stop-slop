@@ -178,11 +178,7 @@ fn passed_on<'a>(file: &File<'_>, value: &'a Expression<'a>) -> Option<&'a Expre
     let first = || call.arguments.first().and_then(Argument::as_expression);
     match call.callee.get_inner_expression() {
         callee if is_global(file, callee, "String") => first(),
-        Expression::StaticMemberExpression(member)
-            if member.property.name == "stringify" && is_global(file, &member.object, "JSON") =>
-        {
-            first()
-        }
+        _ if global_member(file, &call.callee) == Some(("JSON", "stringify")) => first(),
         Expression::StaticMemberExpression(member)
             if member.property.name == "toString" && call.arguments.is_empty() =>
         {

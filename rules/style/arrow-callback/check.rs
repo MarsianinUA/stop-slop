@@ -58,12 +58,16 @@ impl Rule for Check {
 }
 
 /// The function whose `this` the node reads: the nearest one up that is not an arrow. A static
-/// block or a field initializer has a `this` of its own.
+/// block or a field initializer has a `this` of its own. A decorator runs where its class is
+/// defined, so `this` in `m(@Arg(this) value)` is not the method's.
 fn binder(file: &File<'_>, node: &AstNode<'_>) -> Option<NodeId> {
     let span = node.span();
+    let mut in_decorator = false;
     for ancestor in file.semantic.nodes().ancestors(node.id()) {
         match ancestor.kind() {
-            AstKind::Function(_) => return Some(ancestor.id()),
+            AstKind::Decorator(_) => in_decorator = true,
+            AstKind::Class(_) => in_decorator = false,
+            AstKind::Function(_) if !in_decorator => return Some(ancestor.id()),
             AstKind::StaticBlock(_) => return None,
             AstKind::PropertyDefinition(PropertyDefinition {
                 value: Some(value), ..

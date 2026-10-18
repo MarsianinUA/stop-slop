@@ -25,9 +25,7 @@ impl Rule for Check {
             return;
         };
         let file = cx.file();
-        if matches!(imported_name(file, scope),
-            Some((module, "Scope")) if package_name(module) == "@nestjs/common")
-        {
+        if imported_from(file, scope, "@nestjs/common") == Some("Scope") {
             cx.report(place(file, node));
         }
     }

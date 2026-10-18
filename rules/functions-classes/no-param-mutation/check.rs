@@ -1,4 +1,4 @@
-use kit::oxc::ast::ast::{BindingIdentifier, BindingPattern, Expression, FormalParameter, TSType};
+use kit::oxc::ast::ast::{BindingIdentifier, BindingPattern, FormalParameter, TSType};
 use kit::oxc::semantic::NodeId;
 use kit::prelude::*;
 
@@ -122,8 +122,5 @@ fn assign_target(file: &File<'_>, id: NodeId) -> Option<Span> {
     {
         return None;
     }
-    matches!(call.callee.get_inner_expression(),
-        Expression::StaticMemberExpression(member)
-            if member.property.name == "assign" && is_global(file, &member.object, "Object"))
-    .then_some(call.span)
+    (global_member(file, &call.callee) == Some(("Object", "assign"))).then_some(call.span)
 }

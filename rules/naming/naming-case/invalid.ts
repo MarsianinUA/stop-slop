@@ -60,3 +60,9 @@ export { shared_label };
 
 const runE2ETimeoutMs = 1000; // expect: naming-case
 export const limits = [runE2ETimeoutMs];
+
+let retry_count = 3; // expect: naming-case
+export const retries = [retry_count];
+
+let PENDING_JOB; // expect: naming-case
+export const jobs = [PENDING_JOB];

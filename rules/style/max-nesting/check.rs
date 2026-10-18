@@ -40,10 +40,6 @@ impl Rule for Check {
             AstKind::IfStatement(statement) => {
                 head(file, statement.span, statement.consequent.span())
             }
-            AstKind::ForStatement(statement) => head(file, statement.span, statement.body.span()),
-            AstKind::ForInStatement(statement) => head(file, statement.span, statement.body.span()),
-            AstKind::ForOfStatement(statement) => head(file, statement.span, statement.body.span()),
-            AstKind::WhileStatement(statement) => head(file, statement.span, statement.body.span()),
             AstKind::SwitchStatement(statement) => {
                 let end = statement.discriminant.span().end;
                 let close = file.text[end as usize..]
@@ -51,7 +47,11 @@ impl Rule for Check {
                     .map_or(0, |index| index as u32 + 1);
                 Span::new(statement.span.start, end + close)
             }
-            _ => node.span(),
+            // `do` has its test after the body.
+            AstKind::DoWhileStatement(_) => node.span(),
+            kind => {
+                loop_body(kind).map_or(node.span(), |body| head(file, node.span(), body.span()))
+            }
         };
         cx.report(span)
             .arg("depth", self.max + 1)
@@ -84,11 +84,6 @@ fn depth(file: &File<'_>, node: &AstNode<'_>, max: u32) -> u32 {
                         alternate.span() == child && !matches!(alternate, Statement::IfStatement(_))
                     })
             }
-            AstKind::ForStatement(statement) => statement.body.span() == child,
-            AstKind::ForInStatement(statement) => statement.body.span() == child,
-            AstKind::ForOfStatement(statement) => statement.body.span() == child,
-            AstKind::WhileStatement(statement) => statement.body.span() == child,
-            AstKind::DoWhileStatement(statement) => statement.body.span() == child,
             AstKind::SwitchStatement(statement) => statement.discriminant.span() != child,
             AstKind::TryStatement(_) => true,
             AstKind::Function(_) | AstKind::ArrowFunctionExpression(_)
@@ -101,7 +96,7 @@ fn depth(file: &File<'_>, node: &AstNode<'_>, max: u32) -> u32 {
             | AstKind::StaticBlock(_)
             | AstKind::PropertyDefinition(_)
             | AstKind::AccessorProperty(_) => break,
-            _ => false,
+            kind => loop_body(kind).is_some_and(|body| body.span() == child),
         };
         depth += u32::from(level);
         if depth > max {
@@ -110,6 +105,17 @@ fn depth(file: &File<'_>, node: &AstNode<'_>, max: u32) -> u32 {
         child = ancestor.span();
     }
     depth
+}
+
+fn loop_body<'a>(kind: AstKind<'a>) -> Option<&'a Statement<'a>> {
+    match kind {
+        AstKind::ForStatement(statement) => Some(&statement.body),
+        AstKind::ForInStatement(statement) => Some(&statement.body),
+        AstKind::ForOfStatement(statement) => Some(&statement.body),
+        AstKind::WhileStatement(statement) => Some(&statement.body),
+        AstKind::DoWhileStatement(statement) => Some(&statement.body),
+        _ => None,
+    }
 }
 
 /// The block of a function; `(item) => item.id` holds none.

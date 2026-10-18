@@ -194,6 +194,17 @@ pub fn imported_name<'a>(
     }
 }
 
+/// The name a reference imports from `package`, from its root or a subpath: `Route` after
+/// `import { Get as Route } from '@nestjs/common'` gives `Some("Get")` for `@nestjs/common`.
+pub fn imported_from<'a>(
+    file: &File<'a>,
+    reference: &IdentifierReference<'_>,
+    package: &str,
+) -> Option<&'a str> {
+    let (module, name) = imported_name(file, reference)?;
+    (package_name(module) == package).then_some(name)
+}
+
 /// A lone `*` is the fallback tsconfig gives every package, so it matches nothing: else any npm
 /// import would read as an alias.
 fn alias_matches(key: &str, source: &str) -> bool {

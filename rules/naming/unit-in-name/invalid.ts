@@ -29,3 +29,9 @@ export function remaining(deadline: Date, now: Date): number {
 }
 
 export const MAX_SIZE = 1 << 20; // expect: unit-in-name
+
+export function backoff(attempt: number): number {
+  const delay = Math.min(1000 * attempt, 30000); // expect: unit-in-name
+  const startTimeout = Date.now(); // expect: unit-in-name
+  return delay + startTimeout;
+}

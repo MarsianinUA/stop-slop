@@ -103,3 +103,12 @@ export function register(): object {
   class Handler {}
   return Handler;
 }
+
+declare function Note(make: () => string): ClassDecorator;
+
+function caption(): string { // expect: newspaper-layout
+  return 'note';
+}
+
+@Note(() => caption())
+export class Noted {}

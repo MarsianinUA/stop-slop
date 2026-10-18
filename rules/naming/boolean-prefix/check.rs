@@ -197,15 +197,19 @@ fn is_boolean(file: &File<'_>, expression: &Expression<'_>, seen: &mut HashSet<S
             is_boolean(file, &conditional.consequent, seen)
                 && is_boolean(file, &conditional.alternate, seen)
         }
-        Expression::CallExpression(call) => match &call.callee {
-            Expression::StaticMemberExpression(member) => {
-                let method = member.property.name.as_str();
-                (is_global(file, &member.object, "Array") && method == "isArray")
-                    || (is_global(file, &member.object, "Number")
-                        && matches!(method, "isNaN" | "isFinite" | "isInteger" | "isSafeInteger"))
-            }
-            callee => is_global(file, callee, "Boolean"),
-        },
+        Expression::CallExpression(call) => {
+            is_global(file, &call.callee, "Boolean")
+                || matches!(
+                    global_member(file, &call.callee),
+                    Some(
+                        ("Array", "isArray")
+                            | (
+                                "Number",
+                                "isNaN" | "isFinite" | "isInteger" | "isSafeInteger"
+                            )
+                    )
+                )
+        }
         Expression::Identifier(id) => file
             .semantic
             .scoping()

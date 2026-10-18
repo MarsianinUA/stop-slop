@@ -13,11 +13,7 @@ impl Rule for Check {
         };
         let file = cx.file();
         // `Reflect['apply'](..)` too; an imported or local `Reflect` is not the built-in.
-        let found = call.callee.get_member_expr().is_some_and(|member| {
-            member.static_property_name() == Some("apply")
-                && is_global(file, member.object().get_inner_expression(), "Reflect")
-        });
-        if found {
+        if global_member(file, &call.callee) == Some(("Reflect", "apply")) {
             cx.report(call.span);
         }
     }
