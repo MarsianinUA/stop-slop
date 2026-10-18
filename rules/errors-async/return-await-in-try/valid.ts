@@ -71,3 +71,17 @@ export async function* pages(id: string): AsyncGenerator<string, string> {
     return '';
   }
 }
+
+export class Reader {
+  #toView(text: string): string {
+    return text.trim();
+  }
+
+  async read(id: string): Promise<string> {
+    try {
+      return this.#toView(await load(id));
+    } catch {
+      return '';
+    }
+  }
+}

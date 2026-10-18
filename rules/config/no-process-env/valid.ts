@@ -1,5 +1,6 @@
 import type { ConfigService } from '@nestjs/config';
 import type { env as Environment } from 'node:process';
+import { type env as variables } from 'node:process';
 
 declare const config: ConfigService;
 
@@ -26,7 +27,10 @@ export function local(): string | undefined {
   return process.env.HOME;
 }
 
-export type Variables = keyof typeof process.env | keyof typeof Environment;
+export type Variables =
+  | keyof typeof process.env
+  | keyof typeof Environment
+  | keyof typeof variables;
 
 export function child(spawned: { env: Record<string, string> }): string | undefined {
   return spawned.env.PATH;

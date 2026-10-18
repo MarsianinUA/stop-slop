@@ -19,3 +19,15 @@ export const SHIPPING_ERROR_CODES = {
 export const RefundErrorCodes = {
   Rejected: BASE, // expect: error-code-numeric
 } satisfies Record<string, number>;
+
+export const FROZEN_ERROR_CODES = Object.freeze({
+  Lost: 'STOCK_LOST', // expect: error-code-numeric
+  Late: 10903,
+});
+
+export const GROUPED_ERROR_CODES = {
+  order: {
+    Missing: 'ORDER_MISSING', // expect: error-code-numeric
+    Gone: 10904,
+  },
+} as const;

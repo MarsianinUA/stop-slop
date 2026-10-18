@@ -19,11 +19,11 @@ impl Rule for Check {
         if callee.property.name != "all" || !is_global(file, &callee.object, "Promise") {
             return;
         }
-        let Some(Expression::CallExpression(map)) = call
+        let Some(map) = call
             .arguments
             .first()
             .and_then(Argument::as_expression)
-            .map(Expression::get_inner_expression)
+            .and_then(call_of)
         else {
             return;
         };
@@ -40,8 +40,10 @@ impl Rule for Check {
             return;
         }
         // `Promise.all(orders.map`: the list names the place; the callback may change.
-        cx.report(Span::new(call.span.start, method.span.end))
-            .arg("items", method.object.span().source_text(file.text));
+        cx.report(Span::new(call.span.start, method.span.end)).arg(
+            "items",
+            one_line(method.object.span().source_text(file.text)),
+        );
     }
 }
 
@@ -72,13 +74,22 @@ fn body_settles(body: &FunctionBody<'_>) -> bool {
     }
 }
 
-/// `save(id).catch(..)`, also under `await`.
+/// `save(id).catch(..)`, also under `await`, through `?.` and with `.finally(..)` after it.
 fn is_catch_call(expression: &Expression<'_>) -> bool {
     let mut expression = expression.get_inner_expression();
     if let Expression::AwaitExpression(awaited) = expression {
-        expression = awaited.argument.get_inner_expression();
+        expression = &awaited.argument;
     }
-    matches!(expression, Expression::CallExpression(call)
-        if matches!(call.callee.get_inner_expression(),
-            Expression::StaticMemberExpression(member) if member.property.name == "catch"))
+    let mut call = call_of(expression);
+    while let Some(link) = call {
+        let Expression::StaticMemberExpression(method) = link.callee.get_inner_expression() else {
+            return false;
+        };
+        match method.property.name.as_str() {
+            "catch" => return true,
+            "finally" => call = call_of(&method.object),
+            _ => return false,
+        }
+    }
+    false
 }

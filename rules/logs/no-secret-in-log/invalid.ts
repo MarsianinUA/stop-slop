@@ -62,3 +62,19 @@ export class Session {
     );
   }
 }
+
+export function keys(apiKey: string, secretKey: string): void {
+  logger.info('keys', [apiKey, secretKey]); // expect: no-secret-in-log x2
+}
+
+export function spread(credentials: string[]): void {
+  logger.debug(...credentials); // expect: no-secret-in-log
+}
+
+export function listed(id: string, privateKey: string[]): void {
+  logger.debug({ id, keys: [id, ...privateKey] }); // expect: no-secret-in-log
+}
+
+export function share(ready: boolean, token: string): void {
+  logger.info(ready && token); // expect: no-secret-in-log
+}

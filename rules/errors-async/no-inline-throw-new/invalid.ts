@@ -32,3 +32,7 @@ export class Checkout {
     }
   }
 }
+
+export function never(id: string): never {
+  throw new TypeError(`no order ${id}`) as never; // expect: no-inline-throw-new
+}

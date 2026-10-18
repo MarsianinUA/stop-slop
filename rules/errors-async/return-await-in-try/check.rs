@@ -1,4 +1,3 @@
-use kit::oxc::ast::ast::{ChainElement, Expression};
 use kit::prelude::*;
 
 #[derive(Deserialize)]
@@ -13,17 +12,8 @@ impl Rule for Check {
         let AstKind::ReturnStatement(statement) = node.kind() else {
             return;
         };
-        let call = match statement
-            .argument
-            .as_ref()
-            .map(Expression::get_inner_expression)
-        {
-            Some(Expression::CallExpression(call)) => call,
-            Some(Expression::ChainExpression(chain)) => match &chain.expression {
-                ChainElement::CallExpression(call) => call,
-                _ => return,
-            },
-            _ => return,
+        let Some(call) = statement.argument.as_ref().and_then(call_of) else {
+            return;
         };
         if !in_try_of_async(file, node) {
             return;

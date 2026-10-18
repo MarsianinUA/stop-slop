@@ -5,7 +5,7 @@ use oxc_ast::ast::{
 use oxc_semantic::SymbolId;
 use oxc_span::{GetSpan, Span};
 
-use crate::File;
+use crate::{File, Role};
 
 pub struct TopClass<'a> {
     /// The class's own name; else the variable a class expression initializes
@@ -52,6 +52,16 @@ pub fn top_classes<'a>(file: &File<'a>) -> Vec<TopClass<'a>> {
         }
     }
     classes
+}
+
+/// The classes that make the file a file with a class for the rules that keep such a file to
+/// its class: `top_classes`, and none in a functions or constants file, where the class is the
+/// stray that `no-class-in-function-file` reports.
+pub fn class_file_classes<'a>(file: &File<'a>) -> Vec<TopClass<'a>> {
+    if matches!(file.role, Some(Role::Functions | Role::Constants)) {
+        return Vec::new();
+    }
+    top_classes(file)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

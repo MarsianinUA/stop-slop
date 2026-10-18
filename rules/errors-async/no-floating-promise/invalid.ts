@@ -38,3 +38,32 @@ export class Ticker {
     }, 1000);
   }
 }
+
+function store(id: string): Promise<void>;
+function store(id: string, force: boolean): Promise<void>;
+async function store(id: string, force = false): Promise<void> {
+  await save(`${id}:${String(force)}`);
+}
+
+export function maybe(id: string, ready: boolean, cached?: string): void {
+  ready && save(`and:${id}`); // expect: no-floating-promise
+  ready || notify(`or:${id}`); // expect: no-floating-promise
+  cached ?? save(`fallback:${id}`); // expect: no-floating-promise
+  ready ? save(`yes:${id}`) : loadLater(`no:${id}`); // expect: no-floating-promise x2
+  (save(`first:${id}`), notify(`second:${id}`)); // expect: no-floating-promise x2
+  store(id); // expect: no-floating-promise
+}
+
+export class Archive {
+  async #persist(): Promise<void> {
+    await save('persist');
+  }
+
+  close(): void {
+    this.#persist(); // expect: no-floating-promise
+  }
+}
+
+export function soon(id: string): void {
+  notify?.(`soon:${id}`); // expect: no-floating-promise
+}

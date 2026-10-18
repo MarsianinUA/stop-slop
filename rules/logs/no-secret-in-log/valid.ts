@@ -28,3 +28,9 @@ export function notLogs(token: string): void {
 export function text(): void {
   logger.warn('the token expired; ask for a new password');
 }
+
+export function masked(token: string, password: string): void {
+  logger.info('token', token && '[set]');
+  logger.info({ password: password && '[set]' });
+  logger.info('lengths', [token.length, password.length]);
+}

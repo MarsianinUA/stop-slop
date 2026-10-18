@@ -1,8 +1,9 @@
 use kit::oxc::ast::ast::{
-    Argument, BinaryOperator, ChainElement, Expression, MemberExpression, ObjectPropertyKind,
+    Argument, ArrayExpressionElement, BinaryOperator, Expression, LogicalOperator,
+    MemberExpression, ObjectPropertyKind,
 };
 use kit::prelude::*;
-use kit::serde::Deserializer;
+use kit::serde::de::{Deserializer, Error};
 
 #[derive(Deserialize)]
 #[serde(crate = "kit::serde", deny_unknown_fields)]
@@ -18,11 +19,16 @@ pub struct Check {
 }
 
 fn split_names<'de, D: Deserializer<'de>>(names: D) -> Result<Vec<Vec<String>>, D::Error> {
-    let names = Vec::<String>::deserialize(names)?;
-    Ok(names
+    Vec::<String>::deserialize(names)?
         .iter()
-        .map(|name| words(name).into_iter().map(String::from).collect())
-        .collect())
+        .map(|name| match words(name).as_slice() {
+            // No words would match every name.
+            [] => Err(D::Error::custom(format!(
+                "`{name}` in `names` has no words"
+            ))),
+            parts => Ok(parts.iter().map(|part| part.to_string()).collect()),
+        })
+        .collect()
 }
 
 impl Rule for Check {
@@ -37,16 +43,16 @@ impl Rule for Check {
             return;
         }
         let mut secrets = Vec::new();
-        for argument in call.arguments.iter().filter_map(Argument::as_expression) {
-            self.secrets(file, argument, &mut secrets);
+        for argument in &call.arguments {
+            let value = match argument {
+                Argument::SpreadElement(spread) => &spread.argument,
+                argument => argument.to_expression(),
+            };
+            self.secrets(file, value, &mut secrets);
         }
         for span in secrets {
-            // One line in the text output, also for an object key over several lines.
-            let value = span
-                .source_text(file.text)
-                .split_whitespace()
-                .collect::<Vec<_>>();
-            cx.report(span).arg("value", value.join(" "));
+            cx.report(span)
+                .arg("value", one_line(span.source_text(file.text)));
         }
     }
 }
@@ -54,9 +60,9 @@ impl Rule for Check {
 impl Check {
     /// Where a logged value puts a secret into the line as it is: a read named like one (`token`,
     /// `req.headers.authorization`), an object key named like one over a read (`{ token }`,
-    /// `{ apiKey: config.key }`), in any of its `parts` and inside an object (and its spread).
-    /// Another call logs what it returns (`mask(token)`, `token.slice(-4)`), and a member logs
-    /// itself (`token.length`).
+    /// `{ apiKey: config.key }`), in any of its `parts` and inside an object or an array (and
+    /// their spread). Another call logs what it returns (`mask(token)`, `token.slice(-4)`), and a
+    /// member logs itself (`token.length`).
     fn secrets(&self, file: &File<'_>, value: &Expression<'_>, found: &mut Vec<Span>) {
         parts(file, value, &mut |part| match part {
             Expression::ObjectExpression(object) => {
@@ -77,6 +83,17 @@ impl Check {
                                 self.secrets(file, &property.value, found);
                             }
                         }
+                    }
+                }
+            }
+            Expression::ArrayExpression(array) => {
+                for element in &array.elements {
+                    match element {
+                        ArrayExpressionElement::SpreadElement(spread) => {
+                            self.secrets(file, &spread.argument, found);
+                        }
+                        ArrayExpressionElement::Elision(_) => {}
+                        element => self.secrets(file, element.to_expression(), found),
                     }
                 }
             }
@@ -107,8 +124,8 @@ impl Check {
     }
 }
 
-/// The parts of a value that go into the line as they are: through a template, `+`, `??`, `?:`,
-/// `String(..)`, `JSON.stringify(..)` and `.toString()`.
+/// The parts of a value that go into the line as they are: through a template, `+`, `??`, `||`,
+/// the right of `&&`, `?:`, `String(..)`, `JSON.stringify(..)` and `.toString()`.
 fn parts<'a, F: FnMut(&'a Expression<'a>)>(
     file: &File<'_>,
     value: &'a Expression<'a>,
@@ -125,7 +142,10 @@ fn parts<'a, F: FnMut(&'a Expression<'a>)>(
             parts(file, &binary.right, each);
         }
         Expression::LogicalExpression(logical) => {
-            parts(file, &logical.left, each);
+            // The left of `&&` reaches the line only when it is falsy: an empty value.
+            if logical.operator != LogicalOperator::And {
+                parts(file, &logical.left, each);
+            }
             parts(file, &logical.right, each);
         }
         Expression::ConditionalExpression(conditional) => {
@@ -154,14 +174,7 @@ fn read_name<'a>(value: &'a Expression<'a>) -> Option<&'a str> {
 /// The value a call gives back whole, also through `?.`: of global `String(x)` and
 /// `JSON.stringify(x)`, of `x.toString()`.
 fn passed_on<'a>(file: &File<'_>, value: &'a Expression<'a>) -> Option<&'a Expression<'a>> {
-    let call = match value {
-        Expression::CallExpression(call) => call,
-        Expression::ChainExpression(chain) => match &chain.expression {
-            ChainElement::CallExpression(call) => call,
-            _ => return None,
-        },
-        _ => return None,
-    };
+    let call = call_of(value)?;
     let first = || call.arguments.first().and_then(Argument::as_expression);
     match call.callee.get_inner_expression() {
         callee if is_global(file, callee, "String") => first(),
@@ -186,9 +199,7 @@ fn carries(file: &File<'_>, value: &Expression<'_>) -> bool {
     parts(file, value, &mut |part| {
         read |= match part {
             Expression::Identifier(_) => !is_global(file, part, "undefined"),
-            Expression::ChainExpression(chain) => {
-                !matches!(chain.expression, ChainElement::CallExpression(_))
-            }
+            Expression::ChainExpression(_) => call_of(part).is_none(),
             part => part.is_member_expression(),
         };
     });

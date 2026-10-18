@@ -1406,6 +1406,27 @@ export @Dec() /* class */ class H {}";
 }
 
 #[test]
+fn class_file_classes_are_top_classes_outside_functions_and_constants_files() {
+    let text = "export class A {}\nexport const b = 1;";
+    with_file(text, |file| {
+        let names = |role: Option<Role>| -> Vec<&str> {
+            let file = File { role, ..*file };
+            class_file_classes(&file)
+                .iter()
+                .map(|class| class.name)
+                .collect()
+        };
+        assert_eq!(names(None), ["A"]);
+        assert_eq!(names(Some(Role::Types)), ["A"]);
+        assert_eq!(names(Some(Role::Functions)), Vec::<&str>::new());
+        assert_eq!(names(Some(Role::Constants)), Vec::<&str>::new());
+    });
+    with_file("export const b = 1;", |file| {
+        assert!(class_file_classes(file).is_empty());
+    });
+}
+
+#[test]
 fn top_bindings_are_functions_with_a_body_and_variables_outside_declare_and_blocks() {
     let text = "function f() {}
 function g(a: string): void; function g(a: unknown): void {}
@@ -1822,6 +1843,40 @@ export class K {
             ]
         );
     });
+
+    let text = "function o(id: string): number;
+function o(id: number): number;
+function o(id: string | number): number { return Number(id); }
+export class P {
+  #m() { return 1; }
+  m() { return 2; }
+  #n = () => 3;
+  run() { return [o(1), this.#m(), this.m(), this.#n()]; }
+}";
+    with_file(text, |file| {
+        let callees: Vec<Option<&str>> = file
+            .semantic
+            .nodes()
+            .iter()
+            .filter_map(|node| match node.kind() {
+                AstKind::CallExpression(call) => {
+                    Some(local_callee(file, call).map(|callee| source(file, callee)))
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            callees,
+            [
+                None,
+                // An overload runs the declaration with a body; `#m` and `m` are two members.
+                Some("function o(id: string | number): number { return Number(id); }"),
+                Some("() { return 1; }"),
+                Some("() { return 2; }"),
+                Some("() => 3"),
+            ]
+        );
+    });
 }
 
 #[test]
@@ -1851,6 +1906,47 @@ export { a, b, c, d, e, f, g };";
             per_function(file, |node| returns_promise(file, node)),
             [
                 true, true, false, false, true, true, false, true, true, false, false, false
+            ]
+        );
+    });
+}
+
+#[test]
+fn call_of_is_a_call_also_through_optional_chaining_and_assertions() {
+    let text = "declare const client: { send(): Promise<void> } | undefined;
+declare function load(): unknown;
+declare const save: (() => void) | undefined;
+load();
+client?.send();
+save?.();
+load() as Promise<void>;
+load()!;
+client?.send;
+void load();
+new Promise(() => {});";
+    with_file(text, |file| {
+        let calls: Vec<Option<&str>> = file
+            .semantic
+            .nodes()
+            .iter()
+            .filter_map(|node| match node.kind() {
+                AstKind::ExpressionStatement(statement) => {
+                    Some(call_of(&statement.expression).map(|call| source(file, call)))
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            calls,
+            [
+                Some("load()"),
+                Some("client?.send()"),
+                Some("save?.()"),
+                Some("load()"),
+                Some("load()"),
+                None,
+                None,
+                None,
             ]
         );
     });
@@ -2133,6 +2229,19 @@ fn line_helpers_find_line_starts_blank_lines_regions_and_line_tails() {
             assert_eq!(line_tail(file, 3), tail, "{text}");
         });
     }
+}
+
+#[test]
+fn one_line_joins_the_text_with_single_spaces() {
+    assert_eq!(
+        one_line("userIds\n      .filter(isActive)"),
+        "userIds .filter(isActive)"
+    );
+    assert_eq!(
+        one_line("{ REDIS_HOST,\r\n  REDIS_PORT }"),
+        "{ REDIS_HOST, REDIS_PORT }"
+    );
+    assert_eq!(one_line("a  +\tb"), "a + b");
 }
 
 #[test]

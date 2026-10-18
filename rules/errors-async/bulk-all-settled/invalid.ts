@@ -29,3 +29,7 @@ export async function remind(userIds: string[]): Promise<void> {
       .map((userId) => notify(userId)),
   );
 }
+
+export async function notifyKnown(userIds?: string[]): Promise<void> {
+  await Promise.all(userIds?.map((userId) => notify(userId)) as Promise<void>[]); // expect: bulk-all-settled
+}

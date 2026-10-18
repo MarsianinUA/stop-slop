@@ -18,3 +18,7 @@ export type Sink = typeof console;
 export type Warn = typeof console.warn;
 
 export const NAME = 'console.log';
+
+export function hasConsole(): boolean {
+  return typeof console !== 'undefined' && typeof console.warn === 'function';
+}

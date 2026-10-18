@@ -81,3 +81,26 @@ export class OrderSync {
     }
   }
 }
+
+export async function warmUpOnce(id: string): Promise<void> {
+  try {
+    await load(id);
+  } catch { // expect: no-empty-catch
+    ;
+  }
+}
+
+export function warmUpLater(id: string): void {
+  void load(id).catch(() => {}); // expect: no-empty-catch
+}
+
+export function refreshLater(id: string): void {
+  void load(id).catch((error: unknown) => logger.warn(`refresh failed for ${id}: ${String(error)}`)); // expect: no-empty-catch
+}
+
+export async function shipLater(id: string): Promise<void> {
+  await load(id)
+    ?.catch(async function () { // expect: no-empty-catch
+      await remoteLogger.error(`ship failed for ${id}`);
+    });
+}

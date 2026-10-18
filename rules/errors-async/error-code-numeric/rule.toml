@@ -1,4 +1,4 @@
 description = "A member of an `*ErrorCode` enum or object that is not an explicit number"
 kind = "error"
 source = ["personal"]
-message = "`{member}` in `{name}` is not an explicit number: an implicit value shifts when someone adds a member above it, and a string or computed code cannot be kept in the domain's numeric range, so clients that match on the code break. Give it an explicit number from the range (`= 10702`)."
+message = "`{member}` in `{name}` is not an explicit number: an implicit value shifts when someone adds a member above it, and a string or computed code cannot be kept in the domain's numeric range, so clients that match on the code break. Give it an explicit number from the range (`= 10702`, `: 10702` in an object)."

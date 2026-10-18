@@ -23,17 +23,12 @@ impl Rule for Check {
                 .get_resolved_references(symbol)
                 .map(|reference| nodes.get_node(reference.node_id()))
         });
-        // `process` the file neither declares nor imports is Node's global.
         let reads = global_references(file, "process")
             .chain(imported)
             .filter_map(|node| env_read(file, node));
         for span in env_imports.into_iter().chain(reads) {
-            // One line in the text output, also for a destructuring over several lines.
-            let access = span
-                .source_text(file.text)
-                .split_whitespace()
-                .collect::<Vec<_>>();
-            cx.report(span).arg("access", access.join(" "));
+            cx.report(span)
+                .arg("access", one_line(span.source_text(file.text)));
         }
     }
 }

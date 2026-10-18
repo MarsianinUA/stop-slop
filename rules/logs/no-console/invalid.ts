@@ -36,3 +36,7 @@ export function timed(run: () => void): void {
   run();
   console.timeEnd('run'); // expect: no-console
 }
+
+export function guarded(message: string): void {
+  if (typeof console !== 'undefined') console.warn(message); // expect: no-console
+}

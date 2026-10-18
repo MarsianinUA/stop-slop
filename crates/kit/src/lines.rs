@@ -138,6 +138,12 @@ pub fn opens_region(comment: &str) -> bool {
         })
 }
 
+/// Source text on one line for a message's `{arg}`: each run of spaces and line breaks is one
+/// space, so a finding stays one line of the text output.
+pub fn one_line(text: &str) -> String {
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
 pub fn line_start(text: &str, at: u32) -> u32 {
     text[..at as usize]
         .rfind('\n')

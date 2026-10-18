@@ -35,3 +35,8 @@ export async function run(id: string): Promise<void> {
 export function start(id: string): Promise<void> {
   return save(id);
 }
+
+export function maybe(id: string, ready: boolean): void {
+  ready && count(id);
+  ready ? void save(id) : count(id);
+}

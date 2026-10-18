@@ -52,7 +52,10 @@ impl Rule for Check {
         if round_trips {
             cx.report(assignment.span)
                 .arg("name", target.name.as_str())
-                .arg("function", call.callee.span().source_text(file.text));
+                .arg(
+                    "function",
+                    one_line(call.callee.span().source_text(file.text)),
+                );
         }
     }
 }

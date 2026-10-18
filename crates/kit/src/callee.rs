@@ -1,12 +1,29 @@
 use oxc_ast::AstKind;
-use oxc_ast::ast::{CallExpression, Class, ClassElement, Expression, MethodDefinitionKind};
+use oxc_ast::ast::{
+    CallExpression, ChainElement, Class, ClassElement, Expression, MethodDefinitionKind,
+    PropertyKey,
+};
 use oxc_semantic::{AstNode, NodeId};
 
 use crate::{File, lib_type};
 
+/// The call the expression is, also through `?.` and the wrappers `as`, `!`, `satisfies` and
+/// `<T>`: `save(id)`, `client?.send(..)`, `load(id) as Promise<Order>`.
+pub fn call_of<'b, 'a>(expression: &'b Expression<'a>) -> Option<&'b CallExpression<'a>> {
+    match expression.get_inner_expression() {
+        Expression::CallExpression(call) => Some(call),
+        Expression::ChainExpression(chain) => match &chain.expression {
+            ChainElement::CallExpression(call) => Some(call),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
 /// The function of this file that the call runs: a function declared with a body, a `const`
-/// holding a function or an arrow, or `this.m(..)` - a method with a body or a function field of
-/// the class whose `this` the call sees. A binding that is written to may hold another function.
+/// holding a function or an arrow, or `this.m(..)` / `this.#m(..)` - a method with a body or a
+/// function field of the class whose `this` the call sees. A binding that is written to may hold
+/// another function.
 pub fn local_callee<'a>(file: &File<'a>, call: &CallExpression<'a>) -> Option<&'a AstNode<'a>> {
     let nodes = file.semantic.nodes();
     let scoping = file.semantic.scoping();
@@ -15,9 +32,16 @@ pub fn local_callee<'a>(file: &File<'a>, call: &CallExpression<'a>) -> Option<&'
             let symbol = scoping.get_reference(id.reference_id()).symbol_id()?;
             let declaration = scoping.symbol_declaration(symbol);
             let callee = match nodes.kind(declaration) {
-                AstKind::Function(function) if function.body.is_some() => {
-                    nodes.get_node(declaration)
-                }
+                // An overloaded function: the symbol is declared by its first signature, the
+                // call runs the declaration with a body.
+                AstKind::Function(function) if function.body.is_none() => scoping
+                    .symbol_redeclarations(symbol)
+                    .iter()
+                    .map(|redeclaration| nodes.get_node(redeclaration.declaration))
+                    .find(|node| {
+                        matches!(node.kind(), AstKind::Function(function) if function.body.is_some())
+                    })?,
+                AstKind::Function(_) => nodes.get_node(declaration),
                 AstKind::VariableDeclarator(declarator) => {
                     function_value(file, declarator.init.as_ref()?)?
                 }
@@ -31,31 +55,49 @@ pub fn local_callee<'a>(file: &File<'a>, call: &CallExpression<'a>) -> Option<&'
         Expression::StaticMemberExpression(member)
             if matches!(member.object, Expression::ThisExpression(_)) =>
         {
-            let name = member.property.name.as_str();
-            this_class(file, call.node_id.get())?
-                .body
-                .body
-                .iter()
-                .find_map(|element| match element {
-                    ClassElement::MethodDefinition(method)
-                        if !method.r#static
-                            && method.kind == MethodDefinitionKind::Method
-                            && method.value.body.is_some()
-                            && method.key.static_name().is_some_and(|key| key == name) =>
-                    {
-                        Some(nodes.get_node(method.value.node_id.get()))
-                    }
-                    ClassElement::PropertyDefinition(field)
-                        if !field.r#static
-                            && field.key.static_name().is_some_and(|key| key == name) =>
-                    {
-                        function_value(file, field.value.as_ref()?)
-                    }
-                    _ => None,
-                })
+            this_member(file, call, |key| {
+                key.static_name()
+                    .is_some_and(|key| key == member.property.name.as_str())
+            })
+        }
+        Expression::PrivateFieldExpression(member)
+            if matches!(member.object, Expression::ThisExpression(_)) =>
+        {
+            let name = member.field.name;
+            this_member(
+                file,
+                call,
+                |key| matches!(key, PropertyKey::PrivateIdentifier(id) if id.name == name),
+            )
         }
         _ => None,
     }
+}
+
+fn this_member<'a>(
+    file: &File<'a>,
+    call: &CallExpression<'a>,
+    is_key: impl Fn(&PropertyKey<'a>) -> bool,
+) -> Option<&'a AstNode<'a>> {
+    let nodes = file.semantic.nodes();
+    this_class(file, call.node_id.get())?
+        .body
+        .body
+        .iter()
+        .find_map(|element| match element {
+            ClassElement::MethodDefinition(method)
+                if !method.r#static
+                    && method.kind == MethodDefinitionKind::Method
+                    && method.value.body.is_some()
+                    && is_key(&method.key) =>
+            {
+                Some(nodes.get_node(method.value.node_id.get()))
+            }
+            ClassElement::PropertyDefinition(field) if !field.r#static && is_key(&field.key) => {
+                function_value(file, field.value.as_ref()?)
+            }
+            _ => None,
+        })
 }
 
 /// A function or arrow whose call gives a promise: `async`, or the lib `Promise<..>` as its return

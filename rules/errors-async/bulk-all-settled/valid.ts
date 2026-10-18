@@ -40,7 +40,6 @@ export async function first(ids: string[]): Promise<string> {
   return Promise.race(ids.map((id) => load(id)));
 }
 
-
 export async function keepEach(ids: string[]): Promise<void> {
   await Promise.all(
     ids.map(function (id) {
@@ -55,4 +54,14 @@ export async function waitEach(ids: string[]): Promise<void> {
       await save(id).catch((error: unknown) => report(id, error));
     }),
   );
+}
+
+export async function releaseEach(ids: string[]): Promise<void> {
+  await Promise.all(
+    ids.map((id) => save(id).catch((error: unknown) => report(id, error)).finally(() => report(id, null))),
+  );
+}
+
+export async function guardEach(ids: string[]): Promise<void> {
+  await Promise.all(ids.map((id) => save(id)?.catch((error: unknown) => report(id, error))));
 }

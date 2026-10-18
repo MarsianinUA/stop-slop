@@ -17,9 +17,8 @@ impl Rule for Check {
         {
             return;
         }
-        // `no-constant-in-class-file` reports every constant of a file with a class, except in a
-        // functions file, where the class is the stray.
-        if file.role != Some(Role::Functions) && !top_classes(file).is_empty() {
+        // `no-constant-in-class-file` reports every constant of a file with a class.
+        if !class_file_classes(file).is_empty() {
             return;
         }
         for binding in top_bindings(file) {

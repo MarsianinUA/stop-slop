@@ -16,7 +16,7 @@ impl Rule for Check {
         let AstKind::ThrowStatement(statement) = node.kind() else {
             return;
         };
-        let Expression::NewExpression(new) = &statement.argument else {
+        let Expression::NewExpression(new) = statement.argument.get_inner_expression() else {
             return;
         };
         let in_factories = file
@@ -25,7 +25,7 @@ impl Rule for Check {
             .is_some_and(|dirs| dirs.iter().any(|dir| self.dirs.iter().any(|d| d == dir)));
         if !in_factories {
             cx.report(statement.span)
-                .arg("class", new.callee.span().source_text(file.text));
+                .arg("class", one_line(new.callee.span().source_text(file.text)));
         }
     }
 }

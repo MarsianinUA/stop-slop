@@ -32,7 +32,10 @@ impl Rule for Check {
             return;
         }
         cx.report(Span::new(switch.span.start, first.span().end))
-            .arg("subject", switch.discriminant.span().source_text(file.text));
+            .arg(
+                "subject",
+                one_line(switch.discriminant.span().source_text(file.text)),
+            );
     }
 }
 

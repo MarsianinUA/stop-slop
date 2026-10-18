@@ -1,4 +1,8 @@
-use kit::oxc::ast::ast::{Expression, ObjectPropertyKind, UnaryOperator};
+use std::borrow::Cow;
+
+use kit::oxc::ast::ast::{
+    Expression, ObjectExpression, ObjectPropertyKind, UnaryOperator, VariableDeclarationKind,
+};
 use kit::prelude::*;
 
 #[derive(Deserialize)]
@@ -27,30 +31,25 @@ impl Rule for Check {
             }
             // `const OrderErrorCode = { NotFound: 10702 } as const`.
             AstKind::VariableDeclarator(declarator) => {
+                let is_const = matches!(file.semantic.nodes().parent_kind(node.id()),
+                    AstKind::VariableDeclaration(declaration)
+                        if declaration.kind == VariableDeclarationKind::Const);
+                if !is_const {
+                    return;
+                }
                 let Some(id) = declarator.id.get_binding_identifier() else {
                     return;
                 };
                 let name = id.name.as_str();
-                let Some(Expression::ObjectExpression(object)) = declarator
-                    .init
-                    .as_ref()
-                    .map(Expression::get_inner_expression)
-                else {
-                    return;
-                };
                 if !is_code_name(name) {
                     return;
                 }
-                for property in &object.properties {
-                    // A spread brings codes declared elsewhere.
-                    let ObjectPropertyKind::ObjectProperty(property) = property else {
-                        continue;
-                    };
-                    if !is_number(&property.value) {
-                        cx.report(property.span)
-                            .arg("member", property.key.span().source_text(file.text))
-                            .arg("name", name);
-                    }
+                if let Some(object) = declarator
+                    .init
+                    .as_ref()
+                    .and_then(|init| code_object(file, init))
+                {
+                    report_codes(cx, object, name);
                 }
             }
             _ => {}
@@ -63,6 +62,43 @@ fn is_code_name(name: &str) -> bool {
     matches!(words(name).as_slice(), [.., error, code]
         if error.eq_ignore_ascii_case("error")
             && (code.eq_ignore_ascii_case("code") || code.eq_ignore_ascii_case("codes")))
+}
+
+/// An object of codes, also under `as const` / `satisfies` and in global `Object.freeze(..)`.
+fn code_object<'a>(file: &File<'_>, value: &'a Expression<'a>) -> Option<&'a ObjectExpression<'a>> {
+    if let Expression::ObjectExpression(object) = value.get_inner_expression() {
+        return Some(object);
+    }
+    let call = call_of(value)?;
+    let Expression::StaticMemberExpression(method) = call.callee.get_inner_expression() else {
+        return None;
+    };
+    if method.property.name != "freeze" || !is_global(file, &method.object, "Object") {
+        return None;
+    }
+    code_object(file, call.arguments.first()?.as_expression()?)
+}
+
+fn report_codes<'a>(cx: &mut Cx<'_, 'a>, object: &'a ObjectExpression<'a>, name: &str) {
+    let file = cx.file();
+    for property in &object.properties {
+        // A spread brings codes declared elsewhere.
+        let ObjectPropertyKind::ObjectProperty(property) = property else {
+            continue;
+        };
+        // A group of codes: `{ order: { NotFound: 10701 } }`.
+        if let Some(group) = code_object(file, &property.value) {
+            report_codes(cx, group, name);
+        } else if !is_number(&property.value) {
+            let member = property
+                .key
+                .static_name()
+                .unwrap_or_else(|| Cow::Borrowed(property.key.span().source_text(file.text)));
+            cx.report(property.span)
+                .arg("member", member)
+                .arg("name", name);
+        }
+    }
 }
 
 /// `10702`, `-1`, also under `as const`.

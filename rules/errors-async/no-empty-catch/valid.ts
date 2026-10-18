@@ -80,3 +80,20 @@ export async function fallback(id: string): Promise<string> {
   }
   return value;
 }
+
+export function readLater(id: string): Promise<string | undefined> {
+  return load(id).catch(() => undefined);
+}
+
+export function noteLater(id: string): void {
+  void load(id).catch(log);
+  void load(id).catch(logger.warn);
+  void load(id).finally(() => {});
+}
+
+export function readOrThrow(id: string): Promise<string> {
+  return load(id).catch((error: unknown) => {
+    logger.warn(`read failed for ${id}`);
+    throw error;
+  });
+}

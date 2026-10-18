@@ -7,12 +7,7 @@ pub struct Check {}
 impl Rule for Check {
     fn on_file<'a>(&self, cx: &mut Cx<'_, 'a>) {
         let file = cx.file();
-        // In a functions or constants file the class is the stray, and `no-class-in-function-file`
-        // reports it.
-        if matches!(file.role, Some(Role::Functions | Role::Constants)) {
-            return;
-        }
-        let names: Vec<String> = top_classes(file)
+        let names: Vec<String> = class_file_classes(file)
             .iter()
             .map(|class| format!("`{}`", class.name))
             .collect();
