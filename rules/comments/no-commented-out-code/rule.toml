@@ -1,0 +1,7 @@
+description = "A comment that parses as code"
+kind = "candidate"
+source = ["personal"]
+message = "`{code}` is code left in a comment: nothing runs or type-checks it, it drifts away from the code around it, and a reader cannot tell whether it is a fix to bring back or a dead end. Delete it: version control keeps the old code. If it records why something is off, say why in a sentence."
+agent = """
+The comment holds lines that parse as TypeScript: statements, class members, object properties or decorators. Commented-out code: delete it, git keeps it; if it records why something is switched off, replace it with a sentence that says why, with the issue or commit when there is one. Ignore the finding, with the reason, when the lines are an example that the sentence above introduces (`// Usage:`), a formula or a sample value that only reads like code, or text a tool reads. Doc comments (`/** */`) are not checked: an example there belongs to the documentation.
+"""
