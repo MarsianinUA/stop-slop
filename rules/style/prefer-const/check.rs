@@ -23,9 +23,20 @@ impl Rule for Check {
         // `for (let item of items)`: a fresh binding on every turn, with no initializer. A `let`
         // under `for..of` / `for..in` can only be its binding: a body of one statement cannot
         // be a declaration.
-        let looped = match file.semantic.nodes().parent_kind(node.id()) {
+        let nodes = file.semantic.nodes();
+        let looped = match nodes.parent_kind(node.id()) {
             AstKind::ForOfStatement(statement) => Some(statement.right.span()),
             AstKind::ForInStatement(statement) => Some(statement.right.span()),
+            // An `export let` of a namespace is a property that other code may assign:
+            // `Config.settings = ..`, or a merged namespace in another file.
+            AstKind::ExportDeclaration(_)
+                if matches!(
+                    nodes.parent_kind(nodes.parent_id(node.id())),
+                    AstKind::TSModuleBlock(_)
+                ) =>
+            {
+                return;
+            }
             _ => None,
         };
         let mut names = Vec::new();

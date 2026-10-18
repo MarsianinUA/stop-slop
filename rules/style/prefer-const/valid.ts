@@ -52,3 +52,8 @@ export function loops(): string {
 export const fixed = 'const';
 var legacy = 'var';
 export { legacy };
+
+export namespace Config {
+  export let settings = { retries: 3 };
+}
+Config.settings = { retries: 5 };
