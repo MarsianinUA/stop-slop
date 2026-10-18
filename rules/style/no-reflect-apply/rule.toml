@@ -1,0 +1,4 @@
+description = "`Reflect.apply(..)` instead of a typed call"
+kind = "error"
+source = ["anti-slop"]
+message = "`Reflect.apply` calls a function with its `this` and arguments passed by hand in an array: with a loosely typed target nothing checks the arguments and the result is `any`, and a reader has to work out which function runs with what. Call the function directly (`operation(...args)`), or put the dynamic choice behind a named interface."
