@@ -1,0 +1,4 @@
+description = "A bare `{ }` block that only limits the scope of its variables"
+kind = "error"
+source = ["direct"]
+message = "This bare `{ }` block has no condition and no name, so a reader cannot tell why the code inside is set apart. Move it into a named function, or drop the braces."

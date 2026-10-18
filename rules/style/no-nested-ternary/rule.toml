@@ -1,0 +1,4 @@
+description = "A ternary inside a ternary"
+kind = "error"
+source = ["direct"]
+message = "A `?:` sits inside another `?:`, so a reader has to pair each `?` with its `:` to see which value wins. Choose with `if` / `else` or a `switch`, or name the inner choice with a `const`."

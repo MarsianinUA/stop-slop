@@ -1,0 +1,8 @@
+description = "More than 4 levels of nesting"
+kind = "error"
+files = "code"
+source = ["personal"]
+message = "This block sits {depth} levels deep, past the limit of {max}: a reader keeps every enclosing condition, loop and callback in mind to follow the code inside. Return early from the outer levels, or move the inner block into a named function."
+
+[options]
+max = 4
