@@ -2328,6 +2328,105 @@ export const all = [Route, Scope, Inject, Get, common];";
     });
 }
 
+/// Each block as `[doc ]Kind [lines] + Kind [lines]`.
+fn comment_parts_of(text: &str) -> Vec<String> {
+    let mut blocks = Vec::new();
+    with_file(text, |file| {
+        for block in comment_blocks(file) {
+            let parts: Vec<String> = block
+                .parts
+                .iter()
+                .map(|part| {
+                    let lines: Vec<&str> = part
+                        .lines
+                        .iter()
+                        .map(|line| line.source_text(file.text))
+                        .collect();
+                    format!("{:?} {lines:?}", part.kind)
+                })
+                .collect();
+            let doc = if block.doc { "doc " } else { "" };
+            blocks.push(format!("{doc}{}", parts.join(" + ")));
+        }
+    });
+    blocks
+}
+
+const COMMENT_CASES: &[(&str, &[&str])] = &[
+    ("// One.\n// Two.\nx();", &[r#"Prose [" One.", " Two."]"#]),
+    (
+        "// One.\n\n// Two.\nx();",
+        &[r#"Prose [" One."] + Prose [" Two."]"#],
+    ),
+    (
+        "// The fallback:\n// await run();\nx();",
+        &[r#"Prose [" The fallback:"] + Code [" await run();"]"#],
+    ),
+    (
+        "// const a = 1;\n\n// return a;\nx();",
+        &[r#"Code [" const a = 1;", " return a;"]"#],
+    ),
+    (
+        "x(); // y();\n// z();\nw();",
+        &[r#"Code [" y();"]"#, r#"Code [" z();"]"#],
+    ),
+    (
+        "// eslint-disable-next-line no-console\n// The note.\nx();",
+        &[
+            r#"Directive [" eslint-disable-next-line no-console"]"#,
+            r#"Prose [" The note."]"#,
+        ],
+    ),
+    (
+        "/* global window */\n// global state is shared.\nx();",
+        &[
+            r#"Directive [" global window"]"#,
+            r#"Prose [" global state is shared."]"#,
+        ],
+    ),
+    (
+        "/**\n * Adds.\n *\n *   add(1, 2);\n */\nx();",
+        &[r#"doc Prose [" Adds."] + Code ["   add(1, 2);"]"#],
+    ),
+    (
+        "// ```ts\n// add(1, 2);\n// ```\nx();",
+        &[r#"Prose [" ```ts", " add(1, 2);", " ```"]"#],
+    ),
+    (
+        "// Retries (3)\n// overwrites `x`\n// total = price * count\n// public API\n// Note: run()\n// Note: important,\n// - run()\nx();",
+        &[
+            r#"Prose [" Retries (3)", " overwrites `x`", " total = price * count", " public API", " Note: run()", " Note: important,", " - run()"]"#,
+        ],
+    ),
+    (
+        "class A {\n  // private readonly cache = new Map();\n  b = 1;\n  // @Get(':id')\n  // find() {}\n}\nconst o = {\n  // retries: 3,\n  // cause: pgCause,\n  a: 1,\n};",
+        &[
+            r#"Code [" private readonly cache = new Map();"]"#,
+            r#"Code [" @Get(':id')", " find() {}"]"#,
+            r#"Code [" retries: 3,", " cause: pgCause,"]"#,
+        ],
+    ),
+    (
+        "class A {\n  // @UseGuards(AuthGuard)\n  run() {}\n}",
+        &[r#"Code [" @UseGuards(AuthGuard)"]"#],
+    ),
+    (
+        "// await run();\n// done\nx();",
+        &[r#"Code [" await run();"] + Prose [" done"]"#],
+    ),
+    ("f(/* force */ true);", &[r#"Prose [" force"]"#]),
+];
+
+#[test]
+fn comment_blocks_cut_comments_into_prose_code_and_directives() {
+    for line_ending in ["\n", "\r\n"] {
+        for &(case, expected) in COMMENT_CASES {
+            let text = case.replace('\n', line_ending);
+            assert_eq!(comment_parts_of(&text), expected, "{case:?}");
+        }
+    }
+}
+
 #[test]
 fn line_helpers_find_line_starts_blank_lines_regions_and_line_tails() {
     assert_eq!(line_start("ab\ncd", 4), 3);
