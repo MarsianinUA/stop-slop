@@ -1,0 +1,4 @@
+description = "`jest.mock('./..')` of a module of this project; packages may be mocked"
+kind = "error"
+source = ["personal", "anti-slop"]
+message = "`{call}` swaps `{module}`, a module of this project, for a fake: the test then checks the fake instead of the code that runs, passes while the real module is broken, and breaks when the module moves or changes its exports. Let the code under test take this dependency through its constructor or a parameter and hand the test a fake there; mock only the system boundary: the network, time, randomness, a third-party package."
