@@ -177,7 +177,7 @@ Each finding gets `inHunk`: whether its first line is one the branch changed.
 | `stop-slop ignore <fingerprint> --reason "..." [--base <ref>]` | Adds an exception. It finds the file itself by checking the branch again; `--base` works as in `check`. A fingerprint found in several files gets one entry per file. An unknown fingerprint is an error. |
 | `stop-slop enable` | Turns the hook on in this repository. |
 | `stop-slop disable` | Turns the hook off; exceptions and settings stay. |
-| `stop-slop rules [--json]` | Lists the rules. |
+| `stop-slop rules [--json [--pretty]]` | Lists the rules. `--pretty` works as in `check`. |
 
 Flags of `check`:
 
@@ -189,6 +189,7 @@ Flags of `check`:
 | `--all` | Checks every tracked or untracked file of the repository that git does not ignore. For measurements and one-off cleanups. |
 | `--fix` | Applies the safe fixes, writes the files, then checks them again. |
 | `--json` | Prints one line of JSON for an agent. |
+| `--pretty` | Indents the JSON by 2 spaces, for a person who saves it to a file and reads it. Needs `--json`. |
 
 Exit codes:
 
@@ -232,7 +233,7 @@ A finding is `file:line:column rule message`. Lines and columns start at 1, and 
 }
 ```
 
-The program prints it on one line; it is spread out here to read.
+The program prints it on one line: indents cost an agent tokens. `--pretty` indents it by 2 spaces for a person; the example here is laid out by hand.
 
 - `base` has `ref`, `sha` (7 characters) and `reason`: `flag`, `pr`, `ancestor` or `default`. It is `null` for `--files` and `--all`, and then every `inHunk` is `null` as well.
 - `files` lists the files that were checked; `skipped`, the ones left out and why.

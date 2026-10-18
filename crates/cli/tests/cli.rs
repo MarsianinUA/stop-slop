@@ -258,6 +258,22 @@ fn rules_json_fails_with_the_cause() {
     );
 }
 
+#[test]
+fn rules_json_pretty_indents_the_same_list() {
+    let t = TempRepo::new();
+    let line = run(t.path(), &["rules", "--json"]);
+    let pretty = run(t.path(), &["rules", "--json", "--pretty"]);
+    assert_eq!(code(&pretty), 0, "{}", stderr(&pretty));
+    let text = stdout(&pretty);
+    assert!(text.starts_with("[\n  {\n    \"id\": "), "{text}");
+    assert!(text.ends_with("\n]\n"), "{text}");
+    assert_eq!(json(&pretty), json(&line));
+
+    let out = run(t.path(), &["rules", "--pretty"]);
+    assert_eq!(code(&out), 2);
+    assert!(stderr(&out).contains("--json"), "{}", stderr(&out));
+}
+
 fn check(dir: &Path, args: &[&str], expected: i32) -> Value {
     let out = run(dir, args);
     assert_eq!(code(&out), expected, "{args:?}: {}", stderr(&out));
@@ -386,6 +402,26 @@ fn check_reports_findings_of_the_branch_as_json() {
 }
 
 #[test]
+fn check_json_is_one_line_and_pretty_indents_it() {
+    let t = branch_repo();
+    let line = run(t.path(), &["check", "--base", "main", "--json"]);
+    assert_eq!(code(&line), 1, "{}", stderr(&line));
+    let text = stdout(&line);
+    assert_eq!(text.lines().count(), 1, "{text}");
+    assert!(text.ends_with("}\n"), "{text}");
+
+    let pretty = run(t.path(), &["check", "--base", "main", "--json", "--pretty"]);
+    assert_eq!(code(&pretty), 1, "{}", stderr(&pretty));
+    let text = stdout(&pretty);
+    assert!(
+        text.starts_with("{\n  \"base\": {\n    \"ref\": \"main\","),
+        "{text}"
+    );
+    assert!(text.ends_with("\n}\n"), "{text}");
+    assert_eq!(json(&pretty), json(&line));
+}
+
+#[test]
 fn check_prints_the_base_and_the_findings_as_text() {
     let t = TempRepo::new();
     t.write("src/m.constants.ts", "export const MAIN = 1;\n")
@@ -429,6 +465,7 @@ fn check_rejects_flags_that_do_not_go_together() {
         &["check", "--files", "src/new.constants.ts", "--all"],
         &["check", "--base", "main", "--files", "src/new.constants.ts"],
         &["check", "--base", "main", "--all"],
+        &["check", "--pretty"],
     ] {
         let out = run(t.path(), args);
         assert_eq!(code(&out), 2, "{args:?}");

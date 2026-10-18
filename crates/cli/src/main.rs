@@ -20,6 +20,7 @@ use state::State;
 
 use args::Command;
 use error::{CliError, Exit};
+use output::JsonLayout;
 
 fn main() -> ExitCode {
     let result = match Command::parse() {
@@ -32,7 +33,7 @@ fn main() -> ExitCode {
         } => ignore::run(fingerprint, reason, base),
         Command::Enable => toggle::enable(),
         Command::Disable => toggle::disable(),
-        Command::Rules { json } => list::run(json),
+        Command::Rules { json, pretty } => list::run(json, JsonLayout::new(pretty)),
     };
     let exit = result.unwrap_or_else(|error| {
         eprintln!("stop-slop: {error}");

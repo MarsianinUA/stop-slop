@@ -11,6 +11,20 @@ use state::IgnoreEntry;
 use crate::check::Checked;
 use crate::error::CliError;
 
+#[derive(Clone, Copy)]
+pub(crate) enum JsonLayout {
+    /// The default: the reader is an agent, and indentation costs it tokens.
+    Line,
+    /// `--pretty`, for a person reading a saved file.
+    Pretty,
+}
+
+impl JsonLayout {
+    pub(crate) fn new(pretty: bool) -> Self {
+        if pretty { Self::Pretty } else { Self::Line }
+    }
+}
+
 #[derive(Serialize)]
 #[serde(crate = "kit::serde", rename_all = "camelCase")]
 struct RuleJson {
@@ -97,7 +111,7 @@ pub(crate) fn rules_text(set: &Ruleset) -> String {
         .collect()
 }
 
-pub(crate) fn rules_json(states: &[RuleState]) -> String {
+pub(crate) fn rules_json(states: &[RuleState], layout: JsonLayout) -> String {
     let rules: Vec<RuleJson> = states
         .iter()
         .map(|state| {
@@ -116,11 +130,11 @@ pub(crate) fn rules_json(states: &[RuleState]) -> String {
             }
         })
         .collect();
-    json_line(&rules)
+    json_text(&rules, layout)
 }
 
-pub(crate) fn check_json(checked: &Checked) -> String {
-    json_line(&CheckJson {
+pub(crate) fn check_json(checked: &Checked, layout: JsonLayout) -> String {
+    let report = CheckJson {
         base: checked.base.as_ref().map(|base| BaseJson {
             reference: &base.reference,
             sha: sha7(base),
@@ -161,7 +175,8 @@ pub(crate) fn check_json(checked: &Checked) -> String {
                 count: fixed.count,
             })
             .collect(),
-    })
+    };
+    json_text(&report, layout)
 }
 
 pub(crate) fn check_text(checked: &Checked) -> String {
@@ -243,9 +258,12 @@ fn finding_line(text: &mut String, finding: &Finding) {
     );
 }
 
-/// One line: the reader is an agent, and indentation costs it tokens.
-fn json_line(value: &impl Serialize) -> String {
-    let mut json = serde_json::to_string(value).expect("strings, numbers and bools serialize");
+fn json_text(value: &impl Serialize, layout: JsonLayout) -> String {
+    let json = match layout {
+        JsonLayout::Line => serde_json::to_string(value),
+        JsonLayout::Pretty => serde_json::to_string_pretty(value),
+    };
+    let mut json = json.expect("strings, numbers and bools serialize");
     json.push('\n');
     json
 }
