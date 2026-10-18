@@ -34,6 +34,9 @@ pub(crate) enum Command {
         /// Prints JSON with the message, the agent hint and whether the rule is active here.
         #[arg(long)]
         json: bool,
+        /// Indents the JSON by 2 spaces, for a person to read.
+        #[arg(long, requires = "json")]
+        pretty: bool,
     },
 }
 
@@ -57,6 +60,9 @@ pub(crate) struct CheckArgs {
     /// Prints JSON for an agent.
     #[arg(long)]
     pub(crate) json: bool,
+    /// Indents the JSON by 2 spaces, for a person to read.
+    #[arg(long, requires = "json")]
+    pub(crate) pretty: bool,
 }
 
 #[cfg(test)]

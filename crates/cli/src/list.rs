@@ -7,12 +7,12 @@ use repo::Repo;
 use state::State;
 
 use crate::error::{CliError, Exit};
-use crate::output;
+use crate::output::{self, JsonLayout};
 
 /// Without `--json` the repo is not needed, so the list prints outside one too.
-pub(crate) fn run(json: bool) -> Result<Exit, CliError> {
+pub(crate) fn run(json: bool, layout: JsonLayout) -> Result<Exit, CliError> {
     let text = if json {
-        output::rules_json(&states(&rules::RULESET, &crate::cwd_repo()?)?)
+        output::rules_json(&states(&rules::RULESET, &crate::cwd_repo()?)?, layout)
     } else {
         output::rules_text(&rules::RULESET)
     };

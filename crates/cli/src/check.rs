@@ -12,7 +12,7 @@ use state::State;
 
 use crate::args::CheckArgs;
 use crate::error::{CliError, Exit};
-use crate::output;
+use crate::output::{self, JsonLayout};
 
 /// `files` holds only the files that were read.
 pub(crate) struct Checked {
@@ -25,9 +25,10 @@ pub(crate) struct Checked {
 
 pub(crate) fn run(args: CheckArgs) -> Result<Exit, CliError> {
     let json = args.json;
+    let layout = JsonLayout::new(args.pretty);
     let checked = check(args)?;
     let text = if json {
-        output::check_json(&checked)
+        output::check_json(&checked, layout)
     } else {
         output::check_text(&checked)
     };
