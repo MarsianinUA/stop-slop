@@ -1,0 +1,8 @@
+description = "`value || default` where `??` keeps a real `0`, `''` or `false`"
+kind = "candidate"
+files = "code"
+source = ["personal"]
+message = "`||` falls back on every falsy value, so a real `0`, `''` or `false` on the left is silently replaced by the default. `??` falls back only on `null` and `undefined`."
+agent = """
+Use `??` when the left side can hold a meaningful `0`, `''` or `false`. Keep `||` when the left side is a boolean, or when an empty string or zero must fall back too, and ignore the finding with that reason.
+"""

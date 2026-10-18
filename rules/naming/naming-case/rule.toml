@@ -1,0 +1,5 @@
+description = "A name in the wrong case: PascalCase for types and classes, camelCase for values, CONSTANT_CASE for module constants"
+kind = "error"
+fix = true
+source = ["personal"]
+message = "`{name}` should be {case}: the case tells a reader at a glance whether a name is a type, a value or a fixed module constant, and a name in another case sends them the wrong way. Rename it to `{suggestion}`."

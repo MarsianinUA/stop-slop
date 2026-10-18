@@ -1,0 +1,7 @@
+description = "A condition of three or more clauses, like `a && b && c`"
+kind = "error"
+source = ["direct"]
+message = "This condition joins {count} checks, and a reader evaluates them all at once to learn when the branch runs. Name the checks with `const`s and test the names: `const isReadyToShip = isPaid && hasItems && isUnshipped;`."
+
+[options]
+max = 2

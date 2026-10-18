@@ -1,0 +1,5 @@
+description = "Imports out of the order Node built-ins, external packages, workspace packages and aliases, relative paths"
+kind = "error"
+fix = true
+source = ["personal"]
+message = "The `{source}` import ({group}) stands {where} `{other}` ({other_group}). Imports go in one order: Node built-ins, external packages, workspace packages and aliases, then relative paths, so a reader sees at a glance what the file depends on and from how far, and a new import has one right place. {hint}"

@@ -1,0 +1,5 @@
+description = "`value as T` without a `// SAFETY:` comment; `as const` is fine"
+kind = "error"
+files = "code"
+source = ["personal", "anti-slop"]
+message = "`as` overrides the type checker instead of proving the type, so a wrong guess passes silently and fails later. Narrow or parse the value, or state why the cast holds in a `// SAFETY:` comment above the line or at its end."

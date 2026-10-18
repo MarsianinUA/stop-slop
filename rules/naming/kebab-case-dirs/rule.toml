@@ -1,0 +1,4 @@
+description = "A folder name that is not in kebab-case"
+kind = "error"
+source = ["personal"]
+message = "The path has folders that are not in kebab-case: {dirs}. Mixed folder styles turn every import path into a guess, and on a case-insensitive file system two spellings of one folder clash. Rename them in kebab-case and update the imports."

@@ -1,0 +1,7 @@
+description = "A comment retells the code. Step headers in a long function (`// --- Reconcile.`) are fine"
+kind = "agent"
+source = ["personal", "direct"]
+message = "This comment says what the code next to it already says: a reader reads the same thing twice, and when the code changes the comment stays behind and starts to mislead. Delete it, or replace it with what the code cannot say: why, a constraint, a fact from another file."
+agent = """
+Check the comments the branch adds or changes. A comment retells the code when it says in words what the line under it, or the name it sits on, already says (`// increment the retry counter` over `retries++`, `// returns the user` on `getUser`), adds no reason, constraint, unit or fact from another file, or explains what a better name would say. Fix: delete it; when the code is hard to follow without it, rename or extract a well-named step instead, and keep in the comment only the why. When a comment mixes a retelling with a real fact, keep the fact and drop the retelling. Leave step headers inside a long sequential function (`// --- Reconcile.`): they carry the name an extracted function would have. Leave JSDoc on an exported helper that states behaviour, units or bounds the signature does not show.
+"""

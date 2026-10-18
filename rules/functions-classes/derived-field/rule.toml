@@ -1,0 +1,8 @@
+description = "A value computed from other data is stored as a second field and can drift from its source"
+kind = "agent"
+files = "code"
+source = ["direct"]
+message = "This field stores a value derived from other data of the same object: when the source changes and the field is not updated, the two disagree, and a reader cannot tell which one is true. Compute it from the source on read (a getter or a function) instead of storing it."
+agent = """
+Check the classes, types and object literals that the branch adds or changes for a field whose value is computed from other fields of the same object: `total` next to `items`, `fullName` next to `firstName` and `lastName`, `count` next to a list, `isEmpty` or `hasErrors` next to the collection they describe. Fix: drop the field and compute the value in a getter or a function, so it cannot drift. Leave it, and say why, when it is a snapshot that must not follow the source (a response DTO, a persisted or denormalized column, an event payload), or a cache with explicit invalidation that a measurement justified.
+"""

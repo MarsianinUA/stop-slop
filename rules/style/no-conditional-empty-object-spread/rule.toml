@@ -1,0 +1,4 @@
+description = "A spread of a `?:` with an empty object branch: `...(x ? { x } : {})`"
+kind = "error"
+source = ["anti-slop"]
+message = "This spread adds its keys only when the condition holds and an empty object otherwise, so whether the keys exist depends on a branch hidden inside an expression, and a reader evaluates it to learn the object's shape. Give the key a value in both cases (`timeout: timeout ?? null`), or add it in its own `if` once the object is built."

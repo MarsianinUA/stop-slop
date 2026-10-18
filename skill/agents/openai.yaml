@@ -1,0 +1,4 @@
+interface:
+  display_name: "stop-slop"
+  short_description: "Fix a branch or review a PR with the stop-slop linter"
+  default_prompt: "Use $stop-slop to fix the convention findings on my branch."

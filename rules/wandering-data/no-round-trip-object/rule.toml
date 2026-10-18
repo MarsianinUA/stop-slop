@@ -1,0 +1,4 @@
+description = "`order = applyX(order)`, where `applyX` returns its parameter or `{ ...order, x }`"
+kind = "error"
+source = ["personal"]
+message = "`{name}` goes into `{function}` whole and comes back as its result: the call hides which fields change, and `{function}` depends on the whole object for the few fields it sets. Let it take only what it reads and return the new value, and set the field here: `{name} = { ...{name}, field: value }`."

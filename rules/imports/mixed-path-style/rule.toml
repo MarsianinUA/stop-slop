@@ -1,0 +1,8 @@
+description = "One file imports both through a tsconfig alias (`@/...`) and through `../`"
+kind = "candidate"
+files = "code"
+source = ["personal"]
+message = "This file reaches other folders two ways: {count} import(s) by {style}, starting with `{source}`, and the rest by {other}. A reader cannot tell from the paths which modules sit close and which far, and moving the file breaks only its relative imports. Use one style per file: in an app with a tsconfig alias, the alias for code outside this folder and `./` for its own folder."
+agent = """
+The file imports other folders both through a tsconfig `paths` alias (`@/...`) and through `../` paths; `./` does not count. Fix: rewrite the imports of the reported style into the other one, usually `../x` into the alias in an app (`@/orders/x`), or an alias into a relative path in a package that has no alias of its own. Ignore the finding, with the reason, when the project's conventions say how to mix them (for example, `../` inside one feature folder and the alias across features).
+"""

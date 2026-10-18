@@ -1,0 +1,8 @@
+description = "A function takes an object but reads only one field of it"
+kind = "candidate"
+files = "code"
+source = ["personal"]
+message = "`{name}` is a whole object, but the function reads only `{name}.{field}`: a caller has to build or find the whole object to make the call, and the signature hides what the function really needs. Take the field itself as the parameter."
+agent = """
+The parameter's type is an object of this project (declared in the file or imported from it) or a type literal, and the function reads one field of it (`order.id`, `const { id } = order`) and does nothing else with it: it does not pass it on, change it or call its methods. Fix: take the field as the parameter with its own type (`orderId: OrderId`, not `Pick<Order, 'id'>`) and pass `order.id` at the call sites. Ignore the finding, with the reason, when the function is a behavior of that object that reads it as a whole concept (`isExpired(token)`, `equals(other)`), when the type carries a meaning the field alone loses (a generic token whose type parameter types the result, an entity checked for access), or when a contract this check cannot see fixes the signature (a framework hook, an interface in another file).
+"""

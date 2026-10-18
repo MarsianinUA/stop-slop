@@ -1,0 +1,12 @@
+description = "A vague name: `Manager`, `Base`, `Common`, `Helper` or `Util` in a type or function name, a variable called just `data`, `result`, `temp` or `item`"
+kind = "candidate"
+files = "code"
+source = ["direct"]
+message = "`{name}` does not say what the thing holds or does: `{word}` fits any code, so a reader has to open the body to learn its job. Name it by its job, like `OrderTotals`, `formatPrice` or `unpaidOrders`."
+agent = """
+The name starts or ends with `Manager`, `Base`, `Common`, `Helper` or `Util`, or a variable is called just `data`, `result`, `temp` or `item`. Rename it to what it holds or does. If the word is a domain term (a base asset, a base URL) or a framework sets the name (a subclass of `BaseEntity`), ignore the finding with that reason.
+"""
+
+[options]
+words = ["Manager", "Base", "Common", "Helper", "Util"]
+names = ["data", "result", "temp", "item"]

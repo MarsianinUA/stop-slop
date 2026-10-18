@@ -1,0 +1,12 @@
+description = "A service, controller or job builds a client itself: `new RedisClient(..)`, `createClient(..)`"
+kind = "candidate"
+files = "code"
+source = ["personal"]
+message = "`{class}` builds its own `{name}`: the client's settings and connections hide inside the class, every instance opens new ones, and a test cannot swap the client. Build it once in a provider factory (the composition root) and inject it through the constructor."
+agent = """
+A method, constructor or field of a service, controller or job creates a client (`new X(..)`, or an imported `createX(..)`, whose name ends with a word from `clients`). Move the creation into a provider factory and inject the result. Ignore the finding, with the reason, when the object is not a reusable client (a short-lived value whose name only ends in `Client`, `Pool` or `Service`), or when the class owns the client's whole lifecycle by design (it opens and closes it).
+"""
+
+[options]
+owners = ["service", "controller", "job"]
+clients = ["client", "pool", "connection", "provider", "service", "redis", "queue"]

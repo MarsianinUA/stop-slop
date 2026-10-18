@@ -1,0 +1,14 @@
+[package]
+name = "repo"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+camino.workspace = true
+tempfile.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+testkit = { path = "../testkit" }

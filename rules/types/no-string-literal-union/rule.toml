@@ -1,0 +1,5 @@
+description = "`type Field = 'sku' | 'price'` instead of an enum"
+kind = "error"
+files = "code"
+source = ["personal"]
+message = "`{name}` spells its values as bare strings, so every use repeats the raw text and the set has no single home to import, rename or document. Make it an `enum`, or an `as const` object with a derived type when the values are also needed at runtime."

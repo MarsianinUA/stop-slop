@@ -1,0 +1,7 @@
+description = "More than two positional parameters"
+kind = "error"
+source = ["personal"]
+message = "This function takes {count} positional parameters: a caller passes values by position, two of one type can swap without a compiler error, and the call does not show which value is which. Keep up to {max} for the data and pass the rest in one options object, destructured with defaults in the signature."
+
+[options]
+max = 2

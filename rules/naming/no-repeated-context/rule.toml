@@ -1,0 +1,4 @@
+description = "An enum member that repeats its enum: `Status.StatusActive`"
+kind = "error"
+source = ["personal"]
+message = "`{name}` repeats its enum: every use already reads `{enum}.{name}`, so the extra words make the name longer and hide the part that differs. Name it `{suggestion}`."

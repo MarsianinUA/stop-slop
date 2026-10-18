@@ -1,0 +1,5 @@
+description = "`field?: T | null`: a field that is both optional and nullable"
+kind = "error"
+files = "code"
+source = ["project"]
+message = "`?` and `| null` give this field two ways to be empty, so every reader has to handle both `undefined` and `null` and guess which one means what. Pick one: `: T | null` when the key is always there, `?: T` when callers may leave it out."

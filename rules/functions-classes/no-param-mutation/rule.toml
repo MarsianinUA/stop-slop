@@ -1,0 +1,8 @@
+description = "A function changes its parameter: `order.total = ..`, `items.push(..)`"
+kind = "candidate"
+files = "code"
+source = ["direct"]
+message = "`{name}` is a parameter, and this function changes it: the caller's object changes behind the call, so a reader of the call site cannot see the change, and another holder of the object gets a modified value. Return a new value instead, or make the change a method of the object's owner."
+agent = """
+The function writes to a member of its parameter (`order.total = 0`, `delete order.note`), calls a mutating method on a parameter typed as an array, `Map` or `Set` (`items.push(..)`), or passes it to `Object.assign` as the target. Return a new value (`{ ...order, total: 0 }`, `[...items, item]`) and let the caller keep it. Ignore the finding, with the reason, for a framework contract that expects the change (middleware or a guard attaching data to `req`, a `ws` `headers` listener), a collector or `seen` set passed down a recursion on purpose, or an explicit state object that the caller owns and hands over to be updated.
+"""

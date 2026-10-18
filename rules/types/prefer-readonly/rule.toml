@@ -1,0 +1,5 @@
+description = "A private field that only the constructor sets, without `readonly`"
+kind = "error"
+fix = true
+source = ["personal"]
+message = "`{name}` is private and set only while the object is built, but without `readonly` any method may change it later, so a reader has to check every method to know it stays fixed. Mark it `readonly`."

@@ -1,0 +1,8 @@
+description = "A Node global used without an import: `performance` without `node:perf_hooks`"
+kind = "error"
+fix = true
+source = ["project"]
+message = "`{name}` is Node's global copy of `{module}`: the file depends on that module without importing it, so the dependency does not show at the top of the file, and the global's type changes with the libs the tsconfig loads (the DOM declares `performance` its own way), while the import's type does not. Import it: `import { {name} } from '{module}'`.{hint}"
+
+[options.globals]
+performance = "node:perf_hooks"

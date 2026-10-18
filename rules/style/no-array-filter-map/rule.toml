@@ -1,0 +1,5 @@
+description = "`.filter(..).map(..)` or `.map(..).filter(..)` in a row on an array"
+kind = "error"
+files = "code"
+source = ["anti-slop"]
+message = "`.{first}(..).{second}(..)` walks the items twice and builds an array in between only to throw it away. Do it in one pass: a `flatMap` that returns `[value]` or `[]`, a `for..of` loop that pushes into a fresh array, or iterator helpers (`items.values().{first}(..).{second}(..).toArray()`) where the runtime has them."

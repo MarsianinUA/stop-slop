@@ -1,0 +1,4 @@
+description = "`var`"
+kind = "error"
+source = ["personal"]
+message = "`var` gives `{name}` the scope of the whole function, not of its block: the name is there above its own line, where it reads `undefined`, it leaks out of a loop or an `if`, and a second `var` declares it again without an error. Use `const`, or `let` when it is reassigned."

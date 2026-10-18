@@ -1,0 +1,4 @@
+description = "`Reflect.get(..)` instead of a typed property read"
+kind = "error"
+source = ["anti-slop"]
+message = "`Reflect.get` reads a property by a key that need not belong to the object, and such a read gives `any`: a misspelled key or a missing field passes the type checker and fails at run time. Read the property directly (`owner.name`, `owner[key]` with `key: keyof Owner`), or parse the dynamic input into a named type first."

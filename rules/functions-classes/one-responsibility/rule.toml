@@ -1,0 +1,9 @@
+description = "A function does more than one thing"
+kind = "agent"
+source = ["personal"]
+message = "This function does more than one thing, so a change to one part risks the others and its name cannot say what it does. Split it so each function has one job."
+agent = """
+Check exported functions and public methods in the branch files.
+Signs of several jobs: `and` in the name, a boolean flag parameter, blocks that each read or write different data, a comment heading each block.
+Fix: move each job into its own named function and keep the original as a short sequence of calls. Do not split a short function whose steps form one idea.
+"""

@@ -1,0 +1,5 @@
+description = "A `let` that is never reassigned"
+kind = "error"
+fix = true
+source = ["personal"]
+message = "Nothing reassigns `{name}`, yet `let` says something may, so a reader scans the rest of the scope to learn that the value stays the same. Declare it with `const`."

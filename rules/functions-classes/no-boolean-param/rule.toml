@@ -1,0 +1,4 @@
+description = "A boolean flag parameter: the function branches on it"
+kind = "error"
+source = ["personal"]
+message = "`{name}` is a boolean flag: a call passes a bare `true` or `false` that does not say what it switches, and the function keeps two behaviors under one name. Split it into two functions named for what each does, and let the caller choose."

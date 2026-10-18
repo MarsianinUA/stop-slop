@@ -1,0 +1,5 @@
+description = "A name with a `_` prefix, like `_value`"
+kind = "error"
+fix = true
+source = ["personal"]
+message = "`{name}` starts with `_`, a privacy marker from languages without privacy: TypeScript has `private`, `#` and module scope for that, so the prefix only adds noise and promises nothing the compiler checks. Name it `{suggestion}`."

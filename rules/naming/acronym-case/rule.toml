@@ -1,0 +1,8 @@
+description = "An acronym in capitals inside a name: `userID`, `loadHTTPURL` instead of `userId`, `loadHttpUrl`"
+kind = "error"
+fix = true
+source = ["direct"]
+message = "`{name}` writes an acronym in capitals: the word boundary disappears (`loadHTTPURL`), and the same word gets two spellings across the code. Write acronyms as words, like `{suggestion}`."
+
+[options]
+acronyms = ["API", "CSV", "DB", "DNS", "DTO", "HTML", "HTTP", "HTTPS", "ID", "IP", "JSON", "JWT", "SQL", "TTL", "UI", "URI", "URL", "UTC", "UUID", "XML"]

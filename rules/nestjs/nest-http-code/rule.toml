@@ -1,0 +1,6 @@
+description = "A Nest route handler without `@HttpCode(..)`"
+kind = "error"
+fix = true
+files = "code"
+source = ["personal"]
+message = "`{handler}` does not declare its status, so it answers with the code Nest picks from the HTTP method (`201` for POST, `200` for the rest): the code a client gets is written nowhere a reader looks, and a handler that should answer `204` or `202` passes review unnoticed. Declare it on the handler: `@HttpCode(HttpStatus.<Status>)`."

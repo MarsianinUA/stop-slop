@@ -1,0 +1,15 @@
+[package]
+name = "scope"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+camino.workspace = true
+repo = { path = "../repo" }
+thiserror.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+testkit = { path = "../testkit" }

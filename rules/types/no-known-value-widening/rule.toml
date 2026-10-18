@@ -1,0 +1,5 @@
+description = "A known value put into `Record<string, X>`, `object` or `unknown`"
+kind = "error"
+files = "code"
+source = ["anti-slop"]
+message = "This value's type is known here, and widening it to {target} throws that away, so later code has to check or cast it again. Keep the inferred type, check it with `satisfies`, or give the shape a name."

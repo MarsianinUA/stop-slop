@@ -1,0 +1,32 @@
+[package]
+name = "rules"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish = false
+build = "build.rs"
+autotests = false
+autobins = false
+autoexamples = false
+autobenches = false
+
+[lib]
+path = "lib.rs"
+
+[dependencies]
+kit = { path = "../crates/kit" }
+
+[build-dependencies]
+catalog = { path = "../crates/catalog" }
+
+[[test]]
+name = "fixtures"
+path = "fixtures.rs"
+harness = false
+
+[dev-dependencies]
+catalog = { path = "../crates/catalog" }
+engine = { path = "../crates/engine" }
+libtest-mimic.workspace = true
+project = { path = "../crates/project" }
+similar.workspace = true

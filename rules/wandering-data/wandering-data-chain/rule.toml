@@ -1,0 +1,8 @@
+description = "An object travels through functions in several files that do not read it, or that read only one field of it"
+kind = "agent"
+files = "code"
+source = ["personal"]
+message = "This value travels through functions in several files that do not use it, or that use one field of it: each signature on the way carries data it does not need, so a change to the object ripples through all of them, and a reader has to follow the chain to learn who reads what. Pass each function only what it reads, and call the step that needs the value from the place that has it."
+agent = """
+Follow the parameters of the functions that the branch adds or changes into the functions they call in other files, and back to their callers: an object handed from a controller to a service to a helper or repository where a layer neither reads nor changes it; a function that takes a whole object and reads one field of it, called from other files; `x = applyX(x)` where `applyX`, imported from another file, returns its parameter or `{ ...x, field }`. The rules `no-pass-through-param`, `prefer-narrow-param` and `no-round-trip-object` cover one file; check only what crosses a file. Fix: pass only the field the last step reads, or call that step from the layer that has the data. Leave it, and say why, for context that legitimately crosses layers (a database transaction or executor, an `AbortSignal`, a logger, a request or metrics context, a connection handle) and for a DTO that a layer validates and stores as one unit.
+"""

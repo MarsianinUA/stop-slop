@@ -1,0 +1,12 @@
+description = "A test that detects changes, tests a mock or repeats the code"
+kind = "agent"
+source = ["personal"]
+message = "This test does not check a behaviour: it restates a constant or a config value, checks what a mock was told, or computes its expected value the way the code does. It fails on a harmless change and passes when the behaviour breaks, so it costs upkeep and gives no confidence. Check what the code gives back through its entry instead: the returned value, the error, the data it writes or sends."
+agent = """
+Check the tests the branch adds or changes. Flag a test that:
+- detects changes: it asserts a constant, an enum's values, a config default or a copy of a literal (`expect(DEFAULT_TIMEOUT_MS).toBe(30_000)`), so any edit of the value fails it and nothing else can;
+- tests a mock: its only assertions are on a fake of the project's own code (`expect(repository.save).toHaveBeenCalledWith(..)`), while what the code returns, throws or stores goes unchecked;
+- repeats the code: it computes the expected value with the formula or the helper the code itself uses (`expect(fee(order)).toBe(order.total * FEE_RATE)`), so a wrong formula passes in both places;
+- repeats a behaviour another test already covers through the module entry.
+Fix: rewrite it to enter through the module's exported surface and check what comes out, fold it into the existing test of that scenario as data or an assertion, or delete it and name it with the reason in the report. Never weaken an assertion to make a test pass, and never delete a test because it fails. Leave a call to the system boundary that is itself the behaviour (the message published to a queue, the HTTP request sent, the metric recorded): there the call is the output. A test of this kind that the branch does not touch stays and is reported as debt.
+"""

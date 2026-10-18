@@ -1,0 +1,5 @@
+description = "`Omit`, `Pick`, `Partial` and other reshaping of a type of this project, or `Own & { ... }` in place"
+kind = "error"
+files = "code"
+source = ["personal"]
+message = "`{utility}` makes an ad-hoc variant of `{type}`, a type of this project: the variant drifts away from the original, and readers have to work out which fields it keeps. If `{type}` does not fit here, change it: put the shared fields into a named base type and extend it."

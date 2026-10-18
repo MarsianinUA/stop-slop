@@ -1,0 +1,5 @@
+description = "A provider in `Scope.REQUEST`"
+kind = "error"
+files = "code"
+source = ["personal"]
+message = "`Scope.REQUEST` builds this provider anew for every request, and every provider that injects it turns request-scoped too, up to the controller: each request pays for building that whole chain, and a provider that keeps a cache or a connection loses it after one request. Keep providers singletons and carry request data in `AsyncLocalStorage` (one store per request, set by a middleware), or pass it as an argument."

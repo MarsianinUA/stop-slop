@@ -1,0 +1,8 @@
+description = "An `index.ts` made only of `export * from`"
+kind = "candidate"
+files = "code"
+source = ["personal"]
+message = "This index only re-exports whole modules with `export *` ({count} of them): every name each module exports becomes the folder's public API, a reader cannot see what the folder offers without opening every module, and an import of one name loads all of them and invites import cycles. Export by name what other folders use: `export { OrderService } from './order.service'`."
+agent = """
+An `index.ts` whose every statement is `export * from '...'`. Fix: replace each `export *` with named exports of what other folders import from this one (search for imports of the folder), and leave the rest out of the public API. Ignore the finding, with the reason, when a tool reads the module whole (a Drizzle `schema` barrel that must list every table, a generated barrel) or when the index is a package entry that deliberately mirrors one module.
+"""

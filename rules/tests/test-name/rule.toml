@@ -1,0 +1,12 @@
+description = "A test name that says nothing: `it('works')`, `test1`"
+kind = "error"
+source = ["personal"]
+message = "The test name {name} says nothing about the behaviour it checks: when it fails, the report does not tell what broke, and a reader has to read its body to learn what it covers. Name the behaviour and its case, like `returns 404 when the order is missing`."
+
+[options]
+vague = ["works", "work", "worked", "working", "test", "tests", "testing", "spec"]
+filler = [
+    "it", "should", "does", "do", "is", "as", "the", "a", "an", "my", "this", "another", "new",
+    "first", "second", "third", "one", "two", "three", "correctly", "properly", "fine", "ok",
+    "okay", "expected", "basic", "simple", "case", "example", "sample", "scenario",
+]

@@ -1,0 +1,7 @@
+description = "An own `HttpStatus` instead of the one Nest exports"
+kind = "error"
+source = ["project"]
+message = "`{name}` declares again an enum that Nest exports from `{module}`: two lists of the same values drift apart, a value the copy lacks or spells differently slips by as a bare number or string, and a reader has to check which one a handler compares against. Delete it and import `{name}` from `{module}`."
+
+[options.enums]
+HttpStatus = "@nestjs/common"

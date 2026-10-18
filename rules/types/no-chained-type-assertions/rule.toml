@@ -1,0 +1,5 @@
+description = "`value as unknown as T`"
+kind = "error"
+files = "code"
+source = ["anti-slop"]
+message = "A chain of casts, like `as unknown as T`, forces a type the compiler would not accept from one cast and drops all type evidence on the way. Keep the value's own type or parse untrusted input at its boundary; if the cast must stay, state why in a `// SAFETY:` comment above the line or at its end."

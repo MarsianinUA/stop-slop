@@ -1,0 +1,12 @@
+description = "An import of a package the platform replaces: `axios`, `node-fetch`, `got`, `uuid`, `dotenv`, `lodash`"
+kind = "error"
+source = ["personal"]
+message = "`{package}` adds a dependency for what the platform already does: use {instead}. Every package is code to audit, update and ship, and a second way to do the same thing in this codebase."
+
+[options.packages]
+axios = "the global `fetch()`"
+dotenv = "`process.loadEnvFile()` or `node --env-file`"
+got = "the global `fetch()`"
+lodash = "the native methods (`structuredClone()`, `Object.groupBy()`, array and object methods)"
+node-fetch = "the global `fetch()`"
+uuid = "`crypto.randomUUID()`"

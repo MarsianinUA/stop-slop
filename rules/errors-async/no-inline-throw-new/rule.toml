@@ -1,0 +1,11 @@
+description = "`throw new X(..)` outside an error factory in `errors/`"
+kind = "candidate"
+files = "code"
+source = ["personal"]
+message = "`throw new {class}(..)` builds the error in place: its code, message and payload are decided here, so the same failure gets a different shape in each place that throws it, and the error contract has no single source. Create it through a PascalCase factory in `errors/` and throw what it returns (`throw OrderNotFound(orderId)`)."
+agent = """
+The error is built inline with `new`. If it is an operational error that a caller or a client sees (an HTTP exception, a domain error, an adapter error), add or reuse a PascalCase factory function in the module's `errors/` folder that builds it with its code and payload, and throw the factory's result. If it marks a programmer bug that no caller handles (an unreachable branch, a broken invariant), or the code is a script, ignore the finding with that reason.
+"""
+
+[options]
+dirs = ["errors"]

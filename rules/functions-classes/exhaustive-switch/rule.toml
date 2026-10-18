@@ -1,0 +1,7 @@
+description = "A `switch` over enum members or `.kind` without a `default`"
+kind = "error"
+source = ["personal", "direct"]
+message = "`switch ({subject})` has no `default`: when the set gets a new member, this switch skips it silently and TypeScript does not point here. Add a `default` with a `never` check (`const unhandled: never = {subject};`) so a new member breaks the build; if the value can be wider than the listed members, handle the rest in that `default`."
+
+[options]
+keys = ["kind"]

@@ -1,0 +1,4 @@
+description = "A comment is not a finished sentence: it starts with a lowercase letter or does not end with a period. Directives, `TODO` and commented-out code are left alone"
+kind = "error"
+source = ["direct"]
+message = "This comment {problem}: a fragment is shorthand the writer can decode and the next reader has to guess at, and in a comment of several lines nothing marks where a thought ends. Write it as a sentence: a capital letter first (a name from the code keeps its case), a period at the end."

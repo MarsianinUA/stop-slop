@@ -1,0 +1,8 @@
+description = "`console.*` in application code"
+kind = "error"
+files = "code"
+source = ["personal"]
+message = "`{use}` writes around the project logger: the line ignores the log level the deployment sets, carries no context (request, job, module), skips the redaction of secrets, and may never reach the log pipeline. Log through the project logger (an injected `Logger`, `this.logger`)."
+
+[options]
+dirs = ["scripts", "bin"]

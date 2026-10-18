@@ -1,0 +1,8 @@
+description = "`Promise.all(items.map(..))` instead of `Promise.allSettled`"
+kind = "candidate"
+files = "code"
+source = ["personal"]
+message = "`Promise.all` over `{items}` rejects on the first failure: the other items keep running unobserved, their results are lost, and the caller cannot tell which items failed. Use `Promise.allSettled`, log every failure and report the failed count or ids in the result."
+agent = """
+`Promise.all` runs a function over each item of a list. If each item is its own unit of work (a sync, a notification, an upsert per row), switch to `Promise.allSettled`, log each rejected reason with the item's id, and return or report the count or ids of the failed items. If one failure must fail the whole operation (the results feed one response, or the work is all-or-nothing), ignore the finding with that reason.
+"""

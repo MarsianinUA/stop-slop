@@ -1,0 +1,12 @@
+[tests]
+suffixes = ["spec", "test", "e2e-spec"]
+dirs = ["__tests__"]
+
+[types]
+suffixes = ["type", "types", "interface", "enum"]
+
+[constants]
+suffixes = ["constant", "constants"]
+
+[functions]
+suffixes = ["util", "mapper", "config", "schema"]
