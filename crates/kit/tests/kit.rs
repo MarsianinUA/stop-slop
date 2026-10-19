@@ -2774,7 +2774,7 @@ fn boolean_parameter_has_a_boolean_type_or_a_boolean_default() {
     });
 }
 
-/// `loop_around` of each `probe()` call, in source order.
+/// The `probe()` calls, in source order.
 fn probe_ids(file: &File<'_>) -> Vec<NodeId> {
     file.semantic
         .nodes()
@@ -2787,15 +2787,12 @@ fn probe_ids(file: &File<'_>) -> Vec<NodeId> {
         .collect()
 }
 
-fn probes<'a>(file: &File<'a>) -> Vec<Option<LoopAround<'a>>> {
-    probe_ids(file)
-        .into_iter()
-        .map(|id| loop_around(file, id))
-        .collect()
+fn probes<T>(file: &File<'_>, of: impl Fn(NodeId) -> T) -> Vec<T> {
+    probe_ids(file).into_iter().map(of).collect()
 }
 
 fn loops_of_probes<'a>(file: &File<'a>) -> Vec<Option<(LoopKind, Option<&'a str>, u32)>> {
-    probes(file)
+    probes(file, |probe| loop_around(file, probe))
         .into_iter()
         .map(|around| {
             around.map(|around| {
@@ -2839,7 +2836,7 @@ export async function f() {
                 Some((LoopKind::Callback, Some("rows"), 3)),
             ]
         );
-        let labels: Vec<String> = probes(file)
+        let labels: Vec<String> = probes(file, |probe| loop_around(file, probe))
             .into_iter()
             .map(|around| around.expect("a loop").label(file))
             .collect();
@@ -2916,6 +2913,56 @@ export function g() {
                 inner.runs_each_pass(file, body),
             ],
             [false, true, true]
+        );
+    });
+}
+
+#[test]
+fn nest_role_names_the_role_of_the_method_around_a_node_in_a_class_nest_decorates() {
+    let text = "import { Controller, Get, Injectable } from '@nestjs/common';
+import { MessagePattern } from '@nestjs/microservices';
+declare function probe(): void;
+probe();
+@Controller('orders')
+export class OrdersController {
+  constructor() { probe(); }
+  @Get(':id')
+  find() { probe(); }
+  @MessagePattern('orders.created')
+  created() { [1].forEach(() => probe()); }
+  onModuleInit() { probe(); }
+  private format() { probe(); }
+  @Get(String(probe()))
+  other() {}
+}
+@Injectable()
+export class OrdersService {
+  load() { probe(); }
+  static create() { probe(); }
+  run() { class Inner { m() { probe(); } } }
+}
+export class Plain {
+  load() { probe(); }
+}";
+    with_file(text, |file| {
+        assert_eq!(
+            probes(file, |probe| nest_role(file, probe)),
+            [
+                None,
+                Some(NestRole::Constructor),
+                Some(NestRole::RouteHandler),
+                // Through the callback to the method around it.
+                Some(NestRole::MessageHandler),
+                Some(NestRole::Lifecycle),
+                Some(NestRole::ProviderMethod),
+                // A decorator's argument runs once, when the class is declared.
+                None,
+                Some(NestRole::ProviderMethod),
+                Some(NestRole::ProviderMethod),
+                // The innermost class decides.
+                None,
+                None,
+            ]
         );
     });
 }
