@@ -13,7 +13,7 @@ Why I wrote my own:
 
 103 rules: types, naming, functions and classes, data that wanders through functions for nothing, imports, config, errors and async, logs, style, NestJS, comments and tests.
 
-Plus 9 on Node performance: lookups and copies inside loops, `await` in loops, sync I/O in handlers, regexes that hang. Those stay off until I turn them on for a repo.
+Plus 12 more that stay off until I turn them on for a repo: 9 on Node performance (lookups and copies inside loops, `await` in loops, sync I/O in handlers, regexes that hang) and 3 on branching (an `if` that checks what's already known, identical branches, functions too tangled to follow).
 
 - [All the rules](docs/rules.md)
 - [How it works, how to install it, and what it skips on purpose](docs/spec.md)

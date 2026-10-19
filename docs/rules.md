@@ -1,6 +1,6 @@
 # Rules
 
-All 112 rules stop-slop checks. `stop-slop rules` prints the same list, and each rule lives in its own folder under `rules/`.
+All 115 rules stop-slop checks. `stop-slop rules` prints the same list, and each rule lives in its own folder under `rules/`.
 
 - **error**: the rule is sure. After a fix, none of these may be left.
 - **candidate**: a hunch. The program flags it, the agent decides if it's a real problem, and a false one goes to the ignore list with a reason.
@@ -57,7 +57,7 @@ File, folder and symbol names.
 
 ## Functions and classes
 
-What goes in a class file and a functions file, parameters, branching, state.
+What goes in a class file and a functions file, parameters, `if` chains and `switch`, state.
 
 | Rule | What it catches | Kind | Fix |
 |---|---|---|---|
@@ -197,3 +197,13 @@ Code that costs more on Node than it looks. Off until `enabled` in `config.toml`
 | [`no-recursive-next-tick`](../rules/performance/no-recursive-next-tick/rule.toml) | A function that passes itself to `process.nextTick` | error |  |
 | [`no-shift-in-loop`](../rules/performance/no-shift-in-loop/rule.toml) | `shift()` or `unshift()` of the array a loop goes through: `while (queue.length) queue.shift()` | candidate |  |
 | [`no-sync-in-handler`](../rules/performance/no-sync-in-handler/rule.toml) | `readFileSync`, `execSync`, `bcrypt.hashSync` and other blocking calls in a Nest handler or provider, outside the constructor and the startup hooks | candidate |  |
+
+## Branching
+
+Tests that decide nothing and functions too tangled to follow. Off until `enabled` in `config.toml` names the group.
+
+| Rule | What it catches | Kind | Fix |
+|---|---|---|---|
+| [`max-cognitive-complexity`](../rules/branching/max-cognitive-complexity/rule.toml) | A function with a cognitive complexity above 15, counted as SonarJS counts it | error |  |
+| [`no-identical-branches`](../rules/branching/no-identical-branches/rule.toml) | Branches that are the same code: an `if` and its `else`, an `if` and the `else if` after it, the two sides of `?:`, adjacent `case`s | error |  |
+| [`no-implied-condition`](../rules/branching/no-implied-condition/rule.toml) | A test an outer `if`, `?:`, `&&` or `\|\|` already decided, on a `const` or a parameter nothing reassigns: `if (user) { if (user) .. }` | error |  |
