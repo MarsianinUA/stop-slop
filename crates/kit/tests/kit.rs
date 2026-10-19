@@ -2773,3 +2773,124 @@ fn boolean_parameter_has_a_boolean_type_or_a_boolean_default() {
         assert_eq!(booleans, [true, true, false, true, false, false]);
     });
 }
+
+/// `loop_around` of each `probe()` call, in source order.
+fn probes<'a>(file: &File<'a>) -> Vec<Option<LoopAround<'a>>> {
+    file.semantic
+        .nodes()
+        .iter()
+        .filter(|node| {
+            matches!(node.kind(), AstKind::CallExpression(call)
+                if matches!(&call.callee, Expression::Identifier(id) if id.name == "probe"))
+        })
+        .map(|node| loop_around(file, node.id()))
+        .collect()
+}
+
+fn loops_of_probes<'a>(file: &File<'a>) -> Vec<Option<(LoopKind, Option<&'a str>, u32)>> {
+    probes(file)
+        .into_iter()
+        .map(|around| {
+            around.map(|around| {
+                let over = around.over.map(|over| source(file, over));
+                (around.kind, over, around.depth)
+            })
+        })
+        .collect()
+}
+
+#[test]
+fn loop_around_names_each_kind_of_loop_its_collection_and_the_depth() {
+    let text = "declare function probe(): void;
+declare const rows: number[];
+declare const stream: AsyncIterable<number> & { on(event: string, listener: () => void): void };
+declare const index: Record<string, number>;
+export async function f() {
+  for (let i = 0; i < rows.length; i++) probe();
+  for (const row of rows) probe();
+  for await (const chunk of stream) probe();
+  for (const key in index) probe();
+  while (rows.length) probe();
+  do probe(); while (rows.length);
+  rows.forEach(() => probe());
+  stream.on('data', () => probe());
+  for (const row of rows) rows.map(() => rows.forEach(() => probe()));
+}";
+    with_file(text, |file| {
+        assert_eq!(
+            loops_of_probes(file),
+            [
+                Some((LoopKind::For, Some("rows"), 1)),
+                Some((LoopKind::ForOf, Some("rows"), 1)),
+                Some((LoopKind::ForAwaitOf, Some("stream"), 1)),
+                Some((LoopKind::ForIn, Some("index"), 1)),
+                Some((LoopKind::While, None, 1)),
+                Some((LoopKind::DoWhile, None, 1)),
+                Some((LoopKind::Callback, Some("rows"), 1)),
+                Some((LoopKind::Listener, None, 1)),
+                // Through the `map` callback to the `for..of` around it.
+                Some((LoopKind::Callback, Some("rows"), 3)),
+            ]
+        );
+        let labels: Vec<String> = probes(file)
+            .into_iter()
+            .map(|around| around.expect("a loop").label(file))
+            .collect();
+        assert_eq!(
+            labels,
+            [
+                "`for` loop over `rows`",
+                "`for..of` loop over `rows`",
+                "`for await` loop over `stream`",
+                "`for..in` loop over `index`",
+                "`while` loop",
+                "`do..while` loop",
+                "`forEach` callback over `rows`",
+                "`on` listener",
+                "`forEach` callback over `rows`",
+            ]
+        );
+    });
+}
+
+#[test]
+fn loop_around_skips_what_runs_once_and_stops_at_other_functions() {
+    let text = "declare function probe(): number;
+declare function later(run: () => void): void;
+declare const rows: number[];
+export function g() {
+  probe();
+  for (let i = probe(); i < 3; i++) {}
+  for (const row of [probe()]) {}
+  for (let i = 0; probe() > i; i += probe()) {}
+  for (const row of rows) {
+    const run = () => probe();
+    later(() => probe());
+    rows.forEach(() => probe(), probe());
+  }
+  while (rows.length) {
+    function inner() { probe(); }
+  }
+}";
+    with_file(text, |file| {
+        assert_eq!(
+            loops_of_probes(file),
+            [
+                None,
+                // The `init` of `for` and the collection of `for..of` run once.
+                None,
+                None,
+                // The test and the update run on every pass.
+                Some((LoopKind::For, None, 1)),
+                Some((LoopKind::For, None, 1)),
+                // A function that is not a per-item callback runs whenever it is called.
+                None,
+                None,
+                Some((LoopKind::Callback, Some("rows"), 2)),
+                // The second argument of `forEach` runs once per pass of the `for..of`.
+                Some((LoopKind::ForOf, Some("rows"), 1)),
+                None,
+            ]
+        );
+    });
+}
