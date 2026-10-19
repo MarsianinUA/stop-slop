@@ -1,0 +1,10 @@
+description = "A search of an array in a loop over another collection: `ids.includes(order.id)` inside `for (const order of orders)`"
+kind = "candidate"
+source = ["personal"]
+message = "`{array}` is {origin}, and `{array}.{method}(..)` scans it on every pass of the {loop}, at loop depth {depth}: the work is its length times the passes. It matches items by {key}. If `{array}` can hold more than a few items, build a `Set` or a `Map` from it once, before the loop, and look items up there."
+agent = """
+The message names the array, where it comes from, the loop, how deep the loops go and what the search matches items by. Build the index once, before the outermost loop that does not change the array: `new Set(ids)` and `has(..)` for `includes` and `indexOf`; `new Map(users.map((user) => [user.id, user]))` and `get(..)` for `find`, `findIndex` and `some` by the key the message names; a `Map` from that key to a list for `filter`. When the array and the loop both stay small by design (a short list of options, a page of a few dozen rows), or the search must see changes made to the array after the index would be built, ignore the finding with that reason.
+"""
+
+[options]
+min-literal-items = 8
