@@ -1,0 +1,4 @@
+description = "A regex that repeats a group of one repeated character: `(a+)+`, `(\\w*)*`"
+kind = "error"
+source = ["personal"]
+message = "`{part}` repeats a group in which nothing must match but one repeated character, so a run of that character splits between the inner and the outer repetition in exponentially many ways. When what follows the group fails to match, the engine tries every split: a long input hangs the event loop (ReDoS). Let each character match one way: `(a+)+` matches what `(a+)` does, and `([a-z]+-?)+` what `[a-z]+(-[a-z]+)*-?` does."
