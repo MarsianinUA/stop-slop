@@ -807,15 +807,7 @@ fn check_names_the_facts_of_a_lookup_in_a_loop_once_enabled_turns_performance_on
          return orders.filter((order) => ids.includes(order.id));\n}\n",
     )
     .commit("main");
-    let lookups = |t: &TempRepo| -> Vec<String> {
-        let out = run(t.path(), &["check", "--files", "src/orders.ts", "--json"]);
-        assert_ne!(code(&out), 2, "{}", stderr(&out));
-        findings(&json(&out))
-            .iter()
-            .filter(|finding| finding["rule"] == "no-lookup-in-loop")
-            .map(|finding| finding["message"].as_str().expect("a message").to_owned())
-            .collect()
-    };
+    let lookups = |t: &TempRepo| messages(t, "src/orders.ts", "no-lookup-in-loop");
     assert!(lookups(&t).is_empty());
 
     write_config(&t, "enabled = [\"performance\"]\n");
@@ -832,6 +824,56 @@ fn check_names_the_facts_of_a_lookup_in_a_loop_once_enabled_turns_performance_on
     ] {
         assert!(message.contains(fact), "{fact}: {message}");
     }
+}
+
+#[test]
+fn check_names_what_an_await_in_a_loop_carries_over_and_how_the_loop_ends() {
+    let t = TempRepo::new();
+    t.write(
+        "src/pages.ts",
+        "declare function fetchPage(cursor: string): Promise<{ next: string; sizes: number[] }>;\n\
+         export async function walk(): Promise<number> {\n  \
+           let total = 0;\n  \
+           for (let cursor = 'start'; cursor !== ''; ) {\n    \
+             const page = await fetchPage(cursor);\n    \
+             const sorted = page.sizes.sort((left, right) => {\n      \
+               let order = left - right;\n      \
+               order *= -1;\n      \
+               return order;\n    \
+             });\n    \
+             total += sorted[0] ?? 0;\n    \
+             cursor = page.next;\n    \
+             if (total > 100) break;\n  \
+           }\n  \
+           return total;\n\
+         }\n",
+    )
+    .commit("main");
+    write_config(&t, "enabled = [\"performance\"]\n");
+
+    let found = messages(&t, "src/pages.ts", "no-await-in-loop");
+    let [message] = found.as_slice() else {
+        panic!("one await: {found:?}");
+    };
+    for fact in [
+        "`await fetchPage(..)`",
+        "`fetchPage`, which by its name looks like a round trip",
+        // `order` is a local of the comparator, not of the loop.
+        "the body writes: `total`, `cursor`.",
+        "Early exit: `break`.",
+    ] {
+        assert!(message.contains(fact), "{fact}: {message}");
+    }
+}
+
+fn messages(t: &TempRepo, file: &str, rule: &str) -> Vec<String> {
+    let out = run(t.path(), &["check", "--files", file, "--json"]);
+    assert_ne!(code(&out), 2, "{}", stderr(&out));
+    findings(&json(&out))
+        .iter()
+        .filter(|finding| finding["rule"] == rule)
+        .map(|finding| finding["message"].as_str().expect("a message").to_owned())
+        .collect()
 }
 
 const IO_FEAT: &str = "import { readFileSync } from 'fs'; export const read: any = readFileSync;\n\

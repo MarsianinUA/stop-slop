@@ -312,7 +312,7 @@ max = 5
 
 ## Rules
 
-The program has 108 rules in 13 groups: 75 `error`, 27 `candidate`, 6 `agent`; the 5 of `performance` are off until `enabled` names them. 16 of them fix code themselves. `stop-slop rules` lists them, and so does [rules.md](rules.md); each one lives in `rules/<group>/<id>/`. The catalog is generic: no paths, packages or domains of one project. Ideas that were turned down are in [Not checked, on purpose](#not-checked-on-purpose).
+The program has 112 rules in 13 groups: 77 `error`, 29 `candidate`, 6 `agent`; the 9 of `performance` are off until `enabled` names them. 16 of them fix code themselves. `stop-slop rules` lists them, and so does [rules.md](rules.md); each one lives in `rules/<group>/<id>/`. The catalog is generic: no paths, packages or domains of one project. Ideas that were turned down are in [Not checked, on purpose](#not-checked-on-purpose).
 
 ### Kinds
 
@@ -356,7 +356,7 @@ Two more terms the rules use:
 | `nestjs` | 8 | `@HttpCode`, request scope, `getOrThrow`, response DTOs, routes, inject tokens |
 | `comments` | 4 | `TODO` owners, commented-out code, comments as sentences, comments that retell the code |
 | `tests` | 3 | mocks of own modules, test names, test quality |
-| `performance` | 5 | opt-in: searches, copies, `shift` and `await` inside loops, `forEach(async ..)` |
+| `performance` | 9 | opt-in: searches, copies, `shift` and `await` inside loops, `forEach(async ..)`, blocking calls in Nest handlers, `delete` on objects, recursive `process.nextTick`, regexes that backtrack exponentially |
 
 A group can have a `group.toml`:
 

@@ -1,0 +1,4 @@
+description = "A function that passes itself to `process.nextTick`"
+kind = "error"
+source = ["personal"]
+message = "`{name}` passes itself to `process.nextTick`. Node empties the next-tick queue before it returns to the event loop, so while `{name}` keeps scheduling itself, no I/O callback, timer or incoming request runs. Schedule the next pass with `setImmediate`: it runs after the I/O that is waiting."

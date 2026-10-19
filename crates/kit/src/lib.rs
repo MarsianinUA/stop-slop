@@ -15,6 +15,7 @@ mod import_kind;
 mod iteration;
 mod lines;
 mod member;
+mod nest;
 mod own_type;
 mod rename;
 mod rule;
@@ -49,6 +50,7 @@ pub use lines::{
     LineIndex, Position, has_blank_line, line_start, line_tail, one_line, opens_region,
 };
 pub use member::{COLLECTIONS, MemberUse, is_log_call, member_use, member_write, mutator_call};
+pub use nest::{NestRole, nest_role};
 pub use own_type::is_own_type;
 pub use rename::{
     PRIVATE_MEMBER_NODES, is_ambient, is_jsx_tag, is_own_name, is_script_global, is_similar_name,
@@ -69,6 +71,7 @@ pub mod oxc {
     pub use oxc_allocator as allocator;
     pub use oxc_ast as ast;
     pub use oxc_parser as parser;
+    pub use oxc_regular_expression as regular_expression;
     pub use oxc_semantic as semantic;
     pub use oxc_span as span;
 }
@@ -76,20 +79,20 @@ pub mod oxc {
 pub mod prelude {
     pub use crate::{
         COLLECTIONS, Case, CommentBlock, CommentKind, CommentPart, Cx, Declared, Edit, Fact, File,
-        ImportKind, LoopAround, LoopKind, MemberUse, PRIVATE_MEMBER_NODES, Role, Rule, TopBinding,
-        TopClass, TopKind, add_import, call_of, class_file_classes, comment_blocks, declared,
-        expression_assertion, file_name_has_word, global_member, global_references, has_blank_line,
-        has_safety_comment, if_runs, import_blocks, import_group, import_kind, imported_from,
-        imported_name, is_ambient, is_boolean_parameter, is_boolean_type, is_callback,
-        is_cli_script, is_const_assertion, is_di_constructor, is_exported, is_exported_node,
-        is_global, is_jsx_tag, is_known_array, is_known_value, is_literal_value, is_log_call,
-        is_nullable, is_open_key, is_option_key, is_own_name, is_own_type, is_public,
+        ImportKind, LoopAround, LoopKind, MemberUse, NestRole, PRIVATE_MEMBER_NODES, Role, Rule,
+        TopBinding, TopClass, TopKind, add_import, call_of, class_file_classes, comment_blocks,
+        declared, expression_assertion, file_name_has_word, global_member, global_references,
+        has_blank_line, has_safety_comment, if_runs, import_blocks, import_group, import_kind,
+        imported_from, imported_name, is_ambient, is_boolean_parameter, is_boolean_type,
+        is_callback, is_cli_script, is_const_assertion, is_di_constructor, is_exported,
+        is_exported_node, is_global, is_jsx_tag, is_known_array, is_known_value, is_literal_value,
+        is_log_call, is_nullable, is_open_key, is_option_key, is_own_name, is_own_type, is_public,
         is_script_global, is_signature_given, is_similar_name, keeps_primitive, lib_type,
         line_start, line_tail, local_callee, loop_around, member_use, member_write, module_source,
-        mutator_call, narrows_to_literal, one_line, opens_region, outer_assertion, package_name,
-        path_span, private_member, related_symbols, relies_on_wide_type, rename, returns_promise,
-        start_after_decorators, static_text, this_class, top_bindings, top_classes, type_assertion,
-        unwrapped_type, words,
+        mutator_call, narrows_to_literal, nest_role, one_line, opens_region, outer_assertion,
+        package_name, path_span, private_member, related_symbols, relies_on_wide_type, rename,
+        returns_promise, start_after_decorators, static_text, this_class, top_bindings,
+        top_classes, type_assertion, unwrapped_type, words,
     };
     pub use oxc_allocator::Allocator;
     pub use oxc_ast::{AstKind, AstType};

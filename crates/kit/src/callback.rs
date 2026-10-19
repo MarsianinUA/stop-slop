@@ -123,7 +123,7 @@ fn implements(file: &File<'_>, member: &AstNode<'_>) -> bool {
 }
 
 /// member -> `ClassBody` -> `Class`.
-fn member_class<'a>(file: &File<'a>, member: &AstNode<'a>) -> Option<&'a Class<'a>> {
+pub(crate) fn member_class<'a>(file: &File<'a>, member: &AstNode<'a>) -> Option<&'a Class<'a>> {
     let nodes = file.semantic.nodes();
     match nodes.parent_kind(nodes.parent_id(member.id())) {
         AstKind::Class(class) => Some(class),
