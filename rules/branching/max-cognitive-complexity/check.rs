@@ -61,13 +61,17 @@ fn cost(file: &File<'_>, node: &AstNode<'_>) -> Option<Cost> {
         | AstKind::CatchClause(_) => cost(0, true),
         AstKind::BreakStatement(statement) if statement.label.is_some() => cost(1, false),
         AstKind::ContinueStatement(statement) if statement.label.is_some() => cost(1, false),
-        // The whole chain is counted once, at its outermost operator.
-        AstKind::LogicalExpression(logical)
-            if !matches!(
-                file.semantic.nodes().parent_kind(node.id()),
-                AstKind::LogicalExpression(_)
-            ) =>
-        {
+        AstKind::LogicalExpression(logical) => {
+            // The whole chain is counted once, at its outermost operator. SonarJS leaves out a
+            // chain of one operator right in JSX braces: `{isOpen && <Modal />}`.
+            let skipped = match file.semantic.nodes().parent_kind(node.id()) {
+                AstKind::LogicalExpression(_) => true,
+                AstKind::JSXExpressionContainer(_) => is_short_circuit(logical, logical.operator),
+                _ => false,
+            };
+            if skipped {
+                return None;
+            }
             let runs = and_runs(logical, &mut None);
             cost(runs, false).filter(|_| runs > 0)
         }
@@ -113,10 +117,20 @@ fn and_runs(logical: &LogicalExpression<'_>, previous: &mut Option<LogicalOperat
     left + u32::from(starts) + side(&logical.right, previous)
 }
 
+/// A chain of `operator` alone, with no `?:` among its operands: `a && b && <Row />`.
+fn is_short_circuit(logical: &LogicalExpression<'_>, operator: LogicalOperator) -> bool {
+    let side = |side: &Expression<'_>| match side {
+        Expression::LogicalExpression(inner) => is_short_circuit(inner, operator),
+        Expression::ConditionalExpression(_) => false,
+        _ => true,
+    };
+    logical.operator == operator && side(&logical.left) && side(&logical.right)
+}
+
 /// The innermost function around the node, and how many levels nest the node inside it: the
 /// branches of `if` (an `else if` stays on the level of its `if`) and of `?:`, the bodies of
 /// loops and `catch`, the cases of `switch`. A nested function counts on its own, from level 0;
-/// a class field or static block outside any function is not scored.
+/// a class field or static block is not scored, nor added to a function around its class.
 fn owner(file: &File<'_>, node: &AstNode<'_>) -> Option<(NodeId, u32)> {
     let mut nesting = 0;
     let mut child = node.span();
@@ -156,9 +170,12 @@ fn named(file: &File<'_>, function: &AstNode<'_>) -> (String, Span) {
     };
     let holder = outer_assertion(file, function).id();
     let name = name.or_else(|| match file.semantic.nodes().parent_kind(holder) {
-        AstKind::MethodDefinition(method) => Some(method.key.span()),
-        AstKind::PropertyDefinition(field) => Some(field.key.span()),
-        AstKind::ObjectProperty(property) => Some(property.key.span()),
+        AstKind::MethodDefinition(method) => Some(key(file, method.key.span(), method.computed)),
+        AstKind::PropertyDefinition(field) => Some(key(file, field.key.span(), field.computed)),
+        AstKind::AccessorProperty(field) => Some(key(file, field.key.span(), field.computed)),
+        AstKind::ObjectProperty(property) => {
+            Some(key(file, property.key.span(), property.computed))
+        }
         AstKind::VariableDeclarator(declarator) => Some(declarator.id.span()),
         _ => None,
     });
@@ -171,4 +188,19 @@ fn named(file: &File<'_>, function: &AstNode<'_>) -> (String, Span) {
         None => "This function".to_string(),
     };
     (name, span)
+}
+
+/// A computed key with its brackets: `[Symbol.iterator]`.
+fn key(file: &File<'_>, key: Span, computed: bool) -> Span {
+    let before = file.text[..key.start as usize].trim_end();
+    let after = &file.text[key.end as usize..];
+    match (
+        before.strip_suffix('['),
+        after.trim_start().strip_prefix(']'),
+    ) {
+        (Some(open), Some(rest)) if computed => {
+            Span::new(open.len() as u32, (file.text.len() - rest.len()) as u32)
+        }
+        _ => key,
+    }
 }

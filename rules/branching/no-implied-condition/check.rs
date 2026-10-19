@@ -26,7 +26,7 @@ impl Rule for Check {
         let Some(test) = test else {
             return;
         };
-        let Some((symbol, parameter)) = stable(file, test.id) else {
+        let Some((symbol, binding)) = stable(file, test.id) else {
             return;
         };
         let Some(proof) = proven(file, node, symbol, test.form, test.negated != flipped) else {
@@ -44,14 +44,7 @@ impl Rule for Check {
             .arg("check", proof.check)
             .arg("line", file.lines.position(proof.at.start).line)
             .arg("name", test.id.name.as_str())
-            .arg(
-                "binding",
-                if parameter {
-                    "a parameter nothing reassigns"
-                } else {
-                    "a `const`"
-                },
-            );
+            .arg("binding", binding);
     }
 }
 
@@ -172,22 +165,25 @@ fn symbol_of(file: &File<'_>, id: &IdentifierReference<'_>) -> Option<SymbolId> 
         .symbol_id()
 }
 
-/// The symbol and whether it is a parameter, when nothing can change what the name holds.
-fn stable(file: &File<'_>, id: &IdentifierReference<'_>) -> Option<(SymbolId, bool)> {
+/// The symbol and how the message names its binding, when nothing can change what the name
+/// holds.
+fn stable(file: &File<'_>, id: &IdentifierReference<'_>) -> Option<(SymbolId, &'static str)> {
     let symbol = symbol_of(file, id)?;
     let nodes = file.semantic.nodes();
     let declaration = file.semantic.scoping().symbol_declaration(symbol);
-    let parameter = match nodes.kind(declaration) {
-        AstKind::FormalParameter(_) | AstKind::FormalParameterRest(_) => true,
+    let binding = match nodes.kind(declaration) {
+        AstKind::FormalParameter(_) | AstKind::FormalParameterRest(_) => {
+            "a parameter nothing reassigns"
+        }
         AstKind::VariableDeclarator(_) => match nodes.parent_kind(declaration) {
             AstKind::VariableDeclaration(list) if list.kind == VariableDeclarationKind::Const => {
-                false
+                "a `const`"
             }
             _ => return None,
         },
         _ => return None,
     };
-    (!file.semantic.scoping().symbol_is_mutated(symbol)).then_some((symbol, parameter))
+    (!file.semantic.scoping().symbol_is_mutated(symbol)).then_some((symbol, binding))
 }
 
 /// Whether the value of the node decides a branch: the test of `if`, `?:` or a loop, or the
@@ -250,25 +246,20 @@ fn proven<'a>(
 ) -> Option<Proof> {
     let mut child = node.span();
     for ancestor in file.semantic.nodes().ancestors(node.id()) {
-        // The fourth field is the `if` whose `else` holds the node.
         let source = match ancestor.kind() {
-            AstKind::IfStatement(statement) if statement.test.span() != child => {
-                let value = statement.consequent.span() == child;
-                Some((
-                    &statement.test,
-                    value,
-                    "the `if`",
-                    (!value).then_some(statement),
-                ))
-            }
+            AstKind::IfStatement(statement) if statement.test.span() != child => Some((
+                &statement.test,
+                statement.consequent.span() == child,
+                "the `if`",
+            )),
             AstKind::ConditionalExpression(conditional) if conditional.test.span() != child => {
                 let value = conditional.consequent.span() == child;
-                Some((&conditional.test, value, "the `?:`", None))
+                Some((&conditional.test, value, "the `?:`"))
             }
             AstKind::LogicalExpression(logical) if logical.right.span() == child => {
                 match logical.operator {
-                    LogicalOperator::And => Some((&logical.left, true, "the `&&`", None)),
-                    LogicalOperator::Or => Some((&logical.left, false, "the `||`", None)),
+                    LogicalOperator::And => Some((&logical.left, true, "the `&&`")),
+                    LogicalOperator::Or => Some((&logical.left, false, "the `||`")),
                     LogicalOperator::Coalesce => None,
                 }
             }
@@ -279,12 +270,14 @@ fn proven<'a>(
             | AstKind::StaticBlock(_) => return None,
             _ => None,
         };
-        if let Some((expression, value, check, otherwise)) = source
+        if let Some((expression, value, check)) = source
             && let Some(holds) = implied(file, expression, value, symbol, form)
-            // An `else if` test that comes out false repeats an earlier test of its chain:
-            // ESLint's `no-dupe-else-if` reports that.
+            // An `else if` test that comes out false repeats an earlier test of its chain, and
+            // ESLint's `no-dupe-else-if` reports the whole test when it does. A part of one is
+            // left unreported: `b` in `else if (a || b)` after `if (b)`.
             && !(holds == polarity
-                && otherwise.is_some_and(|statement| in_chain_test(statement, node.span())))
+                && matches!(ancestor.kind(), AstKind::IfStatement(statement)
+                    if in_chain_test(statement, node.span())))
         {
             return Some(Proof {
                 holds,

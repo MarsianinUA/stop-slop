@@ -114,3 +114,37 @@ export class Field {
     return typeof this.value === 'string' ? format(this.value) : format(this.value);
   }
 }
+
+interface Totals {
+  text: string;
+  count: number;
+}
+
+export function copy(kind: 'text' | 'count', from: Totals, to: Totals): void {
+  if (kind === 'text') {
+    to[kind] = from[kind];
+  } else {
+    to[kind] = from[kind];
+  }
+}
+
+type Change = { kind: 'text'; value: string } | { kind: 'count'; value: number };
+
+export function apply(change: Change, totals: Totals): void {
+  switch (change.kind) {
+    case 'text':
+      totals[change.kind] = change.value;
+      break;
+    case 'count':
+      totals[change.kind] = change.value;
+      break;
+  }
+}
+
+type Handler =
+  | { kind: 'text'; value: string; handle(value: string): void }
+  | { kind: 'count'; value: number; handle(value: number): void };
+
+export function handle(handler: Handler): void {
+  return handler.kind === 'text' ? handler.handle(handler.value) : handler.handle(handler.value);
+}

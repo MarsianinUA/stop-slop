@@ -83,3 +83,33 @@ export function withDefault(kind: string, id: string): void {
       break;
   }
 }
+
+export function run(id: string, kind: string): void {
+  if (kind === 'a') { // expect: no-identical-branches
+    save(id);
+  } else if (kind === 'b') {
+    save(id);
+  } else if (kind === 'c') {
+    save(id);
+  }
+}
+
+export function grouped(kind: string): number {
+  switch (kind) {
+    case 'a': // expect: no-identical-branches
+      return 1;
+    case 'b':
+    case 'c':
+      return 1;
+    default:
+      return 0;
+  }
+}
+
+export class Draft {
+  private readonly mode: string = 'draft';
+
+  label(): string {
+    return this.mode === 'draft' ? 'saved' : 'saved'; // expect: no-identical-branches
+  }
+}

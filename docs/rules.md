@@ -57,7 +57,7 @@ File, folder and symbol names.
 
 ## Functions and classes
 
-What goes in a class file and a functions file, parameters, branching, state.
+What goes in a class file and a functions file, parameters, `if` chains and `switch`, state.
 
 | Rule | What it catches | Kind | Fix |
 |---|---|---|---|
