@@ -360,7 +360,7 @@ A group can have a `group.toml`:
 
 - `requires-package` runs the group only for files whose package depends on it. The program looks in the nearest `package.json` and every one above it, up to the repository root, the way Node resolves packages from `node_modules`. So the dependencies of a monorepo's root count for every package. `nestjs` requires `@nestjs/core`.
 - `files` sets the default `files` of its rules. `tests` sets `tests`.
-- `opt-in = true` keeps the group off until `enabled` in [config.toml](#configtoml) names it. Only such a group can go into `enabled`; the others are on already.
+- `opt-in = true` keeps the group off until `enabled` in [config.toml](#configtoml) names it. Only such a group can go into `enabled`.
 
 ### Sources
 

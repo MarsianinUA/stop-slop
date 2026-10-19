@@ -16,7 +16,7 @@ pub enum ConfigError {
     /// `key` is `enabled[1]`.
     #[error("unknown group `{key}`")]
     UnknownGroup { key: String },
-    #[error("`{key}` names a group that is always on")]
+    #[error("`{key}` names a group that is not opt-in")]
     NotOptIn { key: String },
 }
 
