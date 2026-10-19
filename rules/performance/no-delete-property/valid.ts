@@ -9,6 +9,8 @@ interface Index {
 
 type Flags = Record<string, boolean>;
 
+interface Bag extends Record<string, string> {}
+
 export function forget(cache: Record<string, number>, key: string): void {
   delete cache[key];
   delete cache.total;
@@ -18,6 +20,21 @@ export function clear(flags: Flags, index: Index, names: { [key: string]: string
   delete flags.debug;
   delete index.first;
   delete names.admin;
+}
+
+export function extended(bag: Bag): void {
+  delete bag.temp;
+}
+
+export function generic<T extends Record<string, unknown>>(value: T): void {
+  delete value.secret;
+}
+
+export function copies(): void {
+  const headers = {} as Record<string, string>;
+  delete headers.host;
+  const env = { ...process.env };
+  delete env.DEBUG;
 }
 
 export function untyped(input: any, raw: unknown, settings): void {
@@ -40,6 +57,14 @@ export function unset(): void {
 
 export function qualified(env: NodeJS.ProcessEnv): void {
   delete env.DEBUG;
+}
+
+export class Store {
+  [key: string]: unknown;
+
+  clear(): void {
+    delete this.temp;
+  }
 }
 
 export class Registry {

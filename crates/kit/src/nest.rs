@@ -4,6 +4,7 @@ use oxc_semantic::NodeId;
 use oxc_span::GetSpan;
 
 use crate::File;
+use crate::callback::member_class;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NestRole {
@@ -43,14 +44,13 @@ const ROUTES: &[&str] = &[
 const MESSAGES: &[&str] = &["MessagePattern", "EventPattern", "SubscribeMessage"];
 
 /// The methods of `OnModuleInit`, `OnApplicationBootstrap`, `OnModuleDestroy`,
-/// `BeforeApplicationShutdown`, `OnApplicationShutdown` and a gateway's `OnGatewayInit`.
+/// `BeforeApplicationShutdown` and `OnApplicationShutdown`.
 const LIFECYCLE: &[&str] = &[
     "onModuleInit",
     "onApplicationBootstrap",
     "onModuleDestroy",
     "beforeApplicationShutdown",
     "onApplicationShutdown",
-    "afterInit",
 ];
 
 /// The role of the class method around `node`; `None` outside a class NestJS decorates. The
@@ -69,42 +69,40 @@ pub fn nest_role(file: &File<'_>, node: NodeId) -> Option<NestRole> {
     let AstKind::MethodDefinition(method) = member.kind() else {
         return None;
     };
-    // member -> `ClassBody` -> `Class`.
-    let AstKind::Class(class) = nodes.parent_kind(nodes.parent_id(member.id())) else {
-        return None;
-    };
-    let is_nest = class
-        .decorators
-        .iter()
-        .filter_map(decorator_name)
-        .any(|name| CLASSES.contains(&name));
-    if !is_nest || !method.value.span.contains_inclusive(span) {
+    if !method.value.span.contains_inclusive(span) {
         return None;
     }
-    let has = |names: &[&str]| {
-        method
-            .decorators
-            .iter()
-            .filter_map(decorator_name)
-            .any(|name| names.contains(&name))
+    let class = member_class(file, member)?;
+    if !decorated(&class.decorators, CLASSES) {
+        return None;
+    }
+    let is_hook = |name: &str| {
+        !method.r#static
+            && method.kind == MethodDefinitionKind::Method
+            && method.key.is_specific_static_name(name)
     };
     let role = if method.kind == MethodDefinitionKind::Constructor {
         NestRole::Constructor
-    } else if has(ROUTES) {
+    } else if decorated(&method.decorators, ROUTES) {
         NestRole::RouteHandler
-    } else if has(MESSAGES) {
+    } else if decorated(&method.decorators, MESSAGES) {
         NestRole::MessageHandler
-    } else if !method.r#static
-        && method.kind == MethodDefinitionKind::Method
-        && LIFECYCLE
-            .iter()
-            .any(|hook| method.key.is_specific_static_name(hook))
+    } else if LIFECYCLE.iter().any(|hook| is_hook(hook))
+        // `OnGatewayInit`: only a gateway has it.
+        || is_hook("afterInit") && decorated(&class.decorators, &["WebSocketGateway"])
     {
         NestRole::Lifecycle
     } else {
         NestRole::ProviderMethod
     };
     Some(role)
+}
+
+fn decorated(decorators: &[Decorator<'_>], names: &[&str]) -> bool {
+    decorators
+        .iter()
+        .filter_map(decorator_name)
+        .any(|name| names.contains(&name))
 }
 
 /// `Controller` of `@Controller('orders')` and of `@Controller`.

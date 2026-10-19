@@ -2921,6 +2921,7 @@ export function g() {
 fn nest_role_names_the_role_of_the_method_around_a_node_in_a_class_nest_decorates() {
     let text = "import { Controller, Get, Injectable } from '@nestjs/common';
 import { MessagePattern } from '@nestjs/microservices';
+import { WebSocketGateway } from '@nestjs/websockets';
 declare function probe(): void;
 probe();
 @Controller('orders')
@@ -2939,7 +2940,12 @@ export class OrdersController {
 export class OrdersService {
   load() { probe(); }
   static create() { probe(); }
+  afterInit() { probe(); }
   run() { class Inner { m() { probe(); } } }
+}
+@WebSocketGateway()
+export class EventsGateway {
+  afterInit() { probe(); }
 }
 export class Plain {
   load() { probe(); }
@@ -2959,8 +2965,11 @@ export class Plain {
                 None,
                 Some(NestRole::ProviderMethod),
                 Some(NestRole::ProviderMethod),
+                // `afterInit` is a hook of a gateway only.
+                Some(NestRole::ProviderMethod),
                 // The innermost class decides.
                 None,
+                Some(NestRole::Lifecycle),
                 None,
             ]
         );

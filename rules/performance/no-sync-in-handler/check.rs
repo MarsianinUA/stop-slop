@@ -6,11 +6,16 @@ use kit::prelude::*;
 #[serde(crate = "kit::serde", deny_unknown_fields)]
 pub struct Check {}
 
-/// Node modules whose `*Sync` functions block the event loop, with or without `node:`.
-const NODE: &[&str] = &["fs", "zlib", "child_process", "crypto"];
-
-/// Packages whose `*Sync` hashing runs on the main thread.
-const BCRYPT: &[&str] = &["bcrypt", "bcryptjs"];
+/// Modules whose `*Sync` functions block the event loop: Node's, with or without `node:`, and
+/// bcrypt's hashing.
+const BLOCKING: &[&str] = &[
+    "fs",
+    "zlib",
+    "child_process",
+    "crypto",
+    "bcrypt",
+    "bcryptjs",
+];
 
 impl Rule for Check {
     const NODES: &'static [AstType] = &[AstType::CallExpression];
@@ -25,7 +30,7 @@ impl Rule for Check {
         };
         let module = module.strip_prefix("node:").unwrap_or(module);
         // Without a callback `randomBytes` fills the buffer before it returns.
-        let blocks = name.ends_with("Sync") && (NODE.contains(&module) || BCRYPT.contains(&module))
+        let blocks = name.ends_with("Sync") && BLOCKING.contains(&module)
             || module == "crypto" && name == "randomBytes" && call.arguments.len() < 2;
         if !blocks {
             return;

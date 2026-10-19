@@ -31,6 +31,12 @@ export class Pump {
   stop(): void {
     queue.length = 0;
   }
+
+  unbound(): void {
+    process.nextTick(function () {
+      this.unbound();
+    });
+  }
 }
 
 export function scheduled(process: { nextTick(callback: () => void): void }): void {

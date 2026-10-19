@@ -69,12 +69,14 @@ fn own_name<'a>(file: &File<'a>, function: &AstNode<'a>) -> Option<(Own<'a>, &'a
 }
 
 /// The function itself (`tick`, `this.tick`, `tick.bind(this)`), or a function that only calls
-/// it: `() => tick()`, `function () { this.tick(); }`.
+/// it: `() => tick()`, `() => this.tick()`, `function () { tick(); }`.
 fn passes(file: &File<'_>, callback: &Expression<'_>, own: &Own<'_>) -> bool {
     let called = match callback.get_inner_expression() {
         Expression::ArrowFunctionExpression(arrow) => arrow
             .get_expression()
             .or_else(|| arrow.get_function_body().and_then(only_expression)),
+        // A `function` has its own `this`: `this.tick()` in it does not call the method.
+        Expression::FunctionExpression(_) if matches!(own, Own::Member(_)) => return false,
         Expression::FunctionExpression(function) => {
             function.body.as_deref().and_then(only_expression)
         }

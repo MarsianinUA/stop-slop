@@ -21,10 +21,14 @@ impl Rule for Check {
         // the whole file into a `parse-error`. Here it only leaves the rule silent.
         let parsed = match node.kind() {
             AstKind::RegExpLiteral(literal) => {
+                let pattern = literal.regex.pattern.text.as_str();
+                if !has_quantified_group(pattern) {
+                    return;
+                }
                 let flags = literal.regex.flags.to_inline_string();
                 LiteralParser::new(
                     &allocator,
-                    literal.regex.pattern.text.as_str(),
+                    pattern,
                     Some(flags.as_str()),
                     at(literal.span.start + 1),
                 )
@@ -34,9 +38,13 @@ impl Rule for Check {
                 let Some((pattern, flags)) = constructed(file, kind) else {
                     return;
                 };
+                let text = pattern.source_text(file.text);
+                if !has_quantified_group(text) {
+                    return;
+                }
                 ConstructorParser::new(
                     &allocator,
-                    pattern.source_text(file.text),
+                    text,
                     flags.map(|flags| flags.source_text(file.text)),
                     at(pattern.start),
                 )
@@ -46,12 +54,17 @@ impl Rule for Check {
         let Ok(pattern) = parsed else {
             return;
         };
-        let mut found = Vec::new();
-        nested(&pattern.body, &mut found);
-        for quantifier in found {
-            cx.report(quantifier.span).arg("part", quantifier);
-        }
+        nested(&pattern.body, cx);
     }
+}
+
+/// A group with a quantifier right after it, which a finding needs: most patterns have none and
+/// skip the parse. A false match only costs the parse.
+fn has_quantified_group(pattern: &str) -> bool {
+    pattern
+        .as_bytes()
+        .windows(2)
+        .any(|pair| pair[0] == b')' && matches!(pair[1], b'+' | b'*' | b'{'))
 }
 
 /// Spans of the pattern come out in the file's offsets.
@@ -74,37 +87,47 @@ fn constructed(file: &File<'_>, kind: AstKind<'_>) -> Option<(Span, Option<Span>
     if !is_global(file, callee.get_inner_expression(), "RegExp") {
         return None;
     }
-    let literal = |argument: &Argument<'_>| match argument {
-        Argument::StringLiteral(literal) => Some(literal.span),
-        Argument::TemplateLiteral(template) if template.expressions.is_empty() => {
-            Some(template.span)
-        }
-        _ => None,
+    let literal = |argument: &Argument<'_>| {
+        argument
+            .as_expression()
+            .filter(|argument| static_text(argument).is_some())
+            .map(GetSpan::span)
     };
     let pattern = literal(arguments.first()?)?;
     Some((pattern, arguments.get(1).and_then(literal)))
 }
 
-/// Every quantifier of the form `splits` finds, inner ones too.
-fn nested<'p>(disjunction: &'p Disjunction<'p>, found: &mut Vec<&'p Quantifier<'p>>) {
+/// Reports every quantifier of the form `splits` finds, inner ones too.
+fn nested(disjunction: &Disjunction<'_>, cx: &mut Cx<'_, '_>) {
     for term in disjunction
         .body
         .iter()
         .flat_map(|alternative| &alternative.body)
     {
-        let mut term = term;
-        if let Term::Quantifier(quantifier) = term {
-            if splits(quantifier) {
-                found.push(quantifier);
+        let term = match term {
+            Term::Quantifier(quantifier) => {
+                if splits(quantifier) {
+                    cx.report(quantifier.span).arg("part", quantifier);
+                }
+                &quantifier.body
             }
-            term = &quantifier.body;
+            term => term,
+        };
+        let body = match term {
+            Term::LookAroundAssertion(assertion) => Some(&assertion.body),
+            term => group_body(term),
+        };
+        if let Some(body) = body {
+            nested(body, cx);
         }
-        match term {
-            Term::CapturingGroup(group) => nested(&group.body, found),
-            Term::IgnoreGroup(group) => nested(&group.body, found),
-            Term::LookAroundAssertion(assertion) => nested(&assertion.body, found),
-            _ => {}
-        }
+    }
+}
+
+fn group_body<'b, 'p>(term: &'b Term<'p>) -> Option<&'b Disjunction<'p>> {
+    match term {
+        Term::CapturingGroup(group) => Some(&group.body),
+        Term::IgnoreGroup(group) => Some(&group.body),
+        _ => None,
     }
 }
 
@@ -114,12 +137,9 @@ fn nested<'p>(disjunction: &'p Disjunction<'p>, found: &mut Vec<&'p Quantifier<'
 /// between the passes in exponentially many ways, and the engine tries them all when what
 /// follows the group fails.
 fn splits(quantifier: &Quantifier<'_>) -> bool {
-    let group = match &quantifier.body {
-        Term::CapturingGroup(group) => &group.body,
-        Term::IgnoreGroup(group) => &group.body,
-        _ => return false,
-    };
-    quantifier.max.is_none() && group.body.iter().any(splits_alternative)
+    quantifier.max.is_none()
+        && group_body(&quantifier.body)
+            .is_some_and(|group| group.body.iter().any(splits_alternative))
 }
 
 /// At most one term is required, and it varies; with none required, any one varies.
@@ -136,10 +156,10 @@ fn splits_alternative(alternative: &Alternative<'_>) -> bool {
     let varies = |term: &Quantifier<'_>| {
         is_character(&term.body) && term.max.is_none_or(|max| max > term.min.max(1))
     };
-    let required: Vec<_> = terms.iter().filter(|term| term.min > 0).collect();
-    match required.as_slice() {
-        [] => terms.iter().any(|term| varies(term)),
-        [term] => varies(term),
+    let mut required = terms.iter().filter(|term| term.min > 0);
+    match (required.next(), required.next()) {
+        (None, _) => terms.iter().any(|term| varies(term)),
+        (Some(term), None) => varies(term),
         _ => false,
     }
 }

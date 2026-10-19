@@ -28,6 +28,12 @@ export function quiet(): boolean {
   return options.verbose;
 }
 
+export function copied(user: User): User {
+  const copy = { ...user };
+  delete copy.password; // expect: no-delete-property
+  return copy;
+}
+
 export function cleared(patch: Partial<User> | null): void {
   if (patch) delete patch['password']; // expect: no-delete-property
 }
