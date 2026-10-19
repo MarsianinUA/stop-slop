@@ -22,23 +22,27 @@ impl Rule for Check {
                 let Some(alternate) = &statement.alternate else {
                     return;
                 };
-                let first = statement.consequent.span();
                 // Of `if (a) X else if (b) X`, the branch after the `else if`: X runs when `a || b`.
-                let (second, branches, fix) = match alternate {
-                    Statement::IfStatement(next) if !narrows(file, &next.test, first) => (
+                let (second, second_test, branches, fix) = match alternate {
+                    Statement::IfStatement(next) => (
                         &next.consequent,
+                        Some(&next.test),
                         "This `if` and the `else if` after it",
                         "Join the two conditions with `||` over one copy.",
                     ),
-                    Statement::IfStatement(_) => return,
                     alternate => (
                         alternate,
+                        None,
                         "This `if` and its `else`",
                         "Keep one copy without the `if`; if the condition calls something that must run, keep the call.",
                     ),
                 };
+                let first = statement.consequent.span();
                 if same(body(&statement.consequent), body(second))
-                    && !narrows(file, &statement.test, first)
+                    && ![Some(&statement.test), second_test]
+                        .into_iter()
+                        .flatten()
+                        .any(|test| narrows(file, test, first))
                 {
                     cx.report(head(file, statement.span, first))
                         .arg("branches", branches)
@@ -62,16 +66,22 @@ impl Rule for Check {
             AstKind::SwitchStatement(switch) => {
                 // One finding for a run of cases with one body, on its first case.
                 let mut in_run = false;
-                for pair in switch.cases.windows(2) {
-                    let [case, next] = pair else {
-                        continue;
-                    };
+                for (case, next) in switch.cases.iter().zip(switch.cases.iter().skip(1)) {
+                    let body = unwrap(&case.consequent);
+                    let tests = [
+                        Some(&switch.discriminant),
+                        case.test.as_ref(),
+                        next.test.as_ref(),
+                    ];
                     // A body that falls through runs the next one too, so it does not repeat it.
-                    let repeated = ends_in_jump(case)
-                        && same(body_of(case), body_of(next))
-                        && !narrows(file, &switch.discriminant, case.span);
+                    let repeated = body.last().is_some_and(Statement::is_jump_statement)
+                        && same(body, unwrap(&next.consequent))
+                        && !tests
+                            .into_iter()
+                            .flatten()
+                            .any(|test| narrows(file, test, after_label(case)));
                     if repeated && !in_run {
-                        report_cases(file, cx, case, next);
+                        report_cases(cx, case, next);
                     }
                     in_run = repeated;
                 }
@@ -81,12 +91,8 @@ impl Rule for Check {
     }
 }
 
-fn report_cases(
-    file: &File<'_>,
-    cx: &mut Cx<'_, '_>,
-    case: &SwitchCase<'_>,
-    next: &SwitchCase<'_>,
-) {
+fn report_cases(cx: &mut Cx<'_, '_>, case: &SwitchCase<'_>, next: &SwitchCase<'_>) {
+    let file = cx.file();
     let (first, second) = (label(file, case), label(file, next));
     let fix = match (&case.test, &next.test) {
         (Some(_), Some(_)) => format!("List both labels over one body: `{first}: {second}:`."),
@@ -113,15 +119,20 @@ fn label(file: &File<'_>, case: &SwitchCase<'_>) -> String {
     }
 }
 
-/// The statements a branch runs: those of its block, of `{ { .. } }` too; none for `;`.
+/// What a case runs, without its label: a `case typeof value === 'string'` reads `value` itself.
+fn after_label(case: &SwitchCase<'_>) -> Span {
+    let start = case
+        .test
+        .as_ref()
+        .map_or(case.span.start, |test| test.span().end);
+    Span::new(start, case.span.end)
+}
+
 fn body<'b, 'a>(statement: &'b Statement<'a>) -> &'b [Statement<'a>] {
     unwrap(std::slice::from_ref(statement))
 }
 
-fn body_of<'b, 'a>(case: &'b SwitchCase<'a>) -> &'b [Statement<'a>] {
-    unwrap(&case.consequent)
-}
-
+/// The statements a branch runs: those of its block, of `{ { .. } }` too; none for `;`.
 fn unwrap<'b, 'a>(mut statements: &'b [Statement<'a>]) -> &'b [Statement<'a>] {
     loop {
         match statements {
@@ -138,18 +149,6 @@ fn same(first: &[Statement<'_>], second: &[Statement<'_>]) -> bool {
     !first.is_empty()
         && first.len() == second.len()
         && first.iter().zip(second).all(|(a, b)| a.content_eq(b))
-}
-
-fn ends_in_jump(case: &SwitchCase<'_>) -> bool {
-    matches!(
-        body_of(case).last(),
-        Some(
-            Statement::BreakStatement(_)
-                | Statement::ContinueStatement(_)
-                | Statement::ReturnStatement(_)
-                | Statement::ThrowStatement(_)
-        )
-    )
 }
 
 /// The test narrows the type of a name the branch reads: `typeof value`, `value instanceof Date`,
@@ -182,19 +181,33 @@ fn narrows(file: &File<'_>, test: &Expression<'_>, branch: Span) -> bool {
     }
 }
 
+/// Of a member path (`order.total`, `this.value`), TypeScript narrows the path, so its root
+/// name stands for it; `this` counts as read.
 fn is_read_in(file: &File<'_>, expression: &Expression<'_>, branch: Span) -> bool {
-    let Expression::Identifier(id) = expression.get_inner_expression() else {
-        return false;
+    let mut expression = expression.get_inner_expression();
+    loop {
+        let member = match expression {
+            Expression::ChainExpression(chain) => chain.expression.as_member_expression(),
+            expression => expression.as_member_expression(),
+        };
+        let Some(member) = member else {
+            break;
+        };
+        expression = member.object().get_inner_expression();
+    }
+    let id = match expression {
+        Expression::Identifier(id) => id,
+        Expression::ThisExpression(_) => return true,
+        _ => return false,
     };
     let scoping = file.semantic.scoping();
     let Some(symbol) = scoping.get_reference(id.reference_id()).symbol_id() else {
         return false;
     };
     let nodes = file.semantic.nodes();
-    scoping.get_resolved_references(symbol).any(|reference| {
-        let span = nodes.get_node(reference.node_id()).span();
-        branch.start <= span.start && span.end <= branch.end
-    })
+    scoping
+        .get_resolved_references(symbol)
+        .any(|reference| branch.contains_inclusive(nodes.get_node(reference.node_id()).span()))
 }
 
 fn line(file: &File<'_>, span: Span) -> u32 {

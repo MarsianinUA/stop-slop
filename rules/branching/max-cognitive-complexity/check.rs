@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use kit::oxc::ast::ast::{Expression, LogicalExpression, LogicalOperator, Statement};
+use kit::oxc::ast::ast::{Expression, IfStatement, LogicalExpression, LogicalOperator, Statement};
 use kit::oxc::semantic::NodeId;
 use kit::prelude::*;
 
@@ -50,23 +50,14 @@ fn cost(file: &File<'_>, node: &AstNode<'_>) -> Option<Cost> {
     let cost = |flat, nests| Some(Cost { flat, nests });
     match node.kind() {
         AstKind::IfStatement(statement) => {
-            let has_else = statement
-                .alternate
-                .as_ref()
-                .is_some_and(|alternate| !matches!(alternate, Statement::IfStatement(_)));
-            if is_else_if(file, node) {
-                cost(1 + u32::from(has_else), false)
-            } else {
-                cost(u32::from(has_else), true)
-            }
+            let else_if = is_else_if(file, node);
+            cost(
+                u32::from(else_if) + u32::from(else_body(statement).is_some()),
+                !else_if,
+            )
         }
         AstKind::ConditionalExpression(_)
         | AstKind::SwitchStatement(_)
-        | AstKind::ForStatement(_)
-        | AstKind::ForInStatement(_)
-        | AstKind::ForOfStatement(_)
-        | AstKind::WhileStatement(_)
-        | AstKind::DoWhileStatement(_)
         | AstKind::CatchClause(_) => cost(0, true),
         AstKind::BreakStatement(statement) if statement.label.is_some() => cost(1, false),
         AstKind::ContinueStatement(statement) if statement.label.is_some() => cost(1, false),
@@ -77,13 +68,28 @@ fn cost(file: &File<'_>, node: &AstNode<'_>) -> Option<Cost> {
                 AstKind::LogicalExpression(_)
             ) =>
         {
-            let mut previous = None;
-            let runs = and_runs(logical, &mut previous);
-            (runs > 0).then_some(Cost {
-                flat: runs,
-                nests: false,
-            })
+            let runs = and_runs(logical, &mut None);
+            cost(runs, false).filter(|_| runs > 0)
         }
+        kind if loop_body(kind).is_some() => cost(0, true),
+        _ => None,
+    }
+}
+
+fn else_body<'b, 'a>(statement: &'b IfStatement<'a>) -> Option<&'b Statement<'a>> {
+    statement
+        .alternate
+        .as_ref()
+        .filter(|alternate| !matches!(alternate, Statement::IfStatement(_)))
+}
+
+fn loop_body<'a>(kind: AstKind<'a>) -> Option<&'a Statement<'a>> {
+    match kind {
+        AstKind::ForStatement(statement) => Some(&statement.body),
+        AstKind::ForInStatement(statement) => Some(&statement.body),
+        AstKind::ForOfStatement(statement) => Some(&statement.body),
+        AstKind::WhileStatement(statement) => Some(&statement.body),
+        AstKind::DoWhileStatement(statement) => Some(&statement.body),
         _ => None,
     }
 }
@@ -109,7 +115,8 @@ fn and_runs(logical: &LogicalExpression<'_>, previous: &mut Option<LogicalOperat
 
 /// The innermost function around the node, and how many levels nest the node inside it: the
 /// branches of `if` (an `else if` stays on the level of its `if`) and of `?:`, the bodies of
-/// loops and `catch`, the cases of `switch`. A nested function counts on its own, from level 0.
+/// loops and `catch`, the cases of `switch`. A nested function counts on its own, from level 0;
+/// a class field or static block outside any function is not scored.
 fn owner(file: &File<'_>, node: &AstNode<'_>) -> Option<(NodeId, u32)> {
     let mut nesting = 0;
     let mut child = node.span();
@@ -118,21 +125,17 @@ fn owner(file: &File<'_>, node: &AstNode<'_>) -> Option<(NodeId, u32)> {
             AstKind::Function(_) | AstKind::ArrowFunctionExpression(_) => {
                 return Some((ancestor.id(), nesting));
             }
+            AstKind::PropertyDefinition(_)
+            | AstKind::AccessorProperty(_)
+            | AstKind::StaticBlock(_) => return None,
             AstKind::IfStatement(statement) => {
                 statement.consequent.span() == child
-                    || statement.alternate.as_ref().is_some_and(|alternate| {
-                        alternate.span() == child && !matches!(alternate, Statement::IfStatement(_))
-                    })
+                    || else_body(statement).is_some_and(|body| body.span() == child)
             }
             AstKind::ConditionalExpression(conditional) => conditional.test.span() != child,
             AstKind::SwitchCase(_) => true,
             AstKind::CatchClause(clause) => clause.body.span == child,
-            AstKind::ForStatement(statement) => statement.body.span() == child,
-            AstKind::ForInStatement(statement) => statement.body.span() == child,
-            AstKind::ForOfStatement(statement) => statement.body.span() == child,
-            AstKind::WhileStatement(statement) => statement.body.span() == child,
-            AstKind::DoWhileStatement(statement) => statement.body.span() == child,
-            _ => false,
+            kind => loop_body(kind).is_some_and(|body| body.span() == child),
         };
         nesting += u32::from(nests);
         child = ancestor.span();
@@ -151,7 +154,8 @@ fn named(file: &File<'_>, function: &AstNode<'_>) -> (String, Span) {
         AstKind::ArrowFunctionExpression(arrow) => (None, Some(arrow.body.span().start)),
         _ => (None, None),
     };
-    let name = name.or_else(|| match file.semantic.nodes().parent_kind(function.id()) {
+    let holder = outer_assertion(file, function).id();
+    let name = name.or_else(|| match file.semantic.nodes().parent_kind(holder) {
         AstKind::MethodDefinition(method) => Some(method.key.span()),
         AstKind::PropertyDefinition(field) => Some(field.key.span()),
         AstKind::ObjectProperty(property) => Some(property.key.span()),

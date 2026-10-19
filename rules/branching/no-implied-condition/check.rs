@@ -15,22 +15,24 @@ impl Rule for Check {
 
     fn on_node<'a>(&self, node: &AstNode<'a>, cx: &mut Cx<'_, 'a>) {
         let file = cx.file();
-        let found = match node.kind() {
-            AstKind::IdentifierReference(id) => truthy(file, id),
-            AstKind::BinaryExpression(binary) => compared(file, binary),
-            _ => None,
-        };
-        let Some((test, negated)) = found else {
-            return;
-        };
         let Some(flipped) = decides(file, node) else {
             return;
         };
-        let Some(proof) = proven(file, node, &test, negated != flipped) else {
+        let test = match node.kind() {
+            AstKind::IdentifierReference(id) => Some(Test::truthy(id)),
+            AstKind::BinaryExpression(binary) => compared(file, binary),
+            _ => None,
+        };
+        let Some(test) = test else {
             return;
         };
-        let value = proof.holds != negated;
-        let value = match (test.form, value) {
+        let Some((symbol, parameter)) = stable(file, test.id) else {
+            return;
+        };
+        let Some(proof) = proven(file, node, symbol, test.form, test.negated != flipped) else {
+            return;
+        };
+        let value = match (test.form, proof.holds != test.negated) {
             (Form::Truthy, true) => "truthy",
             (Form::Truthy, false) => "falsy",
             (Form::Equals { .. }, true) => "true",
@@ -41,10 +43,10 @@ impl Rule for Check {
             .arg("value", value)
             .arg("check", proof.check)
             .arg("line", file.lines.position(proof.at.start).line)
-            .arg("name", test.name)
+            .arg("name", test.id.name.as_str())
             .arg(
                 "binding",
-                if test.parameter {
+                if parameter {
                     "a parameter nothing reassigns"
                 } else {
                     "a `const`"
@@ -53,20 +55,18 @@ impl Rule for Check {
     }
 }
 
-/// A test only a stable binding decides: a `const`, or a parameter nothing writes.
 struct Test<'a> {
-    symbol: SymbolId,
-    name: &'a str,
-    parameter: bool,
+    id: &'a IdentifierReference<'a>,
     form: Form<'a>,
+    /// `!==` and `!=`: the same test as `===` and `==`, negated.
+    negated: bool,
 }
 
 #[derive(Clone, Copy)]
 enum Form<'a> {
     /// `user`.
     Truthy,
-    /// `status === 'paid'`, `typeof value === 'string'`, `id == null`. `!==` and `!=` are the
-    /// same test, negated.
+    /// `status === 'paid'`, `typeof value === 'string'`, `id == null`.
     Equals {
         of_type: bool,
         strict: bool,
@@ -74,55 +74,50 @@ enum Form<'a> {
     },
 }
 
-impl Test<'_> {
-    fn is(&self, other: &Test<'_>) -> bool {
-        self.symbol == other.symbol
-            && match (self.form, other.form) {
-                (Form::Truthy, Form::Truthy) => true,
-                (
-                    Form::Equals {
-                        of_type,
-                        strict,
-                        literal,
-                    },
-                    Form::Equals {
-                        of_type: other_type,
-                        strict: other_strict,
-                        literal: other_literal,
-                    },
-                ) => {
-                    of_type == other_type
-                        && strict == other_strict
-                        && literal.content_eq(other_literal)
-                }
-                _ => false,
-            }
+impl<'a> Test<'a> {
+    fn truthy(id: &'a IdentifierReference<'a>) -> Self {
+        Test {
+            id,
+            form: Form::Truthy,
+            negated: false,
+        }
     }
 }
 
-/// `(test, negated)` of an expression.
-fn test_of<'a>(file: &File<'a>, expression: &'a Expression<'a>) -> Option<(Test<'a>, bool)> {
+impl Form<'_> {
+    fn is(self, other: Form<'_>) -> bool {
+        match (self, other) {
+            (Form::Truthy, Form::Truthy) => true,
+            (
+                Form::Equals {
+                    of_type,
+                    strict,
+                    literal,
+                },
+                Form::Equals {
+                    of_type: other_type,
+                    strict: other_strict,
+                    literal: other_literal,
+                },
+            ) => {
+                of_type == other_type && strict == other_strict && literal.content_eq(other_literal)
+            }
+            _ => false,
+        }
+    }
+}
+
+fn test_of<'a>(file: &File<'a>, expression: &'a Expression<'a>) -> Option<Test<'a>> {
     match expression {
-        Expression::Identifier(id) => truthy(file, id),
+        Expression::Identifier(id) => Some(Test::truthy(id)),
         Expression::BinaryExpression(binary) => compared(file, binary),
         _ => None,
     }
 }
 
-fn truthy<'a>(file: &File<'a>, id: &'a IdentifierReference<'a>) -> Option<(Test<'a>, bool)> {
-    let (symbol, parameter) = stable(file, id)?;
-    let test = Test {
-        symbol,
-        name: id.name.as_str(),
-        parameter,
-        form: Form::Truthy,
-    };
-    Some((test, false))
-}
-
 /// `x === 'a'`, `'a' !== x`, `typeof x === 'string'`; `==` and `!=` only with `null` or
 /// `undefined`, which call no `valueOf`.
-fn compared<'a>(file: &File<'a>, binary: &'a BinaryExpression<'a>) -> Option<(Test<'a>, bool)> {
+fn compared<'a>(file: &File<'a>, binary: &'a BinaryExpression<'a>) -> Option<Test<'a>> {
     let (strict, negated) = match binary.operator {
         BinaryOperator::StrictEquality => (true, false),
         BinaryOperator::StrictInequality => (true, true),
@@ -154,50 +149,34 @@ fn compared<'a>(file: &File<'a>, binary: &'a BinaryExpression<'a>) -> Option<(Te
         }
         _ => return None,
     };
-    let (symbol, parameter) = stable(file, id)?;
     let form = Form::Equals {
         of_type,
         strict,
         literal,
     };
-    let test = Test {
-        symbol,
-        name: id.name.as_str(),
-        parameter,
-        form,
-    };
-    Some((test, negated))
+    Some(Test { id, form, negated })
 }
 
 fn is_literal(file: &File<'_>, expression: &Expression<'_>) -> bool {
-    match expression {
-        Expression::StringLiteral(_)
-        | Expression::NumericLiteral(_)
-        | Expression::BigIntLiteral(_)
-        | Expression::BooleanLiteral(_)
-        | Expression::NullLiteral(_) => true,
-        Expression::TemplateLiteral(template) => template.expressions.is_empty(),
-        Expression::UnaryExpression(unary) => {
-            unary.operator == UnaryOperator::UnaryNegation
-                && matches!(
-                    unary.argument,
-                    Expression::NumericLiteral(_) | Expression::BigIntLiteral(_)
-                )
-        }
-        expression => is_global(file, expression, "undefined"),
-    }
+    is_literal_value(expression) || is_nullish(file, expression)
 }
 
 fn is_nullish(file: &File<'_>, expression: &Expression<'_>) -> bool {
     matches!(expression, Expression::NullLiteral(_)) || is_global(file, expression, "undefined")
 }
 
+fn symbol_of(file: &File<'_>, id: &IdentifierReference<'_>) -> Option<SymbolId> {
+    file.semantic
+        .scoping()
+        .get_reference(id.reference_id())
+        .symbol_id()
+}
+
 /// The symbol and whether it is a parameter, when nothing can change what the name holds.
 fn stable(file: &File<'_>, id: &IdentifierReference<'_>) -> Option<(SymbolId, bool)> {
-    let scoping = file.semantic.scoping();
-    let symbol = scoping.get_reference(id.reference_id()).symbol_id()?;
+    let symbol = symbol_of(file, id)?;
     let nodes = file.semantic.nodes();
-    let declaration = scoping.symbol_declaration(symbol);
+    let declaration = file.semantic.scoping().symbol_declaration(symbol);
     let parameter = match nodes.kind(declaration) {
         AstKind::FormalParameter(_) | AstKind::FormalParameterRest(_) => true,
         AstKind::VariableDeclarator(_) => match nodes.parent_kind(declaration) {
@@ -208,50 +187,42 @@ fn stable(file: &File<'_>, id: &IdentifierReference<'_>) -> Option<(SymbolId, bo
         },
         _ => return None,
     };
-    let written = scoping
-        .get_resolved_references(symbol)
-        .any(|reference| reference.is_write());
-    (!written).then_some((symbol, parameter))
+    (!file.semantic.scoping().symbol_is_mutated(symbol)).then_some((symbol, parameter))
 }
 
 /// Whether the value of the node decides a branch: the test of `if`, `?:` or a loop, or the
 /// left side of `&&` or `||`, also through `!` and the right side of such an operator. `Some`
 /// says whether an odd number of `!` stands between. `??` tests for `null`, not for truth.
 fn decides(file: &File<'_>, node: &AstNode<'_>) -> Option<bool> {
-    let mut child = node.span();
+    let mut span = node.span();
     let mut flipped = false;
     for parent in file.semantic.nodes().ancestors(node.id()) {
+        let child = std::mem::replace(&mut span, parent.span());
         let test = match parent.kind() {
             AstKind::UnaryExpression(unary) if unary.operator == UnaryOperator::LogicalNot => {
                 flipped = !flipped;
-                None
+                continue;
             }
             AstKind::TSAsExpression(_)
             | AstKind::TSSatisfiesExpression(_)
             | AstKind::TSNonNullExpression(_)
-            | AstKind::TSTypeAssertion(_) => None,
+            | AstKind::TSTypeAssertion(_) => continue,
             AstKind::LogicalExpression(logical)
                 if logical.operator != LogicalOperator::Coalesce =>
             {
-                (logical.left.span() == child).then_some(true)
+                if logical.right.span() == child {
+                    continue;
+                }
+                &logical.left
             }
-            AstKind::IfStatement(statement) => Some(statement.test.span() == child),
-            AstKind::ConditionalExpression(conditional) => Some(conditional.test.span() == child),
-            AstKind::WhileStatement(statement) => Some(statement.test.span() == child),
-            AstKind::DoWhileStatement(statement) => Some(statement.test.span() == child),
-            AstKind::ForStatement(statement) => Some(
-                statement
-                    .test
-                    .as_ref()
-                    .is_some_and(|test| test.span() == child),
-            ),
-            _ => Some(false),
+            AstKind::IfStatement(statement) => &statement.test,
+            AstKind::ConditionalExpression(conditional) => &conditional.test,
+            AstKind::WhileStatement(statement) => &statement.test,
+            AstKind::DoWhileStatement(statement) => &statement.test,
+            AstKind::ForStatement(statement) => statement.test.as_ref()?,
+            _ => return None,
         };
-        match test {
-            Some(true) => return Some(flipped),
-            Some(false) => return None,
-            None => child = parent.span(),
-        }
+        return (test.span() == child).then_some(flipped);
     }
     None
 }
@@ -265,56 +236,55 @@ struct Proof {
     at: Span,
 }
 
-/// What a test around the node already proved about `test`, the innermost first. `polarity` is
-/// the number of negations, odd or even, between `test` and the decision it is part of. The
-/// walk stops at a function: TypeScript before 5.4 forgets a narrowed parameter inside a
-/// callback, and a function declaration forgets even a narrowed `const`.
+/// What a test around the node already proved about the test on `symbol`, the innermost first.
+/// `polarity` is the number of negations, odd or even, between that test and the decision it is
+/// part of. The walk stops at a function and at a class field or static block: TypeScript before
+/// 5.4 forgets a narrowed parameter inside a callback, and a function declaration or a class
+/// member forgets even a narrowed `const`.
 fn proven<'a>(
     file: &File<'a>,
     node: &AstNode<'a>,
-    test: &Test<'_>,
+    symbol: SymbolId,
+    form: Form<'_>,
     polarity: bool,
 ) -> Option<Proof> {
     let mut child = node.span();
     for ancestor in file.semantic.nodes().ancestors(node.id()) {
+        // The fourth field is the `if` whose `else` holds the node.
         let source = match ancestor.kind() {
-            AstKind::IfStatement(statement) if statement.consequent.span() == child => {
-                Some((&statement.test, true, "the `if`", false))
+            AstKind::IfStatement(statement) if statement.test.span() != child => {
+                let value = statement.consequent.span() == child;
+                Some((
+                    &statement.test,
+                    value,
+                    "the `if`",
+                    (!value).then_some(statement),
+                ))
             }
-            AstKind::IfStatement(statement)
-                if statement
-                    .alternate
-                    .as_ref()
-                    .is_some_and(|alternate| alternate.span() == child) =>
-            {
-                let chained = in_chain_test(statement, node.span());
-                Some((&statement.test, false, "the `if`", chained))
-            }
-            AstKind::ConditionalExpression(conditional)
-                if conditional.consequent.span() == child =>
-            {
-                Some((&conditional.test, true, "the `?:`", false))
-            }
-            AstKind::ConditionalExpression(conditional)
-                if conditional.alternate.span() == child =>
-            {
-                Some((&conditional.test, false, "the `?:`", false))
+            AstKind::ConditionalExpression(conditional) if conditional.test.span() != child => {
+                let value = conditional.consequent.span() == child;
+                Some((&conditional.test, value, "the `?:`", None))
             }
             AstKind::LogicalExpression(logical) if logical.right.span() == child => {
                 match logical.operator {
-                    LogicalOperator::And => Some((&logical.left, true, "the `&&`", false)),
-                    LogicalOperator::Or => Some((&logical.left, false, "the `||`", false)),
+                    LogicalOperator::And => Some((&logical.left, true, "the `&&`", None)),
+                    LogicalOperator::Or => Some((&logical.left, false, "the `||`", None)),
                     LogicalOperator::Coalesce => None,
                 }
             }
-            AstKind::Function(_) | AstKind::ArrowFunctionExpression(_) => return None,
+            AstKind::Function(_)
+            | AstKind::ArrowFunctionExpression(_)
+            | AstKind::PropertyDefinition(_)
+            | AstKind::AccessorProperty(_)
+            | AstKind::StaticBlock(_) => return None,
             _ => None,
         };
-        if let Some((expression, value, check, chained)) = source
-            && let Some(holds) = implied(file, expression, value, test)
+        if let Some((expression, value, check, otherwise)) = source
+            && let Some(holds) = implied(file, expression, value, symbol, form)
             // An `else if` test that comes out false repeats an earlier test of its chain:
             // ESLint's `no-dupe-else-if` reports that.
-            && !(chained && holds == polarity)
+            && !(holds == polarity
+                && otherwise.is_some_and(|statement| in_chain_test(statement, node.span())))
         {
             return Some(Proof {
                 holds,
@@ -331,8 +301,7 @@ fn proven<'a>(
 fn in_chain_test(statement: &IfStatement<'_>, node: Span) -> bool {
     let mut next = statement.alternate.as_ref();
     while let Some(Statement::IfStatement(inner)) = next {
-        let test = inner.test.span();
-        if test.start <= node.start && node.end <= test.end {
+        if inner.test.span().contains_inclusive(node) {
             return true;
         }
         next = inner.alternate.as_ref();
@@ -340,28 +309,30 @@ fn in_chain_test(statement: &IfStatement<'_>, node: Span) -> bool {
     false
 }
 
-/// The value of `test` (without its own negation) when `expression` has `value`: `a && b` true
-/// proves `a` and `b`, `a || b` false proves both false, `!a` flips.
+/// The value of the test on `symbol` (without its own negation) when `expression` has `value`:
+/// `a && b` true proves `a` and `b`, `a || b` false proves both false, `!a` flips.
 fn implied<'a>(
     file: &File<'a>,
     expression: &'a Expression<'a>,
     value: bool,
-    test: &Test<'_>,
+    symbol: SymbolId,
+    form: Form<'_>,
 ) -> Option<bool> {
     match expression.get_inner_expression() {
         Expression::UnaryExpression(unary) if unary.operator == UnaryOperator::LogicalNot => {
-            implied(file, &unary.argument, !value, test)
+            implied(file, &unary.argument, !value, symbol, form)
         }
         Expression::LogicalExpression(logical)
             if (logical.operator == LogicalOperator::And && value)
                 || (logical.operator == LogicalOperator::Or && !value) =>
         {
-            implied(file, &logical.left, value, test)
-                .or_else(|| implied(file, &logical.right, value, test))
+            implied(file, &logical.left, value, symbol, form)
+                .or_else(|| implied(file, &logical.right, value, symbol, form))
         }
         expression => {
-            let (found, negated) = test_of(file, expression)?;
-            found.is(test).then_some(value != negated)
+            let test = test_of(file, expression)?;
+            (symbol_of(file, test.id) == Some(symbol) && test.form.is(form))
+                .then_some(value != test.negated)
         }
     }
 }

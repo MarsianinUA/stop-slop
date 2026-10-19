@@ -881,15 +881,15 @@ fn check_holds_cognitive_complexity_to_the_max_of_config_toml() {
          }\n",
     )
     .commit("main");
-    let complexity = |t: &TempRepo| messages(t, "src/sizes.ts", "max-cognitive-complexity");
+    let complexity = || messages(&t, "src/sizes.ts", "max-cognitive-complexity");
     write_config(&t, "enabled = [\"branching\"]\n");
-    assert!(complexity(&t).is_empty());
+    assert!(complexity().is_empty());
 
     write_config(
         &t,
         "enabled = [\"branching\"]\n\n[rules.max-cognitive-complexity]\nmax = 2\n",
     );
-    let found = complexity(&t);
+    let found = complexity();
     let [message] = found.as_slice() else {
         panic!("one function: {found:?}");
     };

@@ -65,3 +65,22 @@ export function apart(rows: Row[], limit: number): number[] {
     return 0;
   });
 }
+
+// 1 here: the static block and the field of the class are not scored.
+export function counter(flag: boolean, rows: Row[]): unknown {
+  if (flag) { // +1 if
+    return class {
+      static {
+        for (const row of rows) {
+          if (row.skip) {
+            if (row.size > 0) {
+              if (row.size > 10) row.size = 0;
+            }
+          }
+        }
+      }
+      kind = rows.length > 0 ? (rows.length > 10 ? 'many' : 'some') : 'none';
+    };
+  }
+  return null;
+}

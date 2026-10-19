@@ -105,3 +105,15 @@ export function shadowed(isPaid: boolean): (isPaid: boolean) => string {
   }
   return () => 'open';
 }
+
+export function classMembers(user: string | null): unknown {
+  if (user) {
+    return class {
+      name = user ? user.trim() : '';
+      static {
+        if (user) save(user);
+      }
+    };
+  }
+  return null;
+}

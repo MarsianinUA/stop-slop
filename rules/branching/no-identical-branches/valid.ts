@@ -91,3 +91,26 @@ export function otherMessage(isDraft: boolean): void {
     log('final');
   }
 }
+
+export function byTest(value: string | number): string {
+  switch (true) {
+    case typeof value === 'string':
+      return format(value);
+    case typeof value === 'number':
+      return format(value);
+    default:
+      return '';
+  }
+}
+
+export function byMember(box: { value: string | number }): string {
+  return typeof box.value === 'string' ? format(box.value) : format(box.value);
+}
+
+export class Field {
+  constructor(private readonly value: string | number) {}
+
+  text(): string {
+    return typeof this.value === 'string' ? format(this.value) : format(this.value);
+  }
+}
