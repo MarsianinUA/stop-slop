@@ -11,7 +11,10 @@ use crate::{Exited, ProfileError};
 
 const PRELOAD: &str = include_str!("preload.cjs");
 
-pub(crate) fn run(command: &[OsString], dir: &Utf8Path) -> Result<Exited, ProfileError> {
+/// Runs `command` and waits for it, with its input and output untouched. Every Node process it
+/// starts writes its CPU profile into `dir`, an existing empty folder that `read` reads
+/// afterwards.
+pub fn run(command: &[OsString], dir: &Utf8Path) -> Result<Exited, ProfileError> {
     let (program, args) = command.split_first().ok_or_else(|| ProfileError::Spawn {
         program: String::new(),
         source: io::Error::new(io::ErrorKind::InvalidInput, "the command is empty"),
@@ -60,28 +63,27 @@ fn resolve(program: &OsStr) -> PathBuf {
 
 /// `Command` looks only for `<name>.exe`, while `npm`, `pnpm` and `node_modules/.bin/jest` are
 /// `.cmd` files. `Command` runs a `.cmd` or `.bat` path through `cmd.exe` and escapes its
-/// arguments for it. Not found, the name goes to `Command` as given, which fails to start it.
+/// arguments for it. The other extensions of `PATHEXT`, such as `.js`, need a program that
+/// `Command` does not start, so the search tries only these four, in the default order of
+/// `PATHEXT`. Not found, the name goes to `Command` as given, which fails to start it.
 #[cfg(windows)]
 fn resolve(program: &OsStr) -> PathBuf {
     use std::path::Path;
 
+    const EXTENSIONS: [&str; 4] = [".com", ".exe", ".bat", ".cmd"];
     let name = Path::new(program);
-    let dirs: Vec<PathBuf> = if name.parent().is_some_and(|dir| !dir.as_os_str().is_empty()) {
-        vec![PathBuf::new()]
+    let bases: Vec<PathBuf> = if name.parent().is_some_and(|dir| !dir.as_os_str().is_empty()) {
+        vec![name.to_owned()]
     } else {
-        env::var_os("PATH").map_or_else(Vec::new, |path| env::split_paths(&path).collect())
+        env::var_os("PATH").map_or_else(Vec::new, |path| {
+            env::split_paths(&path).map(|dir| dir.join(name)).collect()
+        })
     };
-    let extensions = env::var_os("PATHEXT").unwrap_or_else(|| ".COM;.EXE;.BAT;.CMD".into());
-    let extensions = extensions.to_string_lossy();
-    for dir in dirs {
-        let base = dir.join(name);
+    for base in bases {
         if base.extension().is_some() && base.is_file() {
             return base;
         }
-        for extension in extensions
-            .split(';')
-            .filter(|extension| !extension.is_empty())
-        {
+        for extension in EXTENSIONS {
             let mut candidate = base.clone().into_os_string();
             candidate.push(extension);
             let candidate = PathBuf::from(candidate);

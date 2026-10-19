@@ -10,15 +10,16 @@ use profile::{Exited, ProfileError, read, run};
 use serde_json::Value;
 use tempfile::TempDir;
 
-/// A temp folder with the profile folder `<name>` in it.
-fn folder(name: &str) -> (TempDir, Utf8PathBuf) {
+/// The profile folder in a temp folder. Its path has a space, and on Windows `\`, which
+/// `NODE_OPTIONS` reads as an escape inside `"`.
+fn folder() -> (TempDir, Utf8PathBuf) {
     let temp = tempfile::tempdir().expect("create a temp folder");
-    let dir = Utf8PathBuf::try_from(temp.path().join(name)).expect("a UTF-8 temp folder");
+    let dir = Utf8PathBuf::try_from(temp.path().join("a profile")).expect("a UTF-8 temp folder");
     fs::create_dir_all(&dir).unwrap();
     (temp, dir)
 }
 
-/// Writes `text` next to the profile folder and returns its path.
+/// Next to the profile folder, not in it.
 fn script(temp: &TempDir, name: &str, text: &str) -> OsString {
     let path = temp.path().join(name);
     fs::write(&path, text).unwrap();
@@ -60,7 +61,7 @@ fn json(dir: &Utf8Path, suffix: &str) -> Value {
 
 #[test]
 fn a_node_script_writes_a_start_mark_and_a_chunk_and_passes_on_its_exit_code() {
-    let (temp, dir) = folder("profile");
+    let (temp, dir) = folder();
     let exit = script(&temp, "exit.js", "process.exitCode = 7;\n");
     assert_eq!(run(&node([exit]), &dir).unwrap(), Exited::Code(7));
     assert_eq!(kinds(&dir), ["0.cpuprofile", "start.json"]);
@@ -69,7 +70,7 @@ fn a_node_script_writes_a_start_mark_and_a_chunk_and_passes_on_its_exit_code() {
 
 #[test]
 fn chunks_written_before_a_hard_kill_stay() {
-    let (temp, dir) = folder("profile");
+    let (temp, dir) = folder();
     let kill = script(
         &temp,
         "kill.js",
@@ -99,7 +100,7 @@ fn chunks_written_before_a_hard_kill_stay() {
 fn a_pid_an_earlier_process_had_gets_files_of_its_own() {
     // The preload loaded a second time in one process is what a later process with the same
     // pid looks like.
-    let (temp, dir) = folder("profile");
+    let (temp, dir) = folder();
     let again = script(
         &temp,
         "again.js",
@@ -115,6 +116,30 @@ fn a_pid_an_earlier_process_had_gets_files_of_its_own() {
         [
             format!("{pid}-r1.0.cpuprofile"),
             format!("{pid}-r1.start.json"),
+            format!("{pid}.0.cpuprofile"),
+            format!("{pid}.start.json"),
+            "preload.cjs".to_owned(),
+        ]
+    );
+    assert_eq!(read(&dir, &dir).unwrap().processes, 2);
+}
+
+#[test]
+fn a_worker_thread_gets_files_of_its_own() {
+    let (temp, dir) = folder();
+    let worker = script(
+        &temp,
+        "worker.js",
+        "new (require('node:worker_threads').Worker)('', { eval: true });\n",
+    );
+    assert_eq!(run(&node([worker]), &dir).unwrap(), Exited::Code(0));
+    let names = names(&dir);
+    let pid: String = names[0].chars().take_while(char::is_ascii_digit).collect();
+    assert_eq!(
+        names,
+        [
+            format!("{pid}-t1.0.cpuprofile"),
+            format!("{pid}-t1.start.json"),
             format!("{pid}.0.cpuprofile"),
             format!("{pid}.start.json"),
             "preload.cjs".to_owned(),
@@ -142,7 +167,7 @@ fn the_previous_node_options_are_kept() {
         assert!(stdout.contains("1 passed"), "{stdout}");
         return;
     }
-    let (temp, dir) = folder("profile");
+    let (temp, dir) = folder();
     let check = script(
         &temp,
         "check.js",
@@ -154,15 +179,18 @@ fn the_previous_node_options_are_kept() {
 
 #[test]
 fn the_exit_code_and_error_stack_are_the_same_as_without_the_preload() {
-    let (temp, dir) = folder("profile");
+    let (temp, dir) = folder();
     let fail = script(
         &temp,
         "fail.js",
         "function fail() {\n\
          \x20 return new Error('boom');\n\
          }\n\
-         // The preload turns the debugger on: this must not stop the program.\n\
-         debugger;\n\
+         // The preload turns the debugger on: these must neither stop nor slow the program.\n\
+         // They take milliseconds without the preload and 8 s when each one pauses.\n\
+         const start = Date.now();\n\
+         for (let i = 0; i < 20000; i++) debugger;\n\
+         if (Date.now() - start > 1000) process.exit(4);\n\
          require('node:fs').writeFileSync(process.argv[2], fail().stack);\n\
          process.exit(3);\n",
     );
@@ -184,7 +212,7 @@ fn the_exit_code_and_error_stack_are_the_same_as_without_the_preload() {
 
 #[test]
 fn code_compiled_with_vm_compile_function_gets_its_inline_map() {
-    let (temp, dir) = folder("profile");
+    let (temp, dir) = folder();
     let source = temp.path().join("add.ts");
     let compile = script(
         &temp,
@@ -215,17 +243,8 @@ fn code_compiled_with_vm_compile_function_gets_its_inline_map() {
 }
 
 #[test]
-fn a_profile_folder_with_a_space_works() {
-    // On Windows the path also has `\`, which `NODE_OPTIONS` reads as an escape inside `"`.
-    let (temp, dir) = folder("with space");
-    let empty = script(&temp, "empty.js", "");
-    assert_eq!(run(&node([empty]), &dir).unwrap(), Exited::Code(0));
-    assert_eq!(kinds(&dir), ["0.cpuprofile", "start.json"]);
-}
-
-#[test]
 fn a_program_that_does_not_exist_is_a_spawn_error() {
-    let (_temp, dir) = folder("profile");
+    let (_temp, dir) = folder();
     let command = [OsString::from("stop-slop-no-such-program")];
     match run(&command, &dir) {
         Err(ProfileError::Spawn { program, .. }) => {
@@ -235,12 +254,12 @@ fn a_program_that_does_not_exist_is_a_spawn_error() {
     }
 }
 
-/// `npm`, `pnpm` and `node_modules/.bin/jest` are `.cmd` files on Windows; `node` itself is
-/// found through `PATH` and `PATHEXT` in every test.
+/// `npm`, `pnpm` and `node_modules/.bin/jest` are `.cmd` files on Windows; `node.exe` is found
+/// through `PATH` in every test.
 #[cfg(windows)]
 #[test]
 fn a_cmd_file_runs_without_its_extension_and_with_its_arguments() {
-    let (temp, dir) = folder("profile");
+    let (temp, dir) = folder();
     let bin = temp.path().join("bin");
     fs::create_dir_all(&bin).unwrap();
     fs::write(bin.join("tool.cmd"), "@node \"%~dp0args.js\" %*\r\n").unwrap();

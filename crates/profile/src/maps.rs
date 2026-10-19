@@ -1,18 +1,63 @@
 use std::borrow::Cow;
+use std::collections::{BTreeMap, HashMap};
 use std::fs;
 
 use camino::{Utf8Component, Utf8Path, Utf8PathBuf, Utf8Prefix};
-use oxc_sourcemap::{JSONSourceMap, SourceMap, Token};
+use oxc_sourcemap::{SourceMap, Token};
 use serde::Deserialize;
+use serde_json::value::RawValue;
+
+use crate::ProfileError;
+
+/// The scripts of one process. A map never serves another process: two jest projects may
+/// compile one file differently.
+pub(crate) struct Scripts {
+    entries: HashMap<String, Entry>,
+    known: HashMap<String, Script>,
+}
+
+pub(crate) struct Script {
+    /// `None` for `node:` modules and V8's own frames.
+    pub(crate) file: Option<Utf8PathBuf>,
+    pub(crate) map: Option<Map>,
+}
+
+impl Scripts {
+    pub(crate) fn load(maps: &BTreeMap<u32, Utf8PathBuf>) -> Result<Scripts, ProfileError> {
+        let mut entries = HashMap::new();
+        for path in maps.values() {
+            let bytes = fs::read(path).map_err(ProfileError::io(path))?;
+            let chunk: HashMap<String, Entry> = serde_json::from_slice(&bytes)
+                .map_err(|error| ProfileError::bad(path, error.to_string()))?;
+            entries.extend(chunk);
+        }
+        Ok(Scripts {
+            entries,
+            known: HashMap::new(),
+        })
+    }
+
+    pub(crate) fn get(&mut self, url: &str) -> &Script {
+        if !self.known.contains_key(url) {
+            let file = file_path(url);
+            let map = file.as_deref().and_then(|file| {
+                let entry = self.entries.remove(url)?;
+                Map::load(entry, file)
+            });
+            self.known.insert(url.to_owned(), Script { file, map });
+        }
+        &self.known[url]
+    }
+}
 
 /// The value of a script in `<id>.<n>.maps.json`.
 #[derive(Deserialize)]
 #[serde(rename_all = "lowercase")]
-pub(crate) enum Entry {
+enum Entry {
     /// The inline `data:` map of the script, without `sourcesContent`. Parsed only when the
     /// script is resolved: a map that does not parse leaves its script unmapped instead of
     /// failing the read.
-    Map(serde_json::Value),
+    Map(Box<RawValue>),
     /// The `.map` file the script's `sourceMappingURL` names.
     File(Utf8PathBuf),
 }
@@ -26,12 +71,9 @@ pub(crate) struct Map {
 impl Map {
     /// `None` when the map does not parse or its file cannot be read. Relative sources of an
     /// inline map start from the folder of `script`.
-    pub(crate) fn load(entry: Entry, script: &Utf8Path) -> Option<Map> {
+    fn load(entry: Entry, script: &Utf8Path) -> Option<Map> {
         match entry {
-            Entry::Map(value) => {
-                let json: JSONSourceMap = serde_json::from_value(value).ok()?;
-                Map::new(SourceMap::from_json(json).ok()?, script)
-            }
+            Entry::Map(raw) => Map::new(SourceMap::from_json_string(raw.get()).ok()?, script),
             Entry::File(path) => {
                 let text = fs::read_to_string(&path).ok()?;
                 Map::new(SourceMap::from_json_string(&text).ok()?, &path)
@@ -119,10 +161,14 @@ fn has_scheme(source: &str) -> bool {
 }
 
 /// The path of a `file://` URL or of an absolute path; `None` for anything else, such as
-/// `node:fs`, `evalmachine.<anonymous>` or the empty URL of V8's own frames.
-pub(crate) fn file_path(url: &str) -> Option<Utf8PathBuf> {
+/// `node:fs`, `evalmachine.<anonymous>` or the empty URL of V8's own frames. The query of a URL
+/// is not part of its path: `import('./a.mjs?v=2')` runs `a.mjs`.
+fn file_path(url: &str) -> Option<Utf8PathBuf> {
     let path = match url.strip_prefix("file://") {
-        Some(rest) => url_path(&percent_decoded(rest)?)?,
+        Some(rest) => {
+            let rest = rest.find(['?', '#']).map_or(rest, |end| &rest[..end]);
+            url_path(&percent_decoded(rest)?)?
+        }
         None if Utf8Path::new(url).is_absolute() => url.to_owned(),
         None => return None,
     };

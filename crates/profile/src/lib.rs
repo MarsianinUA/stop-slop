@@ -1,4 +1,3 @@
-use std::ffi::OsString;
 use std::io;
 
 use camino::{Utf8Path, Utf8PathBuf};
@@ -7,17 +6,8 @@ mod maps;
 mod read;
 mod run;
 
-/// Runs `command` and waits for it, with its input and output untouched. Every Node process it
-/// starts writes its CPU profile into `dir`, an existing empty folder that `read` reads
-/// afterwards.
-pub fn run(command: &[OsString], dir: &Utf8Path) -> Result<Exited, ProfileError> {
-    run::run(command, dir)
-}
-
-/// Sums the profiles `run` left in `dir` by function of the original sources.
-pub fn read(dir: &Utf8Path, root: &Utf8Path) -> Result<Samples, ProfileError> {
-    read::read(dir, root)
-}
+pub use read::read;
+pub use run::run;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Exited {
@@ -33,7 +23,7 @@ pub struct Samples {
     pub local_ms: f64,
     /// The part of `local_ms` in `.ts`, `.tsx`, `.mts` and `.cts` files that found no source map.
     pub unmapped_ms: f64,
-    /// Node processes the preload started in.
+    /// Node processes and worker threads the preload started in.
     pub processes: u32,
     /// Of `processes`, those killed before they wrote a single chunk.
     pub lost_processes: u32,
@@ -91,6 +81,13 @@ impl ProfileError {
         move |source| ProfileError::Io {
             path: path.to_owned(),
             source,
+        }
+    }
+
+    fn bad(path: &Utf8Path, message: String) -> ProfileError {
+        ProfileError::BadProfile {
+            path: path.to_owned(),
+            message,
         }
     }
 }

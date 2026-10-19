@@ -3,7 +3,9 @@
 // NODE_OPTIONS="--require <this file>", so it runs in every Node process and worker thread
 // the command starts. What it writes is read by `read.rs`. The program must run as it would
 // without it: no signal listeners, no `process.setSourceMapsEnabled` (it rewrites
-// `Error.stack`), and no error of the preload reaches the program.
+// `Error.stack`), and no error of the preload reaches the program. The one exception: its
+// `exit` listener counts toward the program's limit, so a program with exactly 10 `exit`
+// listeners of its own gets a MaxListenersExceededWarning.
 
 const dir = process.env.STOP_SLOP_PROFILE_DIR;
 if (dir) {
@@ -18,7 +20,7 @@ function start(dir) {
   const fs = require('node:fs');
   const path = require('node:path');
   const inspector = require('node:inspector');
-  const { fileURLToPath, pathToFileURL } = require('node:url');
+  const { fileURLToPath } = require('node:url');
   const { threadId } = require('node:worker_threads');
 
   const pid = threadId === 0 ? String(process.pid) : `${process.pid}-t${threadId}`;
@@ -45,6 +47,9 @@ function start(dir) {
   // Without the limit the debugger keeps the source of every script the program dropped, and
   // jest drops one per module and test file: 3000 compiles of 110 KB took 940 MB, not 280 MB.
   post('Debugger.enable', { maxScriptsCacheSize: 0 });
+  // Otherwise every `debugger;` of the program pauses and resumes through this session:
+  // 20,000 of them took 8 s instead of 5 ms. A debugger the user attaches still stops there.
+  post('Debugger.setSkipAllPauses', { skip: true });
 
   post('Profiler.enable');
   // V8 drops the inspector's CPU profiler when its last profile stops, and the next start logs
@@ -55,14 +60,15 @@ function start(dir) {
 
   let chunk = 0;
   // A process killed hard (TerminateProcess on Windows, jest ending its workers) runs no
-  // handler: chunks bound the loss to the last 2 s.
-  setInterval(() => flush(true), 2000).unref();
-  process.on('exit', () => flush(false));
+  // handler and loses what ran since its last chunk: up to 2 s, or a whole synchronous run
+  // that kept the timer from firing.
+  setInterval(flush, 2000).unref();
+  process.on('exit', flush);
 
-  function flush(again) {
+  function flush() {
     try {
       const { profile } = post('Profiler.stop');
-      if (again) post('Profiler.start');
+      post('Profiler.start');
       const fresh = new Set();
       const maps = {};
       for (const { callFrame: { url } } of profile.nodes) {
@@ -97,9 +103,7 @@ function start(dir) {
         delete map.sourcesContent;
         return { map };
       }
-      // A script compiled through `vm` may be named by a path instead of a URL.
-      const base = path.isAbsolute(url) ? pathToFileURL(url) : url;
-      const file = new URL(sourceMapURL, base);
+      const file = new URL(sourceMapURL, url);
       return file.protocol === 'file:' ? { file: fileURLToPath(file) } : undefined;
     } catch {
       return undefined;

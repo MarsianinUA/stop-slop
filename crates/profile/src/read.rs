@@ -11,7 +11,7 @@ use std::fs;
 use camino::{Utf8Path, Utf8PathBuf};
 use serde::Deserialize;
 
-use crate::maps::{self, Entry, Map};
+use crate::maps::{self, Scripts};
 use crate::{HotLine, ModuleTime, ProfileError, Sampled, Samples};
 
 const TS_EXTENSIONS: [&str; 4] = ["ts", "tsx", "mts", "cts"];
@@ -63,7 +63,8 @@ struct Process {
     maps: BTreeMap<u32, Utf8PathBuf>,
 }
 
-pub(crate) fn read(dir: &Utf8Path, root: &Utf8Path) -> Result<Samples, ProfileError> {
+/// Sums the profiles `run` left in `dir` by function of the original sources.
+pub fn read(dir: &Utf8Path, root: &Utf8Path) -> Result<Samples, ProfileError> {
     let processes = list(dir)?;
     let lost = processes
         .values()
@@ -72,21 +73,22 @@ pub(crate) fn read(dir: &Utf8Path, root: &Utf8Path) -> Result<Samples, ProfileEr
     if lost == processes.len() {
         return Err(ProfileError::NoProfile);
     }
-    let mut sums = Sums::new(root);
+    let root = camino::absolute_utf8(root).map_err(ProfileError::io(root))?;
+    let mut sums = Sums::new(&root);
     for process in processes.values() {
         let mut scripts = Scripts::load(&process.maps)?;
         for path in process.chunks.values() {
             let bytes = fs::read(path).map_err(ProfileError::io(path))?;
-            let profile: Profile<'_> =
-                serde_json::from_slice(&bytes).map_err(|error| bad(path, error.to_string()))?;
+            let profile: Profile<'_> = serde_json::from_slice(&bytes)
+                .map_err(|error| ProfileError::bad(path, error.to_string()))?;
             sums.add(&profile, &mut scripts)
-                .map_err(|message| bad(path, message))?;
+                .map_err(|message| ProfileError::bad(path, message))?;
         }
     }
     Ok(sums.finish(count(processes.len()), count(lost)))
 }
 
-/// By process. Other names, such as `preload.cjs` or a `.tmp` that a kill left, are skipped.
+/// Skips other names, such as `preload.cjs` or a `.tmp` that a kill left.
 fn list(dir: &Utf8Path) -> Result<BTreeMap<String, Process>, ProfileError> {
     let mut processes: BTreeMap<String, Process> = BTreeMap::new();
     for entry in dir.read_dir_utf8().map_err(ProfileError::io(dir))? {
@@ -114,54 +116,14 @@ fn list(dir: &Utf8Path) -> Result<BTreeMap<String, Process>, ProfileError> {
     Ok(processes)
 }
 
-/// The scripts of one process by URL. A map never serves another process: two jest projects
-/// may compile one file differently.
-struct Scripts {
-    entries: HashMap<String, Entry>,
-    known: HashMap<String, Script>,
-}
-
-struct Script {
-    /// `None` for `node:` modules and V8's own frames.
-    file: Option<Utf8PathBuf>,
-    map: Option<Map>,
-}
-
-impl Scripts {
-    fn load(maps: &BTreeMap<u32, Utf8PathBuf>) -> Result<Scripts, ProfileError> {
-        let mut entries = HashMap::new();
-        for path in maps.values() {
-            let bytes = fs::read(path).map_err(ProfileError::io(path))?;
-            let chunk: HashMap<String, Entry> =
-                serde_json::from_slice(&bytes).map_err(|error| bad(path, error.to_string()))?;
-            entries.extend(chunk);
-        }
-        Ok(Scripts {
-            entries,
-            known: HashMap::new(),
-        })
-    }
-
-    fn get(&mut self, url: &str) -> &Script {
-        if !self.known.contains_key(url) {
-            let file = maps::file_path(url);
-            let map = file.as_deref().and_then(|file| {
-                let entry = self.entries.remove(url)?;
-                Map::load(entry, file)
-            });
-            self.known.insert(url.to_owned(), Script { file, map });
-        }
-        &self.known[url]
-    }
-}
-
-/// What a frame counts as. Files are indexes into `Sums::files`, lines and columns from 1.
-#[derive(Clone, Copy)]
+/// Files are indexes into `Sums::files`, lines and columns from 1.
 enum Frame {
     Function {
         file: u32,
         line: u32,
         column: u32,
+        /// Sampled lines in the original file, with their ticks.
+        lines: Vec<(u32, u32)>,
     },
     Module {
         file: u32,
@@ -187,7 +149,7 @@ struct Sums {
     local: f64,
     unmapped: f64,
     files: Vec<Utf8PathBuf>,
-    file_ids: HashMap<Utf8PathBuf, u32>,
+    file_ids: HashMap<String, u32>,
     functions: HashMap<(u32, u32, u32), Function>,
     modules: HashMap<u32, f64>,
 }
@@ -231,18 +193,25 @@ impl Sums {
             self_us[*at] += (next - stamp).max(0.0);
         }
 
-        let frames: Vec<(Frame, Vec<(u32, u32)>)> = nodes
+        let frames: Vec<Frame> = nodes
             .iter()
             .map(|node| self.resolve(node, scripts))
             .collect();
         let mut counted = Vec::new();
         for (leaf, &us) in self_us.iter().enumerate().filter(|(_, us)| **us > 0.0) {
             self.total += us;
-            let (frame, lines) = &frames[leaf];
-            match *frame {
-                Frame::Function { file, line, column } => {
-                    self.local += us;
-                    let function = self.functions.entry((file, line, column)).or_default();
+            let frame = &frames[leaf];
+            if !matches!(frame, Frame::Other) {
+                self.local += us;
+            }
+            match frame {
+                Frame::Function {
+                    file,
+                    line,
+                    column,
+                    lines,
+                } => {
+                    let function = self.functions.entry((*file, *line, *column)).or_default();
                     function.self_us += us;
                     let ticks: u32 = nodes[leaf]
                         .position_ticks
@@ -254,20 +223,17 @@ impl Sums {
                             us * f64::from(line_ticks) / f64::from(ticks);
                     }
                 }
-                Frame::Module { file } => {
-                    self.local += us;
-                    *self.modules.entry(file).or_default() += us;
-                }
-                Frame::Unmapped => {
-                    self.local += us;
-                    self.unmapped += us;
-                }
+                Frame::Module { file } => *self.modules.entry(*file).or_default() += us,
+                Frame::Unmapped => self.unmapped += us,
                 Frame::Other => {}
             }
             counted.clear();
             let mut at = Some(leaf);
             while let Some(node) = at {
-                if let Frame::Function { file, line, column } = frames[node].0 {
+                if let Frame::Function {
+                    file, line, column, ..
+                } = frames[node]
+                {
                     let key = (file, line, column);
                     if !counted.contains(&key) {
                         counted.push(key);
@@ -280,9 +246,7 @@ impl Sums {
         Ok(())
     }
 
-    /// The frame of `node` and, for a local function, its sampled lines in the original file
-    /// with their ticks.
-    fn resolve(&mut self, node: &Node<'_>, scripts: &mut Scripts) -> (Frame, Vec<(u32, u32)>) {
+    fn resolve(&mut self, node: &Node<'_>, scripts: &mut Scripts) -> Frame {
         let call = &node.call_frame;
         let script = scripts.get(&call.url);
         let (Some(file), Ok(line), Ok(column)) = (
@@ -290,7 +254,7 @@ impl Sums {
             u32::try_from(call.line_number),
             u32::try_from(call.column_number),
         ) else {
-            return (Frame::Other, Vec::new());
+            return Frame::Other;
         };
         // V8 starts the top-level code of a script at 0:0.
         let top_level = line == 0 && column == 0;
@@ -305,36 +269,52 @@ impl Sums {
             // Code the map has no original for is what the compiler added around the file:
             // tsc's `__decorate` and `__exportStar` run while the module loads.
             let Some((source, line, column)) = position else {
-                return (self.module(module), Vec::new());
+                return self.module(module);
             };
-            let frame = self.function(source, line + 1, column + 1);
-            let lines = lines(node, frame, |line| {
+            return self.function(source, line + 1, column + 1, node, |line| {
                 let (in_file, line) = map.line(line.checked_sub(1)?)?;
                 (in_file == source).then_some(line + 1)
             });
-            return (frame, lines);
         }
         if file
             .extension()
             .is_some_and(|extension| TS_EXTENSIONS.contains(&extension))
         {
-            let frame = if self.is_local(file) {
+            return if self.is_local(file) {
                 Frame::Unmapped
             } else {
                 Frame::Other
             };
-            return (frame, Vec::new());
         }
         if top_level {
-            return (self.module(file), Vec::new());
+            return self.module(file);
         }
-        let frame = self.function(file, line + 1, column + 1);
-        (frame, lines(node, frame, Some))
+        self.function(file, line + 1, column + 1, node, Some)
     }
 
-    fn function(&mut self, file: &Utf8Path, line: u32, column: u32) -> Frame {
-        self.local_id(file)
-            .map_or(Frame::Other, |file| Frame::Function { file, line, column })
+    /// `original` turns a line of the generated code, from 1, into one of the source.
+    fn function(
+        &mut self,
+        file: &Utf8Path,
+        line: u32,
+        column: u32,
+        node: &Node<'_>,
+        original: impl Fn(u32) -> Option<u32>,
+    ) -> Frame {
+        let Some(file) = self.local_id(file) else {
+            return Frame::Other;
+        };
+        let lines = node
+            .position_ticks
+            .iter()
+            .filter_map(|tick| Some((original(tick.line)?, tick.ticks)))
+            .collect();
+        Frame::Function {
+            file,
+            line,
+            column,
+            lines,
+        }
     }
 
     fn module(&mut self, file: &Utf8Path) -> Frame {
@@ -342,8 +322,15 @@ impl Sums {
             .map_or(Frame::Other, |file| Frame::Module { file })
     }
 
+    /// On Windows `src\Orders.js` and `src\orders.js`, as two `require`s may spell one file, get
+    /// one id and the first spelling.
     fn local_id(&mut self, file: &Utf8Path) -> Option<u32> {
-        if let Some(&id) = self.file_ids.get(file) {
+        let key = if cfg!(windows) {
+            Cow::Owned(file.as_str().to_ascii_lowercase())
+        } else {
+            Cow::Borrowed(file.as_str())
+        };
+        if let Some(&id) = self.file_ids.get(&*key) {
             return Some(id);
         }
         if !self.is_local(file) {
@@ -351,11 +338,11 @@ impl Sums {
         }
         let id = count(self.files.len());
         self.files.push(file.to_owned());
-        self.file_ids.insert(file.to_owned(), id);
+        self.file_ids.insert(key.into_owned(), id);
         Some(id)
     }
 
-    /// Under `root` and outside `node_modules`; Windows ignores the case of file names.
+    /// Under `root` and outside `node_modules`.
     fn is_local(&self, file: &Utf8Path) -> bool {
         let mut parts = file.components();
         for root_part in self.root.components() {
@@ -411,30 +398,12 @@ impl Sums {
     }
 }
 
-/// The sampled lines of a local function, from 1, with their ticks; `original` turns a line
-/// of the generated code into one of the source.
-fn lines(node: &Node<'_>, frame: Frame, original: impl Fn(u32) -> Option<u32>) -> Vec<(u32, u32)> {
-    if !matches!(frame, Frame::Function { .. }) {
-        return Vec::new();
-    }
-    node.position_ticks
-        .iter()
-        .filter_map(|tick| Some((original(tick.line)?, tick.ticks)))
-        .collect()
-}
-
+/// Windows ignores the case of file names.
 fn same_name(a: &str, b: &str) -> bool {
     if cfg!(windows) {
         a.eq_ignore_ascii_case(b)
     } else {
         a == b
-    }
-}
-
-fn bad(path: &Utf8Path, message: String) -> ProfileError {
-    ProfileError::BadProfile {
-        path: path.to_owned(),
-        message,
     }
 }
 

@@ -175,8 +175,9 @@ fn ts_without_a_map_is_unmapped_and_js_of_the_repo_is_its_own_source() {
     let (_temp, root) = fixture("kinds");
     let samples = read(&root, &root).unwrap();
     // 1 ms each in `src/legacy.js` (in `parse` and at its top level), in `src/orders.ts`
-    // without a map, in `node_modules`, in `node:internal/timers`; 4 ms in `(program)`, the
-    // last sample, which lasts until the end of the profile.
+    // without a map (its URL has a query, as a re-imported ES module has), in `node_modules`,
+    // in `node:internal/timers`; 4 ms in `(program)`, the last sample, which lasts until the
+    // end of the profile.
     assert_eq!(
         functions(&samples, &root),
         [("src/legacy.js".to_owned(), 3, 21, 1.0, 1.0)]
@@ -187,6 +188,22 @@ fn ts_without_a_map_is_unmapped_and_js_of_the_repo_is_its_own_source() {
         [("src/legacy.js".to_owned(), 1.0)]
     );
     assert_eq!(totals(&samples), (9.0, 3.0, 1.0, 1, 0));
+}
+
+#[test]
+fn windows_ignores_the_case_of_file_names() {
+    let (_temp, root) = fixture("case");
+    let samples = read(&root, &root).unwrap();
+    // 1 ms of `parse` in `src/legacy.js` and 1 ms in `SRC/Legacy.js`.
+    let expected = if cfg!(windows) {
+        vec![("src/legacy.js".to_owned(), 3, 21, 2.0, 2.0)]
+    } else {
+        vec![
+            ("SRC/Legacy.js".to_owned(), 3, 21, 1.0, 1.0),
+            ("src/legacy.js".to_owned(), 3, 21, 1.0, 1.0),
+        ]
+    };
+    assert_eq!(functions(&samples, &root), expected);
 }
 
 #[test]
