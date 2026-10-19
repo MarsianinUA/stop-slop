@@ -299,7 +299,7 @@ Every other exception goes into `ignore.json`:
 
 ```toml
 disabled = ["no-boolean-param"]
-enabled = ["performance"]
+enabled = ["performance", "branching"]
 
 [rules.max-nesting]
 max = 5
@@ -312,7 +312,7 @@ max = 5
 
 ## Rules
 
-The program has 112 rules in 13 groups: 77 `error`, 29 `candidate`, 6 `agent`; the 9 of `performance` are off until `enabled` names them. 16 of them fix code themselves. `stop-slop rules` lists them, and so does [rules.md](rules.md); each one lives in `rules/<group>/<id>/`. The catalog is generic: no paths, packages or domains of one project. Ideas that were turned down are in [Not checked, on purpose](#not-checked-on-purpose).
+The program has 115 rules in 14 groups: 80 `error`, 29 `candidate`, 6 `agent`; the 12 of `performance` and `branching` are off until `enabled` names them. 16 of them fix code themselves. `stop-slop rules` lists them, and so does [rules.md](rules.md); each one lives in `rules/<group>/<id>/`. The catalog is generic: no paths, packages or domains of one project. Ideas that were turned down are in [Not checked, on purpose](#not-checked-on-purpose).
 
 ### Kinds
 
@@ -346,7 +346,7 @@ Two more terms the rules use:
 |---|---|---|
 | `types` | 19 | `any`, type and non-null assertions, needless annotations, optional and nullable fields, enums over string unions, dictionary and `object` types, where types live, reshaping own types |
 | `naming` | 15 | file and folder names, case, `I` and `_` prefixes, booleans, acronyms, vague and single-letter names, units in names |
-| `functions-classes` | 18 | what goes in a class file and a functions file, parameters, branching, singletons, module state, member order, mutation |
+| `functions-classes` | 18 | what goes in a class file and a functions file, parameters, `if` chains and `switch`, singletons, module state, member order, mutation |
 | `wandering-data` | 4 | objects that travel through functions that do not use them |
 | `imports` | 6 | import order, the `node:` protocol, Node globals, path style, barrels, banned packages |
 | `config` | 2 | `process.env` and loose constants |
@@ -357,6 +357,7 @@ Two more terms the rules use:
 | `comments` | 4 | `TODO` owners, commented-out code, comments as sentences, comments that retell the code |
 | `tests` | 3 | mocks of own modules, test names, test quality |
 | `performance` | 9 | opt-in: searches, copies, `shift` and `await` inside loops, `forEach(async ..)`, blocking calls in Nest handlers, `delete` on objects, recursive `process.nextTick`, regexes that backtrack exponentially |
+| `branching` | 3 | opt-in: a test an outer test already decided, branches that are the same code, cognitive complexity of a function |
 
 A group can have a `group.toml`:
 
@@ -379,6 +380,7 @@ These came up while the catalog was built and were turned down:
 
 - **Rules of one project.** A work project's conventions gave rules that only make sense there: its own value types and helpers, folder boundaries and import subpaths, error code ranges, API versioning and Swagger examples, its business domain and its database.
 - **What the project's ESLint often has already:** `consistent-type-imports` (`import type`) and `no-wrapper-object-types` (`String` instead of `string`).
+- **What ESLint's recommended set checks:** unreachable code (`no-unreachable`), constant conditions (`no-constant-condition`), an `else if` that repeats an earlier test (`no-dupe-else-if`), a value assigned and never read (`no-useless-assignment`) and `new Promise(async ..)` (`no-async-promise-executor`). A project with ESLint has them on already, and two of them, unreachable code and a value never read, would need a control-flow graph the program does not build.
 - **Three anti-slop rules.** `no-unknown-parameters` would forbid `parseUser(input: unknown)`, yet untrusted data should come in as `unknown` and get narrowed. `require-readable-spacing` is formatting, which belongs to Prettier. `no-runtime-typeof` is stricter than the catalog wants.
 - **Rules for a "direct" style** (plain data and functions instead of class hierarchies). The projects here are object-oriented, so these went: a class with only `static` members, a file named for a class role (`*.service.ts`) with no class in it, `abstract class`, any class in a direct-style project, a wrapper function that only forwards a call, an interface with a single implementation, a function with a mode of any kind (a boolean flag is still a rule, `no-boolean-param`). From the same notes: `/* */` comments instead of `//`, `/** */` comments inside a function body, the `// direct:` comment format.
 - **Rules that need TypeScript types**, see [Not in v1](#not-in-v1).
