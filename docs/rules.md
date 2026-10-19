@@ -193,7 +193,7 @@ Code that costs more on Node than it looks. Off until `enabled` in `config.toml`
 | [`no-copy-in-loop`](../rules/performance/no-copy-in-loop/rule.toml) | A variable copied into itself in a loop or a listener: `all = [...all, item]`, `buffer = Buffer.concat([buffer, chunk])` | error |  |
 | [`no-delete-property`](../rules/performance/no-delete-property/rule.toml) | `delete user.password` on an object with a fixed set of keys, not a dictionary | candidate |  |
 | [`no-lookup-in-loop`](../rules/performance/no-lookup-in-loop/rule.toml) | A search of an array in a loop over another collection: `ids.includes(order.id)` inside `for (const order of orders)` | candidate |  |
-| [`no-nested-quantifier`](../rules/performance/no-nested-quantifier/rule.toml) | A regex that repeats a group of one repeated character: `(a+)+`, `(\w*)*` | error |  |
+| [`no-nested-quantifier`](../rules/performance/no-nested-quantifier/rule.toml) | A regex that repeats a group of one repeated character, with more to match after it: `^(a+)+$`, `([a-z]+-?)+@` | error |  |
 | [`no-recursive-next-tick`](../rules/performance/no-recursive-next-tick/rule.toml) | A function that passes itself to `process.nextTick` | error |  |
 | [`no-shift-in-loop`](../rules/performance/no-shift-in-loop/rule.toml) | `shift()` or `unshift()` of the array a loop goes through: `while (queue.length) queue.shift()` | candidate |  |
 | [`no-sync-in-handler`](../rules/performance/no-sync-in-handler/rule.toml) | `readFileSync`, `execSync`, `bcrypt.hashSync` and other blocking calls in a Nest handler or provider, outside the constructor and the startup hooks | candidate |  |

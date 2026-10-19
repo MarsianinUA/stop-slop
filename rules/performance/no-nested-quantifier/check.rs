@@ -1,5 +1,7 @@
 use kit::oxc::ast::ast::Argument;
-use kit::oxc::regular_expression::ast::{Alternative, Disjunction, Quantifier, Term};
+use kit::oxc::regular_expression::ast::{
+    Alternative, Disjunction, LookAroundAssertionKind, Quantifier, Term,
+};
 use kit::oxc::regular_expression::{ConstructorParser, LiteralParser, Options};
 use kit::prelude::*;
 
@@ -54,7 +56,7 @@ impl Rule for Check {
         let Ok(pattern) = parsed else {
             return;
         };
-        nested(&pattern.body, cx);
+        nested(&pattern.body, false, cx);
     }
 }
 
@@ -97,29 +99,57 @@ fn constructed(file: &File<'_>, kind: AstKind<'_>) -> Option<(Span, Option<Span>
     Some((pattern, arguments.get(1).and_then(literal)))
 }
 
-/// Reports every quantifier of the form `splits` finds, inner ones too.
-fn nested(disjunction: &Disjunction<'_>, cx: &mut Cx<'_, '_>) {
-    for term in disjunction
-        .body
-        .iter()
-        .flat_map(|alternative| &alternative.body)
-    {
-        let term = match term {
-            Term::Quantifier(quantifier) => {
-                if splits(quantifier) {
-                    cx.report(quantifier.span).arg("part", quantifier);
+/// Reports every quantifier of the form `splits` finds, inner ones too, when a term that
+/// `can_fail` comes after it: with nothing to fail, the first split matches and none is retried.
+/// `followed`: such a term comes after `disjunction`, in an alternative around it.
+fn nested(disjunction: &Disjunction<'_>, followed: bool, cx: &mut Cx<'_, '_>) {
+    for alternative in &disjunction.body {
+        for (at, term) in alternative.body.iter().enumerate() {
+            let followed = followed || alternative.body[at + 1..].iter().any(can_fail);
+            let term = match term {
+                Term::Quantifier(quantifier) => {
+                    if followed && splits(quantifier) {
+                        cx.report(quantifier.span).arg("part", quantifier);
+                    }
+                    &quantifier.body
                 }
-                &quantifier.body
+                term => term,
+            };
+            match term {
+                // Once a lookahead matches, a failure after it does not retry it. A lookbehind
+                // matches right to left, against the order `followed` reads, so it is left out.
+                Term::LookAroundAssertion(assertion) => {
+                    if matches!(
+                        assertion.kind,
+                        LookAroundAssertionKind::Lookahead
+                            | LookAroundAssertionKind::NegativeLookahead
+                    ) {
+                        nested(&assertion.body, false, cx);
+                    }
+                }
+                term => {
+                    if let Some(body) = group_body(term) {
+                        nested(body, followed, cx);
+                    }
+                }
             }
-            term => term,
-        };
-        let body = match term {
-            Term::LookAroundAssertion(assertion) => Some(&assertion.body),
-            term => group_body(term),
-        };
-        if let Some(body) = body {
-            nested(body, cx);
         }
+    }
+}
+
+/// The term can fail to match: not one that can match nothing, such as `x*`, `(a|)` or a
+/// back reference to a group that took nothing.
+fn can_fail(term: &Term<'_>) -> bool {
+    match term {
+        Term::Quantifier(quantifier) => quantifier.min > 0 && can_fail(&quantifier.body),
+        Term::CapturingGroup(_) | Term::IgnoreGroup(_) => group_body(term).is_some_and(|group| {
+            group
+                .body
+                .iter()
+                .all(|alternative| alternative.body.iter().any(can_fail))
+        }),
+        Term::IndexedReference(_) | Term::NamedReference(_) => false,
+        _ => true,
     }
 }
 
