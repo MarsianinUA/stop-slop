@@ -55,3 +55,31 @@ export async function nested(): Promise<void> {
     }),
   );
 }
+
+export async function polled(): Promise<number> {
+  let polls = 0;
+  for (const order of orders) {
+    while (await notify(order)) polls += 1; // expect: no-await-in-loop
+  }
+  return polls;
+}
+
+export async function checked(): Promise<void> {
+  for (const order of orders) {
+    if (!(await notify(order))) throw new Error(order.id); // expect: no-await-in-loop
+  }
+}
+
+export async function firstOfEach(groups: Order[][]): Promise<void> {
+  outer: for (const group of groups) {
+    for (const order of group) {
+      if (await notify(order)) continue outer; // expect: no-await-in-loop
+    }
+  }
+}
+
+export async function walked(first: string): Promise<void> {
+  for (let cursor: string | null = first; cursor; ) {
+    cursor = (await fetchPage(cursor)).next; // expect: no-await-in-loop
+  }
+}

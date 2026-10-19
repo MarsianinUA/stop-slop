@@ -15,20 +15,23 @@ impl Rule for Check {
         let Some(member) = call.callee.get_member_expr() else {
             return;
         };
-        let is_async = match call
+        if member.static_property_name() != Some("forEach") {
+            return;
+        }
+        let callback = match call
             .arguments
             .first()
             .and_then(Argument::as_expression)
             .map(Expression::get_inner_expression)
         {
-            Some(Expression::ArrowFunctionExpression(arrow)) => arrow.r#async,
-            Some(Expression::FunctionExpression(function)) => function.r#async,
-            _ => false,
+            Some(Expression::ArrowFunctionExpression(arrow)) => arrow.node_id.get(),
+            Some(Expression::FunctionExpression(function)) => function.node_id.get(),
+            _ => return,
         };
-        if member.static_property_name() != Some("forEach") || !is_async {
+        let file = cx.file();
+        if !returns_promise(file, file.semantic.nodes().get_node(callback)) {
             return;
         }
-        let file = cx.file();
         cx.report(Span::new(call.span.start, member.span().end))
             .arg(
                 "items",

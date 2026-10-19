@@ -1,4 +1,5 @@
-use kit::oxc::ast::ast::{Expression, Statement};
+use kit::oxc::ast::ast::{Expression, LabelIdentifier, Statement};
+use kit::oxc::semantic::NodeId;
 use kit::prelude::*;
 
 #[derive(Deserialize)]
@@ -39,23 +40,28 @@ impl Rule for Check {
             return;
         };
         let file = cx.file();
-        let Some(around) = loop_around(file, node.id()) else {
-            return;
+        let mut around = loop_around(file, node.id());
+        let (around, body) = loop {
+            let Some(current) = around else {
+                return;
+            };
+            // `for await` reads one item at a time on purpose; an `await` in a callback holds up
+            // only that callback.
+            let Some(body) = body(current.node.kind()).map(GetSpan::span) else {
+                return;
+            };
+            if body.contains_inclusive(awaited.span) {
+                break (current, body);
+            }
+            // The test and the update decide whether another pass runs, so they wait by nature.
+            // The loop around this one holds them in its body.
+            around = loop_around(file, current.node.id());
         };
-        // The test and the update decide whether another pass runs, so they wait by nature;
-        // `for await` reads one item at a time on purpose; an `await` in a callback holds up
-        // only that callback.
-        let Some(body) = body(around.node.kind()).map(GetSpan::span) else {
-            return;
-        };
-        if !body.contains_inclusive(awaited.span) {
-            return;
-        }
         cx.report(awaited.span)
             .arg("call", awaited_text(file, &awaited.argument))
             .arg("receiver", receiver(file, &awaited.argument))
-            .arg("writes", writes(file, around.node.span(), body))
-            .arg("exit", exit(file, body));
+            .arg("writes", writes(file, &around, body))
+            .arg("exit", exit(file, around.node.span(), body));
     }
 }
 
@@ -82,9 +88,9 @@ fn awaited_text(file: &File<'_>, argument: &Expression<'_>) -> String {
     }
 }
 
-/// The object the awaited call goes to, or the function it calls, and whether its name says
-/// store or client: `this.ordersRepository` of `this.ordersRepository.save(..)`, `fetchPage` of
-/// `fetchPage(cursor)`.
+/// The object the awaited call goes to, or the function it calls, and whether its name says the
+/// call is a round trip: `this.ordersRepository` of `this.ordersRepository.save(..)`, `fetchPage`
+/// of `fetchPage(cursor)`.
 fn receiver(file: &File<'_>, argument: &Expression<'_>) -> String {
     let Some(call) = call_of(argument) else {
         return "none, the awaited value is not a call".to_string();
@@ -94,11 +100,12 @@ fn receiver(file: &File<'_>, argument: &Expression<'_>) -> String {
         .get_member_expr()
         .map_or(callee, |member| member.object());
     let text = one_line(target.span().source_text(file.text));
-    if is_round_trip(target) {
-        format!("`{text}`, a store or a client by its name")
+    let looks = if is_round_trip(target) {
+        "looks"
     } else {
-        format!("`{text}`, not a store or a client by its name")
-    }
+        "does not look"
+    };
+    format!("`{text}`, which by its name {looks} like a round trip to a store or a service")
 }
 
 /// A name along the chain has a word of `ROUND_TRIPS`: `prisma` of `this.prisma.user`, `http` of
@@ -135,9 +142,10 @@ fn is_round_trip(expression: &Expression<'_>) -> bool {
     }
 }
 
-/// The variables declared outside the loop that its body assigns, in order: `cursor` of
-/// `cursor = page.next`. A pass that writes one may need the pass before it.
-fn writes(file: &File<'_>, loop_span: Span, body: Span) -> String {
+/// The variables the body assigns that carry over from pass to pass, in order: `cursor` of
+/// `cursor = page.next`, declared before the loop or in the `init` of `for`. A pass that writes
+/// one may need the pass before it.
+fn writes(file: &File<'_>, around: &LoopAround<'_>, body: Span) -> String {
     let scoping = file.semantic.scoping();
     let mut names: Vec<&str> = Vec::new();
     for node in file.semantic.nodes().iter() {
@@ -151,8 +159,8 @@ fn writes(file: &File<'_>, loop_span: Span, body: Span) -> String {
         let name = scoping.symbol_name(symbol);
         if reference.is_write()
             && body.contains_inclusive(id.span)
-            && !loop_span.contains_inclusive(scoping.symbol_span(symbol))
             && !names.contains(&name)
+            && !runs_each_pass(file, scoping.symbol_declaration(symbol), around)
         {
             names.push(name);
         }
@@ -167,44 +175,67 @@ fn writes(file: &File<'_>, loop_span: Span, body: Span) -> String {
         .join(", ")
 }
 
-/// How the body leaves the loop early. A `break` of a loop or `switch` inside the body and a
-/// `return` of a function inside it stay in the body.
-fn exit(file: &File<'_>, body: Span) -> &'static str {
+/// How the body leaves the loop early: `break`, `continue` to an outer loop, `return`, or a
+/// `throw` that no `catch` in the body takes. One that ends at a loop, `switch`, function or
+/// `try` inside the body stays in the body.
+fn exit(file: &File<'_>, loop_span: Span, body: Span) -> String {
     let nodes = file.semantic.nodes();
-    let mut breaks = false;
-    let mut returns = false;
+    let mut exits: Vec<&str> = Vec::new();
     for node in nodes
         .iter()
         .filter(|node| body.contains_inclusive(node.span()))
     {
-        match node.kind() {
-            AstKind::BreakStatement(statement) => {
-                let target = nodes.ancestors(node.id()).find(|ancestor| {
-                    match (&statement.label, ancestor.kind()) {
-                        (Some(label), AstKind::LabeledStatement(labeled)) => {
-                            labeled.label.name == label.name
-                        }
-                        (None, kind) => is_breakable(kind),
-                        _ => false,
+        let mut ancestors = nodes.ancestors(node.id());
+        let (exit, target) = match node.kind() {
+            AstKind::BreakStatement(statement) => (
+                "`break`",
+                ancestors.find(|ancestor| match &statement.label {
+                    Some(label) => is_labeled(ancestor, label),
+                    None => is_breakable(ancestor.kind()),
+                }),
+            ),
+            AstKind::ContinueStatement(statement) => {
+                // An unlabeled `continue`, or one to the label of this loop, starts its next pass.
+                let Some(label) = &statement.label else {
+                    continue;
+                };
+                let target = ancestors.find(|ancestor| is_labeled(ancestor, label));
+                if target.is_some_and(|target| {
+                    matches!(target.kind(), AstKind::LabeledStatement(labeled)
+                        if labeled.body.span() == loop_span)
+                }) {
+                    continue;
+                }
+                ("`continue`", target)
+            }
+            AstKind::ReturnStatement(_) => (
+                "`return`",
+                ancestors.find(|ancestor| ancestor.kind().is_function_like()),
+            ),
+            AstKind::ThrowStatement(statement) => (
+                "`throw`",
+                ancestors.find(|ancestor| match ancestor.kind() {
+                    AstKind::TryStatement(caught) => {
+                        caught.handler.is_some()
+                            && caught.block.span.contains_inclusive(statement.span)
                     }
-                });
-                breaks |= is_outside(body, target);
-            }
-            AstKind::ReturnStatement(_) => {
-                let function = nodes
-                    .ancestors(node.id())
-                    .find(|ancestor| ancestor.kind().is_function_like());
-                returns |= is_outside(body, function);
-            }
-            _ => {}
+                    kind => kind.is_function_like(),
+                }),
+            ),
+            _ => continue,
+        };
+        if is_outside(body, target) && !exits.contains(&exit) {
+            exits.push(exit);
         }
     }
-    match (breaks, returns) {
-        (true, true) => "`break` and `return`",
-        (true, false) => "`break`",
-        (false, true) => "`return`",
-        (false, false) => "none",
+    if exits.is_empty() {
+        return "none".to_string();
     }
+    exits.join(", ")
+}
+
+fn is_labeled(node: &AstNode<'_>, label: &LabelIdentifier<'_>) -> bool {
+    matches!(node.kind(), AstKind::LabeledStatement(labeled) if labeled.label.name == label.name)
 }
 
 fn is_breakable(kind: AstKind<'_>) -> bool {
@@ -219,7 +250,15 @@ fn is_breakable(kind: AstKind<'_>) -> bool {
     )
 }
 
-/// The `break` or `return` reaches past the body: its target is the loop or something around it.
+/// The exit reaches past the body: its target is the loop or something around it.
 fn is_outside(body: Span, target: Option<&AstNode<'_>>) -> bool {
     target.is_none_or(|target| !body.contains_inclusive(target.span()))
+}
+
+/// Following the loops out from `node` reaches `around`: `node` runs on every pass of it.
+fn runs_each_pass(file: &File<'_>, node: NodeId, around: &LoopAround<'_>) -> bool {
+    std::iter::successors(loop_around(file, node), |inner| {
+        loop_around(file, inner.node.id())
+    })
+    .any(|inner| inner.node.id() == around.node.id())
 }

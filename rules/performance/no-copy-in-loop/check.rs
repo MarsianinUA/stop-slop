@@ -2,7 +2,7 @@ use kit::oxc::ast::ast::{
     Argument, ArrayExpressionElement, AssignmentOperator, AssignmentTarget, Expression,
     ObjectPropertyKind,
 };
-use kit::oxc::semantic::SymbolId;
+use kit::oxc::semantic::{NodeId, SymbolId};
 use kit::prelude::*;
 
 #[derive(Deserialize)]
@@ -36,11 +36,7 @@ impl Rule for Check {
         };
         // A variable of `for (let all = []; ..)` keeps its value from pass to pass; one declared
         // in the body, or by `for (let row of rows)`, starts anew on each pass.
-        let pass = match around.node.kind() {
-            AstKind::ForStatement(statement) => statement.body.span(),
-            _ => around.node.span(),
-        };
-        if pass.contains_inclusive(scoping.symbol_span(symbol)) {
+        if runs_each_pass(file, scoping.symbol_declaration(symbol), &around) {
             return;
         }
         cx.report(assignment.span)
@@ -111,4 +107,12 @@ fn starts_as_array(file: &File<'_>, variable: &Expression<'_>, symbol: SymbolId)
     is_known_array(file, variable)
         || matches!(file.semantic.nodes().kind(declaration), AstKind::VariableDeclarator(declarator)
             if declarator.init.as_ref().is_some_and(|init| is_known_array(file, init)))
+}
+
+/// Following the loops out from `node` reaches `around`: `node` runs on every pass of it.
+fn runs_each_pass(file: &File<'_>, node: NodeId, around: &LoopAround<'_>) -> bool {
+    std::iter::successors(loop_around(file, node), |inner| {
+        loop_around(file, inner.node.id())
+    })
+    .any(|inner| inner.node.id() == around.node.id())
 }

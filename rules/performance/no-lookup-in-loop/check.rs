@@ -1,6 +1,6 @@
 use kit::oxc::ast::ast::{
-    Argument, ArrayExpressionElement, BindingPattern, CallExpression, Class, ClassElement,
-    Expression, FunctionBody, IdentifierReference, LogicalOperator, Statement,
+    Argument, ArrayExpressionElement, BinaryOperator, BindingPattern, CallExpression, Class,
+    ClassElement, Expression, FunctionBody, IdentifierReference, LogicalOperator, Statement,
 };
 use kit::oxc::semantic::{NodeId, SymbolId};
 use kit::prelude::*;
@@ -45,18 +45,22 @@ impl Rule for Check {
         {
             return;
         }
-        let pass = around.node.span();
-        let nodes = file.semantic.nodes();
-        let uses = array.uses(file);
         // An array built on each pass belongs to the item; one the loop changes cannot be indexed
         // once before it.
-        let is_changed_in_loop = uses
-            .iter()
-            .any(|&id| pass.contains_inclusive(nodes.get_node(id).span()) && changes(file, id));
-        if array.is_declared_in(file, pass) || is_changed_in_loop {
+        if matches!(array, Scanned::Name(symbol)
+            if runs_each_pass(file, file.semantic.scoping().symbol_declaration(symbol), &around))
+        {
             return;
         }
-        let Some(origin) = origin(file, &array, &uses, self.min_literal_items) else {
+        let changed: Vec<NodeId> = array
+            .uses(file)
+            .into_iter()
+            .filter(|&id| changes(file, id))
+            .collect();
+        if changed.iter().any(|&id| runs_each_pass(file, id, &around)) {
+            return;
+        }
+        let Some(origin) = origin(file, &array, !changed.is_empty(), self.min_literal_items) else {
             return;
         };
         cx.report(Span::new(call.span.start, member.span().end))
@@ -90,14 +94,22 @@ fn scanned<'a>(file: &File<'a>, receiver: &'a Expression<'a>, call: NodeId) -> O
             .get_reference(id.reference_id())
             .symbol_id()
             .map(Scanned::Name),
-        Expression::StaticMemberExpression(member)
-            if matches!(member.object, Expression::ThisExpression(_)) =>
-        {
+        inner => {
+            let name = this_field(inner)?;
             let class = this_class(file, call)?;
-            let name = member.property.name.as_str();
             field_value(class, name)
                 .is_some_and(|value| is_known_array(file, value))
                 .then_some(Scanned::Field(class, name))
+        }
+    }
+}
+
+fn this_field<'b>(expression: &'b Expression<'_>) -> Option<&'b str> {
+    match expression.get_inner_expression() {
+        Expression::StaticMemberExpression(member)
+            if matches!(member.object, Expression::ThisExpression(_)) =>
+        {
+            Some(member.property.name.as_str())
         }
         _ => None,
     }
@@ -106,33 +118,18 @@ fn scanned<'a>(file: &File<'a>, receiver: &'a Expression<'a>, call: NodeId) -> O
 impl Scanned<'_> {
     /// `expression` reads this array: the same name, or the same field of `this`.
     fn is(&self, file: &File<'_>, expression: &Expression<'_>) -> bool {
-        match (self, expression.get_inner_expression()) {
-            (Scanned::Name(symbol), Expression::Identifier(id)) => {
-                file.semantic
-                    .scoping()
-                    .get_reference(id.reference_id())
-                    .symbol_id()
-                    == Some(*symbol)
-            }
-            (Scanned::Field(_, name), Expression::StaticMemberExpression(member)) => {
-                matches!(member.object, Expression::ThisExpression(_))
-                    && member.property.name.as_str() == *name
-            }
-            _ => false,
-        }
-    }
-
-    fn is_declared_in(&self, file: &File<'_>, span: Span) -> bool {
         match self {
             Scanned::Name(symbol) => {
-                span.contains_inclusive(file.semantic.scoping().symbol_span(*symbol))
+                matches!(expression.get_inner_expression(), Expression::Identifier(id)
+                    if file.semantic.scoping().get_reference(id.reference_id()).symbol_id()
+                        == Some(*symbol))
             }
-            Scanned::Field(..) => false,
+            Scanned::Field(_, name) => this_field(expression) == Some(*name),
         }
     }
 
-    /// The nodes that read the array: the references of the name, or `this.<field>` in the
-    /// methods of the class.
+    /// The nodes that reach the array: the references of the name, or `this.<field>` in the
+    /// class, also `this[key]`, which may be any field.
     fn uses(&self, file: &File<'_>) -> Vec<NodeId> {
         match self {
             Scanned::Name(symbol) => file
@@ -145,14 +142,23 @@ impl Scanned<'_> {
                 .semantic
                 .nodes()
                 .iter()
-                .filter(|node| match node.kind() {
-                    AstKind::StaticMemberExpression(member) => {
-                        matches!(member.object, Expression::ThisExpression(_))
-                            && member.property.name.as_str() == *name
-                            && this_class(file, node.id())
-                                .is_some_and(|other| other.span == class.span)
-                    }
-                    _ => false,
+                .filter(|node| {
+                    class.span.contains_inclusive(node.span())
+                        && node
+                            .kind()
+                            .as_member_expression_kind()
+                            .is_some_and(|member| {
+                                matches!(
+                                    member.object().get_inner_expression(),
+                                    Expression::ThisExpression(_)
+                                )
+                            })
+                        && match member_use(file, node) {
+                            Some(MemberUse::Name(used)) => used == *name,
+                            Some(MemberUse::Any) => true,
+                            None => false,
+                        }
+                        && this_class(file, node.id()).is_some_and(|other| other.span == class.span)
                 })
                 .map(AstNode::id)
                 .collect(),
@@ -183,7 +189,7 @@ fn changes(file: &File<'_>, id: NodeId) -> bool {
 
 /// Where the array comes from, for the message. `None` for a literal of fewer than `min` items
 /// that nothing changes: a fixed list of options, not data.
-fn origin(file: &File<'_>, array: &Scanned<'_>, uses: &[NodeId], min: usize) -> Option<String> {
+fn origin(file: &File<'_>, array: &Scanned<'_>, is_changed: bool, min: usize) -> Option<String> {
     let (holder, value) = match *array {
         Scanned::Field(class, name) => ("a field of the class", field_value(class, name)),
         Scanned::Name(symbol) => {
@@ -196,12 +202,11 @@ fn origin(file: &File<'_>, array: &Scanned<'_>, uses: &[NodeId], min: usize) -> 
     };
     let value = value.map(Expression::get_inner_expression);
     if let Some(Expression::ArrayExpression(literal)) = value {
-        let is_fixed = !literal
+        let has_spread = literal
             .elements
             .iter()
-            .any(|element| matches!(element, ArrayExpressionElement::SpreadElement(_)))
-            && !uses.iter().any(|&id| changes(file, id));
-        if !is_fixed {
+            .any(|element| matches!(element, ArrayExpressionElement::SpreadElement(_)));
+        if has_spread || is_changed {
             return Some(holder.to_string());
         }
         let items = literal.elements.len();
@@ -288,7 +293,13 @@ fn compared(
         Expression::LogicalExpression(logical) if logical.operator == LogicalOperator::And => {
             compared(file, item, &logical.left).or_else(|| compared(file, item, &logical.right))
         }
-        Expression::BinaryExpression(binary) if binary.operator.is_equality() => {
+        // `!==` matches every item but one: no index looks that up.
+        Expression::BinaryExpression(binary)
+            if matches!(
+                binary.operator,
+                BinaryOperator::StrictEquality | BinaryOperator::Equality
+            ) =>
+        {
             matched(file, item, &binary.left, &binary.right)
                 .or_else(|| matched(file, item, &binary.right, &binary.left))
         }
@@ -337,4 +348,12 @@ fn matched(
             Some(format!("`.{}`", member.static_property_name()?))
         }
     }
+}
+
+/// Following the loops out from `node` reaches `around`: `node` runs on every pass of it.
+fn runs_each_pass(file: &File<'_>, node: NodeId, around: &LoopAround<'_>) -> bool {
+    std::iter::successors(loop_around(file, node), |inner| {
+        loop_around(file, inner.node.id())
+    })
+    .any(|inner| inner.node.id() == around.node.id())
 }

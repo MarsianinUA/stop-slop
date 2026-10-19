@@ -69,3 +69,7 @@ export function fresh(orders: Order[]): number {
   }
   return count;
 }
+
+export function others(orders: Order[], users: { id: string }[]): { id: string }[][] {
+  return orders.map((order) => users.filter((user) => user.id !== order.userId));
+}

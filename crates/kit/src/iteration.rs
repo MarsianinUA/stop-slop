@@ -64,38 +64,35 @@ pub fn loop_around<'a>(file: &File<'a>, node: NodeId) -> Option<LoopAround<'a>> 
     for ancestor in nodes.ancestors(node) {
         let pass = match ancestor.kind() {
             AstKind::Function(_) | AstKind::ArrowFunctionExpression(_) => {
-                if callback(nodes.parent_kind(ancestor.id()), ancestor.span()).is_none() {
+                let call = nodes.parent_node(ancestor.id());
+                let Some((kind, over)) = callback(call.kind(), ancestor.span()) else {
                     break;
-                }
-                None
-            }
-            // `items.forEach(handlers.get(key))` runs `handlers.get(key)` once.
-            AstKind::CallExpression(_) if child.kind().is_function_like() => {
-                callback(ancestor.kind(), child.span())
+                };
+                Some((call, kind, over))
             }
             AstKind::ForStatement(statement) => statement
                 .init
                 .as_ref()
                 .is_none_or(|init| init.span() != child.span())
-                .then(|| (LoopKind::For, index_bound(statement))),
+                .then(|| (ancestor, LoopKind::For, index_bound(statement))),
             AstKind::ForOfStatement(statement) if statement.right.span() != child.span() => {
                 let kind = if statement.r#await {
                     LoopKind::ForAwaitOf
                 } else {
                     LoopKind::ForOf
                 };
-                Some((kind, Some(&statement.right)))
+                Some((ancestor, kind, Some(&statement.right)))
             }
             AstKind::ForInStatement(statement) if statement.right.span() != child.span() => {
-                Some((LoopKind::ForIn, Some(&statement.right)))
+                Some((ancestor, LoopKind::ForIn, Some(&statement.right)))
             }
-            AstKind::WhileStatement(_) => Some((LoopKind::While, None)),
-            AstKind::DoWhileStatement(_) => Some((LoopKind::DoWhile, None)),
+            AstKind::WhileStatement(_) => Some((ancestor, LoopKind::While, None)),
+            AstKind::DoWhileStatement(_) => Some((ancestor, LoopKind::DoWhile, None)),
             _ => None,
         };
-        if let Some((kind, over)) = pass {
+        if let Some(pass) = pass {
             depth += 1;
-            found.get_or_insert((ancestor, kind, over));
+            found.get_or_insert(pass);
         }
         child = ancestor;
     }
@@ -111,6 +108,14 @@ impl LoopAround<'_> {
     /// The loop as a message names it: "`for..of` loop over `orders`", "`forEach` callback over
     /// `rows`", "`while` loop", "`on` listener".
     pub fn label(&self, file: &File<'_>) -> String {
+        let method = || match self.node.kind() {
+            AstKind::CallExpression(call) => call
+                .callee
+                .get_member_expr()
+                .and_then(|member| member.static_property_name())
+                .unwrap_or_default(),
+            _ => "",
+        };
         let name = match self.kind {
             LoopKind::For => "`for` loop".to_string(),
             LoopKind::ForOf => "`for..of` loop".to_string(),
@@ -118,21 +123,8 @@ impl LoopAround<'_> {
             LoopKind::ForIn => "`for..in` loop".to_string(),
             LoopKind::While => "`while` loop".to_string(),
             LoopKind::DoWhile => "`do..while` loop".to_string(),
-            LoopKind::Callback | LoopKind::Listener => {
-                let method = match self.node.kind() {
-                    AstKind::CallExpression(call) => call
-                        .callee
-                        .get_member_expr()
-                        .and_then(|member| member.static_property_name()),
-                    _ => None,
-                };
-                let role = if self.kind == LoopKind::Callback {
-                    "callback"
-                } else {
-                    "listener"
-                };
-                format!("`{}` {role}", method.unwrap_or_default())
-            }
+            LoopKind::Callback => format!("`{}` callback", method()),
+            LoopKind::Listener => format!("`{}` listener", method()),
         };
         match self.over {
             Some(over) => format!(
@@ -144,9 +136,7 @@ impl LoopAround<'_> {
     }
 }
 
-/// The loop the function at `function` makes when `parent` is the call it is given to: a
-/// callback at the first argument of a method of `PER_ITEM`, over the receiver; a listener at the
-/// second argument of one of `LISTENERS`.
+/// The loop the function at `function` makes when `parent` is the call it is given to.
 fn callback<'a>(
     parent: AstKind<'a>,
     function: Span,

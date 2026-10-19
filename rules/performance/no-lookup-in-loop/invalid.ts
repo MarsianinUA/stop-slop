@@ -14,6 +14,7 @@ interface Payment {
 
 declare const users: User[];
 declare const payments: Payment[];
+declare function loadBlocked(): string[];
 
 const CODES = ['a1', 'b2', 'c3', 'd4', 'e5', 'f6', 'g7', 'h8'];
 
@@ -71,6 +72,14 @@ export function waiting(queue: Order[], done: string[]): number {
     skipped += 1;
   }
   return skipped;
+}
+
+export function unblocked(orders: Order[]): number {
+  let count = 0;
+  for (let i = 0, blocked: string[] = loadBlocked(); i < orders.length; i++) {
+    if (!blocked.includes(orders[i].id)) count += 1; // expect: no-lookup-in-loop
+  }
+  return count;
 }
 
 export class Filter {

@@ -26,3 +26,7 @@ export function saveMaybe(): void {
 export function saveRest(): void {
   orders.slice(1).forEach(async (order) => save(order)); // expect: no-async-foreach
 }
+
+export function saveTyped(): void {
+  orders.forEach((order): Promise<void> => save(order)); // expect: no-async-foreach
+}
