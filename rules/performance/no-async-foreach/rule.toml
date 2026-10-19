@@ -1,0 +1,4 @@
+description = "`.forEach(async ..)`: nothing waits for the callbacks"
+kind = "error"
+source = ["personal"]
+message = "`{items}.forEach` does not wait for an async callback: it starts every call at once and returns before any of them ends, so the code after it runs too early and a rejection goes unhandled. Run the calls in turn with `for (const item of {items}) { await .. }`, or together with `await Promise.all(..)` over the promises they return."

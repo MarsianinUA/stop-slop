@@ -25,7 +25,7 @@ The skill has three branches, and each run takes one: fix the user's branch, rev
 
 ### Fix your branch
 
-The agent fixes everything at once, with no approval step. The run is done when `check` is clean: no `error` left, and every `candidate` either fixed or ignored with a reason.
+The agent fixes everything at once, with no approval step. The run is done when `check` is clean: no `error` left, and every `candidate` either fixed or ignored with a reason. A `performance` fix the project's tests reject is the exception: it is reverted, and its finding goes to the report.
 
 1. `git fetch`, so the base is fresh. With no remote, or when the fetch fails, the run goes on and the report says so.
 2. `stop-slop check --json`. The agent keeps this first list for the report, outside the repository. Its `inHunk` tells the user's own lines from cleanup in old code.
@@ -40,14 +40,14 @@ The agent fixes everything at once, with no approval step. The run is done when 
 6. The agent checks each `agent` rule with `active: true` itself, in the branch files its `files` covers.
 7. `check --fix --json` again. While an `error` or an undecided `candidate` is left, the agent goes back to step 5. Then each candidate it judged fine goes into the exception list with `stop-slop ignore <fingerprint> --reason "..."`. Ignoring comes last, because editing the flagged code changes its fingerprint.
 8. The project's formatter runs on the changed files, if the project has one (`prettier`, `biome` or `dprint`). Then `check` runs once more and stays clean.
-9. The project's `typecheck` and `lint` scripts run, if `package.json` has them.
+9. The project's `typecheck` and `lint` scripts run, if `package.json` has them. After a fix of a `performance` finding, its `test` script runs too: a fix the tests reject is reverted, and its finding stays open.
 10. Nothing gets committed. The report gives:
     - the base and why the program picked it;
     - the fixes in the user's own lines, by rule;
     - the cleanup in old code, by file and line, so it can go into a commit of its own;
     - the files that renames and moves touched;
     - every ignored finding with its reason, and every rule a convention turned off;
-    - the formatter, `typecheck` and `lint` results.
+    - the formatter, `typecheck`, `lint` and `test` results, and each `performance` fix the tests rejected.
 
 ### Review a colleague's PR
 
@@ -299,6 +299,7 @@ Every other exception goes into `ignore.json`:
 
 ```toml
 disabled = ["no-boolean-param"]
+enabled = ["performance"]
 
 [rules.max-nesting]
 max = 5
@@ -311,7 +312,7 @@ max = 5
 
 ## Rules
 
-The program has 103 rules in 12 groups: 73 `error`, 24 `candidate` and 6 `agent`. 16 of them fix code themselves. `stop-slop rules` lists them, and so does [rules.md](rules.md); each one lives in `rules/<group>/<id>/`. The catalog is generic: no paths, packages or domains of one project. Ideas that were turned down are in [Not checked, on purpose](#not-checked-on-purpose).
+The program has 108 rules in 13 groups: 75 `error`, 27 `candidate`, 6 `agent`; the 5 of `performance` are off until `enabled` names them. 16 of them fix code themselves. `stop-slop rules` lists them, and so does [rules.md](rules.md); each one lives in `rules/<group>/<id>/`. The catalog is generic: no paths, packages or domains of one project. Ideas that were turned down are in [Not checked, on purpose](#not-checked-on-purpose).
 
 ### Kinds
 
@@ -355,6 +356,7 @@ Two more terms the rules use:
 | `nestjs` | 8 | `@HttpCode`, request scope, `getOrThrow`, response DTOs, routes, inject tokens |
 | `comments` | 4 | `TODO` owners, commented-out code, comments as sentences, comments that retell the code |
 | `tests` | 3 | mocks of own modules, test names, test quality |
+| `performance` | 5 | opt-in: searches, copies, `shift` and `await` inside loops, `forEach(async ..)` |
 
 A group can have a `group.toml`:
 
