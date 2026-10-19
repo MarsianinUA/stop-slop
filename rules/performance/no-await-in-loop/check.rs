@@ -1,5 +1,4 @@
 use kit::oxc::ast::ast::{Expression, LabelIdentifier, Statement};
-use kit::oxc::semantic::NodeId;
 use kit::prelude::*;
 
 #[derive(Deserialize)]
@@ -160,7 +159,7 @@ fn writes(file: &File<'_>, around: &LoopAround<'_>, body: Span) -> String {
         if reference.is_write()
             && body.contains_inclusive(id.span)
             && !names.contains(&name)
-            && !runs_each_pass(file, scoping.symbol_declaration(symbol), around)
+            && !around.runs_each_pass(file, scoping.symbol_declaration(symbol))
         {
             names.push(name);
         }
@@ -253,12 +252,4 @@ fn is_breakable(kind: AstKind<'_>) -> bool {
 /// The exit reaches past the body: its target is the loop or something around it.
 fn is_outside(body: Span, target: Option<&AstNode<'_>>) -> bool {
     target.is_none_or(|target| !body.contains_inclusive(target.span()))
-}
-
-/// Following the loops out from `node` reaches `around`: `node` runs on every pass of it.
-fn runs_each_pass(file: &File<'_>, node: NodeId, around: &LoopAround<'_>) -> bool {
-    std::iter::successors(loop_around(file, node), |inner| {
-        loop_around(file, inner.node.id())
-    })
-    .any(|inner| inner.node.id() == around.node.id())
 }

@@ -48,7 +48,7 @@ impl Rule for Check {
         // An array built on each pass belongs to the item; one the loop changes cannot be indexed
         // once before it.
         if matches!(array, Scanned::Name(symbol)
-            if runs_each_pass(file, file.semantic.scoping().symbol_declaration(symbol), &around))
+            if around.runs_each_pass(file, file.semantic.scoping().symbol_declaration(symbol)))
         {
             return;
         }
@@ -57,7 +57,7 @@ impl Rule for Check {
             .into_iter()
             .filter(|&id| changes(file, id))
             .collect();
-        if changed.iter().any(|&id| runs_each_pass(file, id, &around)) {
+        if changed.iter().any(|&id| around.runs_each_pass(file, id)) {
             return;
         }
         let Some(origin) = origin(file, &array, !changed.is_empty(), self.min_literal_items) else {
@@ -348,12 +348,4 @@ fn matched(
             Some(format!("`.{}`", member.static_property_name()?))
         }
     }
-}
-
-/// Following the loops out from `node` reaches `around`: `node` runs on every pass of it.
-fn runs_each_pass(file: &File<'_>, node: NodeId, around: &LoopAround<'_>) -> bool {
-    std::iter::successors(loop_around(file, node), |inner| {
-        loop_around(file, inner.node.id())
-    })
-    .any(|inner| inner.node.id() == around.node.id())
 }

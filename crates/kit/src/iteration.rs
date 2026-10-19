@@ -134,6 +134,14 @@ impl LoopAround<'_> {
             None => name,
         }
     }
+
+    /// `node` runs again on each pass of this loop, also from a loop or callback nested in it.
+    pub fn runs_each_pass(&self, file: &File<'_>, node: NodeId) -> bool {
+        std::iter::successors(loop_around(file, node), |inner| {
+            loop_around(file, inner.node.id())
+        })
+        .any(|inner| inner.node.id() == self.node.id())
+    }
 }
 
 /// The loop the function at `function` makes when `parent` is the call it is given to.

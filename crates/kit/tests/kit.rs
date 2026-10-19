@@ -3,7 +3,7 @@ use std::collections::BTreeSet;
 use camino::Utf8Path;
 use kit::oxc::ast::ast::{Expression, TSType};
 use kit::oxc::parser::ParseOptions;
-use kit::oxc::semantic::SemanticBuilder;
+use kit::oxc::semantic::{NodeId, SemanticBuilder};
 use kit::oxc::span::SourceType;
 use kit::prelude::*;
 use kit::{
@@ -2775,7 +2775,7 @@ fn boolean_parameter_has_a_boolean_type_or_a_boolean_default() {
 }
 
 /// `loop_around` of each `probe()` call, in source order.
-fn probes<'a>(file: &File<'a>) -> Vec<Option<LoopAround<'a>>> {
+fn probe_ids(file: &File<'_>) -> Vec<NodeId> {
     file.semantic
         .nodes()
         .iter()
@@ -2783,7 +2783,14 @@ fn probes<'a>(file: &File<'a>) -> Vec<Option<LoopAround<'a>>> {
             matches!(node.kind(), AstKind::CallExpression(call)
                 if matches!(&call.callee, Expression::Identifier(id) if id.name == "probe"))
         })
-        .map(|node| loop_around(file, node.id()))
+        .map(AstNode::id)
+        .collect()
+}
+
+fn probes<'a>(file: &File<'a>) -> Vec<Option<LoopAround<'a>>> {
+    probe_ids(file)
+        .into_iter()
+        .map(|id| loop_around(file, id))
         .collect()
 }
 
@@ -2871,6 +2878,7 @@ export function g() {
   while (rows.length) {
     function inner() { probe(); }
   }
+  for (let i = probe(); i < 3; i++) for (const row of rows) probe();
 }";
     with_file(text, |file| {
         assert_eq!(
@@ -2890,7 +2898,24 @@ export function g() {
                 // The second argument of `forEach` runs once per pass of the `for..of`.
                 Some((LoopKind::ForOf, Some("rows"), 1)),
                 None,
+                None,
+                Some((LoopKind::ForOf, Some("rows"), 2)),
             ]
+        );
+        let &[.., init, body] = probe_ids(file).as_slice() else {
+            panic!("the probes of the last loops");
+        };
+        let inner = loop_around(file, body).expect("the inner loop");
+        let outer = loop_around(file, inner.node.id()).expect("the outer loop");
+        // The `init` of the outer `for` runs once; the body of the inner loop runs on every pass
+        // of both.
+        assert_eq!(
+            [
+                outer.runs_each_pass(file, init),
+                outer.runs_each_pass(file, body),
+                inner.runs_each_pass(file, body),
+            ],
+            [false, true, true]
         );
     });
 }
