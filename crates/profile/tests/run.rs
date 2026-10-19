@@ -50,8 +50,12 @@ fn kinds(dir: &Utf8Path) -> Vec<String> {
         .collect()
 }
 
-fn json(path: &Utf8Path) -> Value {
-    serde_json::from_slice(&fs::read(path).unwrap()).unwrap()
+fn json(dir: &Utf8Path, suffix: &str) -> Value {
+    let name = names(dir)
+        .into_iter()
+        .find(|name| name.ends_with(suffix))
+        .unwrap_or_else(|| panic!("no {suffix} file in {dir}"));
+    serde_json::from_slice(&fs::read(dir.join(name)).unwrap()).unwrap()
 }
 
 #[test]
@@ -60,11 +64,7 @@ fn a_node_script_writes_a_start_mark_and_a_chunk_and_passes_on_its_exit_code() {
     let exit = script(&temp, "exit.js", "process.exitCode = 7;\n");
     assert_eq!(run(&node([exit]), &dir).unwrap(), Exited::Code(7));
     assert_eq!(kinds(&dir), ["0.cpuprofile", "start.json"]);
-    let chunk = names(&dir)
-        .into_iter()
-        .find(|name| name.ends_with(".cpuprofile"))
-        .unwrap();
-    assert!(json(&dir.join(chunk))["nodes"].is_array());
+    assert!(json(&dir, ".cpuprofile")["nodes"].is_array());
 }
 
 #[test]
@@ -200,11 +200,7 @@ fn code_compiled_with_vm_compile_function_gets_its_inline_map() {
         Exited::Code(0)
     );
     assert_eq!(kinds(&dir), ["0.cpuprofile", "0.maps.json", "start.json"]);
-    let maps_json = names(&dir)
-        .into_iter()
-        .find(|name| name.ends_with(".maps.json"))
-        .unwrap();
-    let maps = json(&dir.join(maps_json));
+    let maps = json(&dir, ".maps.json");
     let (url, entry) = maps
         .as_object()
         .unwrap()

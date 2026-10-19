@@ -31,20 +31,20 @@ function start(dir) {
   session.connect();
 
   // jest compiles modules with `vm.compileFunction`, and Node's map cache never sees them;
-  // V8 still reads the `sourceMappingURL` comment of every script it parses.
-  const scripts = new Map(); // scriptId -> { url, sourceMapURL }
-  // jest compiles each module again for every test file: one copy of each map string is kept.
-  const interned = new Map();
-  session.on('Debugger.scriptParsed', ({ params }) => {
-    if (!params.sourceMapURL || params.url.includes('node_modules')) return;
-    let sourceMapURL = interned.get(params.sourceMapURL);
-    if (sourceMapURL === undefined) {
-      sourceMapURL = params.sourceMapURL;
-      interned.set(sourceMapURL, sourceMapURL);
-    }
-    scripts.set(params.scriptId, { url: params.url, sourceMapURL });
+  // V8 still reads the `sourceMappingURL` comment of every script it parses. jest compiles each
+  // module again for every test file: the first compile of a URL is kept until a chunk writes
+  // its map.
+  const mapURLs = new Map();
+  const seen = new Set();
+  session.on('Debugger.scriptParsed', ({ params: { url, sourceMapURL } }) => {
+    if (!sourceMapURL || seen.has(url) || mapURLs.has(url)) return;
+    // Frames of dependencies are never local, so their maps would only take space.
+    if (/[\\/]node_modules[\\/]/.test(url)) return;
+    mapURLs.set(url, sourceMapURL);
   });
-  post('Debugger.enable');
+  // Without the limit the debugger keeps the source of every script the program dropped, and
+  // jest drops one per module and test file: 3000 compiles of 110 KB took 940 MB, not 280 MB.
+  post('Debugger.enable', { maxScriptsCacheSize: 0 });
 
   post('Profiler.enable');
   // V8 drops the inspector's CPU profiler when its last profile stops, and the next start logs
@@ -54,7 +54,6 @@ function start(dir) {
   post('Profiler.start');
 
   let chunk = 0;
-  const seen = new Set();
   // A process killed hard (TerminateProcess on Windows, jest ending its workers) runs no
   // handler: chunks bound the loss to the last 2 s.
   setInterval(() => flush(true), 2000).unref();
@@ -64,24 +63,30 @@ function start(dir) {
     try {
       const { profile } = post('Profiler.stop');
       if (again) post('Profiler.start');
+      const fresh = new Set();
       const maps = {};
-      for (const { callFrame } of profile.nodes) {
-        if (!callFrame.url || seen.has(callFrame.url)) continue;
-        seen.add(callFrame.url);
-        const script = scripts.get(callFrame.scriptId);
-        const map = script && mapOf(script);
-        if (map) maps[callFrame.url] = map;
+      for (const { callFrame: { url } } of profile.nodes) {
+        if (!url || seen.has(url) || fresh.has(url)) continue;
+        fresh.add(url);
+        const sourceMapURL = mapURLs.get(url);
+        const map = sourceMapURL && mapOf(url, sourceMapURL);
+        if (map) maps[url] = map;
       }
       const n = chunk++;
       // The maps go first: a chunk on disk always has the maps it needs.
       if (Object.keys(maps).length > 0) write(`${id}.${n}.maps.json`, maps);
+      // Only after the write: when it fails, the next chunk writes these maps.
+      for (const url of fresh) {
+        seen.add(url);
+        mapURLs.delete(url);
+      }
       write(`${id}.${n}.cpuprofile`, profile);
     } catch {
       // A full disk loses the chunk, not the program.
     }
   }
 
-  function mapOf({ url, sourceMapURL }) {
+  function mapOf(url, sourceMapURL) {
     try {
       const inline = /^data:application\/json[^,]*?(;base64)?,(.*)$/s.exec(sourceMapURL);
       if (inline) {

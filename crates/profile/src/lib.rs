@@ -8,7 +8,8 @@ mod read;
 mod run;
 
 /// Runs `command` and waits for it, with its input and output untouched. Every Node process it
-/// starts writes its CPU profile into `dir`, an existing folder that `read` reads afterwards.
+/// starts writes its CPU profile into `dir`, an existing empty folder that `read` reads
+/// afterwards.
 pub fn run(command: &[OsString], dir: &Utf8Path) -> Result<Exited, ProfileError> {
     run::run(command, dir)
 }
@@ -62,8 +63,8 @@ pub struct HotLine {
     pub ms: f64,
 }
 
-/// Top-level code of a file: frames at 1:1 of the generated code, and code its source map has
-/// no original for, which the compiler added (tsc's `__decorate`).
+/// Top-level code of a file: frames of the generated code with no mapping, such as the module
+/// body at 1:1 and the helpers `tsc` puts before the first mapping (`__decorate`, `__exportStar`).
 #[derive(Debug)]
 pub struct ModuleTime {
     pub file: Utf8PathBuf,

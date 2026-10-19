@@ -65,7 +65,11 @@ struct Process {
 
 pub(crate) fn read(dir: &Utf8Path, root: &Utf8Path) -> Result<Samples, ProfileError> {
     let processes = list(dir)?;
-    if processes.values().all(|process| process.chunks.is_empty()) {
+    let lost = processes
+        .values()
+        .filter(|process| process.chunks.is_empty())
+        .count();
+    if lost == processes.len() {
         return Err(ProfileError::NoProfile);
     }
     let mut sums = Sums::new(root);
@@ -79,10 +83,6 @@ pub(crate) fn read(dir: &Utf8Path, root: &Utf8Path) -> Result<Samples, ProfileEr
                 .map_err(|message| bad(path, message))?;
         }
     }
-    let lost = processes
-        .values()
-        .filter(|process| process.chunks.is_empty())
-        .count();
     Ok(sums.finish(count(processes.len()), count(lost)))
 }
 
@@ -104,16 +104,10 @@ fn list(dir: &Utf8Path) -> Result<BTreeMap<String, Process>, ProfileError> {
         let Ok(n) = n.parse::<u32>() else {
             continue;
         };
-        let is_chunk = match kind {
-            "cpuprofile" => true,
-            "maps.json" => false,
+        let files = match kind {
+            "cpuprofile" => &mut processes.entry(id.to_owned()).or_default().chunks,
+            "maps.json" => &mut processes.entry(id.to_owned()).or_default().maps,
             _ => continue,
-        };
-        let process = processes.entry(id.to_owned()).or_default();
-        let files = if is_chunk {
-            &mut process.chunks
-        } else {
-            &mut process.maps
         };
         files.insert(n, entry.into_path());
     }
@@ -140,9 +134,7 @@ impl Scripts {
             let bytes = fs::read(path).map_err(ProfileError::io(path))?;
             let chunk: HashMap<String, Entry> =
                 serde_json::from_slice(&bytes).map_err(|error| bad(path, error.to_string()))?;
-            for (url, entry) in chunk {
-                entries.entry(url).or_insert(entry);
-            }
+            entries.extend(chunk);
         }
         Ok(Scripts {
             entries,
@@ -188,6 +180,7 @@ struct Function {
 }
 
 /// Microseconds until `finish`.
+#[derive(Default)]
 struct Sums {
     root: Utf8PathBuf,
     total: f64,
@@ -203,13 +196,7 @@ impl Sums {
     fn new(root: &Utf8Path) -> Sums {
         Sums {
             root: maps::normalize(root),
-            total: 0.0,
-            local: 0.0,
-            unmapped: 0.0,
-            files: Vec::new(),
-            file_ids: HashMap::new(),
-            functions: HashMap::new(),
-            modules: HashMap::new(),
+            ..Sums::default()
         }
     }
 
@@ -346,17 +333,13 @@ impl Sums {
     }
 
     fn function(&mut self, file: &Utf8Path, line: u32, column: u32) -> Frame {
-        match self.local_id(file) {
-            Some(file) => Frame::Function { file, line, column },
-            None => Frame::Other,
-        }
+        self.local_id(file)
+            .map_or(Frame::Other, |file| Frame::Function { file, line, column })
     }
 
     fn module(&mut self, file: &Utf8Path) -> Frame {
-        match self.local_id(file) {
-            Some(file) => Frame::Module { file },
-            None => Frame::Other,
-        }
+        self.local_id(file)
+            .map_or(Frame::Other, |file| Frame::Module { file })
     }
 
     fn local_id(&mut self, file: &Utf8Path) -> Option<u32> {
