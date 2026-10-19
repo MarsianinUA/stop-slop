@@ -46,6 +46,8 @@ pub type Build = fn(options: &str) -> Result<Box<dyn DynRule>, toml::de::Error>;
 pub struct GroupDef {
     pub name: &'static str,
     pub requires_package: Option<&'static str>,
+    /// Off unless `enabled` of `config.toml` names the group.
+    pub opt_in: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

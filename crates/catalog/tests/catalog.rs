@@ -116,14 +116,12 @@ fn three_rules_become_three_wrappers_with_slash_paths_and_kit_paths() {
     assert!(meta(&code, "max-depth").contains("options: \"max = 4\\n\""));
     assert!(meta(&code, "no-any").contains("options: \"\""));
     assert!(code.contains("rules: &[one_responsibility::DEF, max_depth::DEF, no_any::DEF]"));
-    assert!(
-        code.contains("::kit::GroupDef { name: \"functions-classes\", requires_package: None }")
-    );
-    assert!(
-        code.contains(
-            "::kit::GroupDef { name: \"types\", requires_package: Some(\"@acme/core\") }"
-        )
-    );
+    assert!(code.contains(
+        "::kit::GroupDef { name: \"functions-classes\", requires_package: None, opt_in: false }"
+    ));
+    assert!(code.contains(
+        "::kit::GroupDef { name: \"types\", requires_package: Some(\"@acme/core\"), opt_in: false }"
+    ));
     assert!(
         code.contains("tests: ::kit::RoleDef { suffixes: &[\"spec\"], dirs: &[\"__tests__\"] }")
     );
@@ -355,6 +353,26 @@ fn files_comes_from_the_rule_then_the_group_then_all() {
     assert!(meta(&code, "inherits").contains("files: ::kit::Files::Tests"));
     assert!(meta(&code, "own").contains("files: ::kit::Files::Code"));
     assert!(meta(&code, "plain").contains("files: ::kit::Files::All"));
+}
+
+#[test]
+fn opt_in_comes_from_group_toml_and_is_false_without_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    write(root, "extra/group.toml", "opt-in = true\n");
+    check_rule(root, "extra/slow", ERROR_RULE);
+    check_rule(root, "types/no-any", ERROR_RULE);
+
+    let code = generate(root).unwrap().code;
+
+    assert!(
+        code.contains("::kit::GroupDef { name: \"extra\", requires_package: None, opt_in: true }"),
+        "{code}"
+    );
+    assert!(
+        code.contains("::kit::GroupDef { name: \"types\", requires_package: None, opt_in: false }"),
+        "{code}"
+    );
 }
 
 #[test]
