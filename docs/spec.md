@@ -25,7 +25,7 @@ The skill has three branches, and each run takes one: fix the user's branch, rev
 
 ### Fix your branch
 
-The agent fixes everything at once, with no approval step. The run is done when `check` is clean: no `error` left, and every `candidate` either fixed or ignored with a reason. A `performance` fix the project's tests reject is the exception: it is reverted, and its finding goes to the report.
+The agent fixes everything at once, with no approval step. The run is done when `check` is clean: no `error` left, and every `candidate` either fixed or ignored with a reason. A `performance` or `branching` fix the project's tests reject is the exception: it is reverted, and its finding goes to the report.
 
 1. `git fetch`, so the base is fresh. With no remote, or when the fetch fails, the run goes on and the report says so.
 2. `stop-slop check --json`. The agent keeps this first list for the report, outside the repository. Its `inHunk` tells the user's own lines from cleanup in old code.
@@ -40,14 +40,14 @@ The agent fixes everything at once, with no approval step. The run is done when 
 6. The agent checks each `agent` rule with `active: true` itself, in the branch files its `files` covers.
 7. `check --fix --json` again. While an `error` or an undecided `candidate` is left, the agent goes back to step 5. Then each candidate it judged fine goes into the exception list with `stop-slop ignore <fingerprint> --reason "..."`. Ignoring comes last, because editing the flagged code changes its fingerprint.
 8. The project's formatter runs on the changed files, if the project has one (`prettier`, `biome` or `dprint`). Then `check` runs once more and stays clean.
-9. The project's `typecheck` and `lint` scripts run, if `package.json` has them. After a fix of a `performance` finding, its `test` script runs too: a fix the tests reject is reverted, and its finding stays open.
+9. The project's `typecheck` and `lint` scripts run, if `package.json` has them. After a fix of a `performance` or `branching` finding, its `test` script runs too: a fix the tests reject is reverted, and its finding stays open.
 10. Nothing gets committed. The report gives:
     - the base and why the program picked it;
     - the fixes in the user's own lines, by rule;
     - the cleanup in old code, by file and line, so it can go into a commit of its own;
     - the files that renames and moves touched;
     - every ignored finding with its reason, and every rule a convention turned off;
-    - the formatter, `typecheck`, `lint` and `test` results, and each `performance` fix the tests rejected.
+    - the formatter, `typecheck`, `lint` and `test` results, and each `performance` or `branching` fix the tests rejected.
 
 ### Review a colleague's PR
 
