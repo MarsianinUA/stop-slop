@@ -78,6 +78,12 @@ export async function firstOfEach(groups: Order[][]): Promise<void> {
   }
 }
 
+export async function paired(): Promise<void> {
+  for (const order of orders) {
+    await Promise.all([notify(order), ordersRepository.save(order)]); // expect: no-await-in-loop
+  }
+}
+
 export async function walked(first: string): Promise<void> {
   for (let cursor: string | null = first; cursor; ) {
     cursor = (await fetchPage(cursor)).next; // expect: no-await-in-loop

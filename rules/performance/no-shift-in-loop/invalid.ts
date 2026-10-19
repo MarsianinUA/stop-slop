@@ -37,3 +37,13 @@ export function byIndex(lines: string[]): void {
     lines.shift(); // expect: no-shift-in-loop
   }
 }
+
+export function batched(queue: string[]): string[][] {
+  const batches: string[][] = [];
+  while (queue.length > 0) {
+    const batch: string[] = [];
+    for (let i = 0; i < 10; i++) batch.push(queue.shift() ?? ''); // expect: no-shift-in-loop
+    batches.push(batch);
+  }
+  return batches;
+}

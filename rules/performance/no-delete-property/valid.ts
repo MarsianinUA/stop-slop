@@ -35,6 +35,8 @@ export function copies(): void {
   delete headers.host;
   const env = { ...process.env };
   delete env.DEBUG;
+  const counts = { [String(Date.now())]: 1 };
+  delete counts.total;
 }
 
 export function untyped(input: any, raw: unknown, settings): void {

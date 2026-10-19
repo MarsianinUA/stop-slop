@@ -31,15 +31,18 @@ impl Rule for Check {
         if !is_known_array(file, member.object()) {
             return;
         }
-        let Some(around) = loop_around(file, node.id()) else {
+        // An inner loop that takes a batch: `for (let i = 0; i < 10; i++) queue.shift()` inside
+        // `while (queue.length)`.
+        let Some(around) = std::iter::successors(loop_around(file, node.id()), |inner| {
+            loop_around(file, inner.node.id())
+        })
+        .find(|around| goes_through(file, around, symbol)) else {
             return;
         };
-        if goes_through(file, &around, symbol) {
-            cx.report(call.span)
-                .arg("array", array.name.as_str())
-                .arg("method", method)
-                .arg("loop", around.label(file));
-        }
+        cx.report(call.span)
+            .arg("array", array.name.as_str())
+            .arg("method", method)
+            .arg("loop", around.label(file));
     }
 }
 

@@ -80,8 +80,9 @@ fn origin(file: &File<'_>, at: NodeId, object: &Expression<'_>) -> Option<String
     }
 }
 
-/// An object literal whose spreads copy objects of a fixed shape, also under `as` a type that
-/// `is_shape`: `{} as Record<string, string>` and `{ ...process.env }` are dictionaries.
+/// An object literal with static keys whose spreads copy objects of a fixed shape, also under
+/// `as` a type that `is_shape`: `{ [id]: 1 }`, `{} as Record<string, string>` and
+/// `{ ...process.env }` are dictionaries.
 fn is_shaped_literal(file: &File<'_>, value: &Expression<'_>) -> bool {
     if let Some((_, ty)) = expression_assertion(value)
         && !is_const_assertion(ty)
@@ -93,7 +94,7 @@ fn is_shaped_literal(file: &File<'_>, value: &Expression<'_>) -> bool {
         return false;
     };
     object.properties.iter().all(|property| match property {
-        ObjectPropertyKind::ObjectProperty(_) => true,
+        ObjectPropertyKind::ObjectProperty(property) => !property.computed,
         ObjectPropertyKind::SpreadProperty(spread) => {
             match spread.argument.get_inner_expression() {
                 Expression::Identifier(id) => matches!(
