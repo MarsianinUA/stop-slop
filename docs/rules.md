@@ -1,6 +1,6 @@
 # Rules
 
-All 108 rules stop-slop checks. `stop-slop rules` prints the same list, and each rule lives in its own folder under `rules/`.
+All 112 rules stop-slop checks. `stop-slop rules` prints the same list, and each rule lives in its own folder under `rules/`.
 
 - **error**: the rule is sure. After a fix, none of these may be left.
 - **candidate**: a hunch. The program flags it, the agent decides if it's a real problem, and a false one goes to the ignore list with a reason.
@@ -184,12 +184,16 @@ Test files only.
 
 ## Performance
 
-Loops that cost more on Node than they look. Off until `enabled` in `config.toml` names the group.
+Code that costs more on Node than it looks. Off until `enabled` in `config.toml` names the group.
 
 | Rule | What it catches | Kind | Fix |
 |---|---|---|---|
 | [`no-async-foreach`](../rules/performance/no-async-foreach/rule.toml) | `.forEach(async ..)`: nothing waits for the callbacks | error |  |
 | [`no-await-in-loop`](../rules/performance/no-await-in-loop/rule.toml) | `await` in the body of a loop, except `for await` | candidate |  |
 | [`no-copy-in-loop`](../rules/performance/no-copy-in-loop/rule.toml) | A variable copied into itself in a loop or a listener: `all = [...all, item]`, `buffer = Buffer.concat([buffer, chunk])` | error |  |
+| [`no-delete-property`](../rules/performance/no-delete-property/rule.toml) | `delete user.password` on an object with a fixed set of keys, not a dictionary | candidate |  |
 | [`no-lookup-in-loop`](../rules/performance/no-lookup-in-loop/rule.toml) | A search of an array in a loop over another collection: `ids.includes(order.id)` inside `for (const order of orders)` | candidate |  |
+| [`no-nested-quantifier`](../rules/performance/no-nested-quantifier/rule.toml) | A regex that repeats a group of one repeated character: `(a+)+`, `(\w*)*` | error |  |
+| [`no-recursive-next-tick`](../rules/performance/no-recursive-next-tick/rule.toml) | A function that passes itself to `process.nextTick` | error |  |
 | [`no-shift-in-loop`](../rules/performance/no-shift-in-loop/rule.toml) | `shift()` or `unshift()` of the array a loop goes through: `while (queue.length) queue.shift()` | candidate |  |
+| [`no-sync-in-handler`](../rules/performance/no-sync-in-handler/rule.toml) | `readFileSync`, `execSync`, `bcrypt.hashSync` and other blocking calls in a Nest handler or provider, outside the constructor and the startup hooks | candidate |  |
