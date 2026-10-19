@@ -1,0 +1,7 @@
+description = "A function with a cognitive complexity above 15, counted as SonarJS counts it"
+kind = "error"
+source = ["personal"]
+message = "{function} has a cognitive complexity of {complexity}, past the limit of {max}: every `if`, `else`, loop, `switch`, `catch`, `?:` and run of `&&` costs a point, plus one for each level it sits in, and a reader pays all of them to follow the code. Return early instead of nesting, and move steps into named functions."
+
+[options]
+max = 15

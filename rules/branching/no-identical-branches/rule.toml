@@ -1,0 +1,4 @@
+description = "Branches that are the same code: an `if` and its `else`, an `if` and the `else if` after it, the two sides of `?:`, adjacent `case`s"
+kind = "error"
+source = ["personal"]
+message = "{branches} are the same code (the second starts on line {line}), so the choice between them decides nothing. {fix}"

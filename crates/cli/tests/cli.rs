@@ -866,6 +866,39 @@ fn check_names_what_an_await_in_a_loop_carries_over_and_how_the_loop_ends() {
     }
 }
 
+#[test]
+fn check_holds_cognitive_complexity_to_the_max_of_config_toml() {
+    let t = TempRepo::new();
+    t.write(
+        "src/sizes.ts",
+        "export function size(rows: { skip: boolean }[]): number {\n  \
+           let total = 0;\n  \
+           for (const row of rows) {\n    \
+             if (row.skip) continue;\n    \
+             total += 1;\n  \
+           }\n  \
+           return total;\n\
+         }\n",
+    )
+    .commit("main");
+    let complexity = |t: &TempRepo| messages(t, "src/sizes.ts", "max-cognitive-complexity");
+    write_config(&t, "enabled = [\"branching\"]\n");
+    assert!(complexity(&t).is_empty());
+
+    write_config(
+        &t,
+        "enabled = [\"branching\"]\n\n[rules.max-cognitive-complexity]\nmax = 2\n",
+    );
+    let found = complexity(&t);
+    let [message] = found.as_slice() else {
+        panic!("one function: {found:?}");
+    };
+    assert!(
+        message.starts_with("`size` has a cognitive complexity of 3, past the limit of 2"),
+        "{message}"
+    );
+}
+
 fn messages(t: &TempRepo, file: &str, rule: &str) -> Vec<String> {
     let out = run(t.path(), &["check", "--files", file, "--json"]);
     assert_ne!(code(&out), 2, "{}", stderr(&out));
