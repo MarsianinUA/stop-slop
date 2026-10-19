@@ -255,7 +255,7 @@ One object per rule:
 - `source`: where the rule comes from (see [Sources](#sources));
 - `message`: the text of its findings, with `{placeholders}` the rule fills in;
 - `agent`: how to judge, fix or check the rule, or `null` when the message says enough;
-- `active`: whether the rule runs in this repository, after `disabled` and the group conditions. In a monorepo, a group condition holds when any `package.json` meets it.
+- `active`: whether the rule runs in this repository, after `disabled`, `enabled` and the group conditions. In a monorepo, a group condition holds when any `package.json` meets it.
 
 Without `--json`, `rules` prints `id  kind  fix  description`, one rule per line, and works outside a repository too.
 
@@ -269,7 +269,7 @@ The state of a repository sits in `<common>/info/stop-slop/`, where `<common>` i
 |---|---|
 | `enabled` | The hook's marker. |
 | `ignore.json` | Exceptions. `ignore.json.lock` guards writes to it. |
-| `config.toml` | Rules turned off and rule options for this repository. |
+| `config.toml` | Rules turned off, opt-in groups turned on, and rule options for this repository. |
 | `reviews/pr-<n>.md`, `reviews/pr-<n>.json` | The skill's review drafts. |
 
 ### Exceptions
@@ -305,8 +305,9 @@ max = 5
 ```
 
 - `disabled` turns rules off for this repository. The skill does this when the project's conventions contradict a rule: the project wins over personal rules.
+- `enabled` turns opt-in groups on for this repository. It takes group names, not rule ids (see [Groups](#groups)). `disabled` wins: a rule it names stays off in an enabled group.
 - `[rules.<id>]` overrides the `[options]` of that rule's `rule.toml`. Only the keys the rule has are allowed.
-- An unknown rule, an unknown option or a value of the wrong type makes every command that reads the file exit with 2. The message names the file and the key, such as `disabled[0]` or `rules.max-nesting.max`, or the line when the TOML itself is wrong.
+- An unknown rule, an unknown option, a value of the wrong type, or a group in `enabled` that does not exist or is not opt-in makes every command that reads the file exit with 2. The message names the file and the key, such as `disabled[0]`, `enabled[0]` or `rules.max-nesting.max`, or the line when the TOML itself is wrong.
 
 ## Rules
 
@@ -359,6 +360,7 @@ A group can have a `group.toml`:
 
 - `requires-package` runs the group only for files whose package depends on it. The program looks in the nearest `package.json` and every one above it, up to the repository root, the way Node resolves packages from `node_modules`. So the dependencies of a monorepo's root count for every package. `nestjs` requires `@nestjs/core`.
 - `files` sets the default `files` of its rules. `tests` sets `tests`.
+- `opt-in = true` keeps the group off until `enabled` in [config.toml](#configtoml) names it. Only such a group can go into `enabled`; the others are on already.
 
 ### Sources
 

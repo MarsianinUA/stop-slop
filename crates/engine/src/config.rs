@@ -13,10 +13,16 @@ pub enum ConfigError {
     UnknownOption { key: String },
     #[error("bad option `{key}`: {message}")]
     BadOption { key: String, message: String },
+    /// `key` is `enabled[1]`.
+    #[error("unknown group `{key}`")]
+    UnknownGroup { key: String },
+    #[error("`{key}` names a group that is always on")]
+    NotOptIn { key: String },
 }
 
 impl Engine {
-    /// Returns the first error: `disabled`, then unknown `rules.*` ids, then options.
+    /// Returns the first error: `disabled`, then `enabled`, then unknown `rules.*` ids, then
+    /// options.
     pub fn new(set: &'static Ruleset, config: RunConfig) -> Result<Engine, ConfigError> {
         let known = |id: &str| set.rules.iter().any(|def| def.meta.id == id);
         if let Some(i) = config.disabled.iter().position(|id| !known(id)) {
@@ -24,23 +30,41 @@ impl Engine {
                 key: format!("disabled[{i}]"),
             });
         }
+        for (i, name) in config.enabled.iter().enumerate() {
+            let key = format!("enabled[{i}]");
+            let Some(group) = set.groups.iter().find(|group| name == group.name) else {
+                return Err(ConfigError::UnknownGroup { key });
+            };
+            if !group.opt_in {
+                return Err(ConfigError::NotOptIn { key });
+            }
+        }
         if let Some(id) = config.options.keys().find(|id| !known(id)) {
             return Err(ConfigError::UnknownRule {
                 key: format!("rules.{id}"),
             });
         }
 
+        let off_groups: Vec<&str> = set
+            .groups
+            .iter()
+            .filter(|group| group.opt_in && !config.enabled.iter().any(|name| name == group.name))
+            .map(|group| group.name)
+            .collect();
         let enabled: Vec<bool> = set
             .rules
             .iter()
-            .map(|def| !config.disabled.iter().any(|id| id == def.meta.id))
+            .map(|def| {
+                !config.disabled.iter().any(|id| id == def.meta.id)
+                    && !off_groups.contains(&def.meta.group)
+            })
             .collect();
         let mut rules = Vec::new();
         for (def, &enabled) in set.rules.iter().zip(&enabled) {
             let overrides = config.options.get(def.meta.id);
             let options = options(&def.meta, overrides)?;
-            // `[rules.<id>]` of a disabled rule is built too, so a bad value shows before the
-            // rule is turned back on, as an unknown key does.
+            // `[rules.<id>]` of a rule that is off is built too, so a bad value shows before the
+            // rule is turned on, as an unknown key does.
             if let Impl::Check { build, .. } = &def.imp
                 && (enabled || overrides.is_some())
             {
@@ -92,8 +116,8 @@ impl Engine {
         needed
     }
 
-    /// Every rule of the set, `agent` too. Active: not disabled, and the group condition holds
-    /// for at least one of `files`.
+    /// Every rule of the set, `agent` too. Active: on after `disabled` and `enabled`, and the
+    /// group condition holds for at least one of `files`.
     pub fn rule_states(&self, facts: &dyn Facts, files: &[Utf8PathBuf]) -> Vec<RuleState> {
         let packages: Vec<Option<&Package>> =
             files.iter().map(|file| facts.package(file)).collect();

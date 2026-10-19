@@ -58,6 +58,7 @@ fn new_engine(
     let config = state.config()?;
     let config = RunConfig {
         disabled: config.disabled,
+        enabled: config.enabled,
         options: config.rules,
         ignored,
     };

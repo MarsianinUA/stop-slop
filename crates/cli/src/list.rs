@@ -75,10 +75,12 @@ mod tests {
             GroupDef {
                 name: "nest",
                 requires_package: Some("@nestjs/core"),
+                opt_in: false,
             },
             GroupDef {
                 name: "plain",
                 requires_package: None,
+                opt_in: false,
             },
         ],
         roles: Roles {

@@ -20,9 +20,10 @@ pub(crate) fn render(catalog: &Catalog) -> String {
         .iter()
         .map(|group| {
             format!(
-                "        ::kit::GroupDef {{ name: {:?}, requires_package: {:?} }},\n",
+                "        ::kit::GroupDef {{ name: {:?}, requires_package: {:?}, opt_in: {} }},\n",
                 group.name,
                 group.requires_package.as_deref(),
+                group.opt_in,
             )
         })
         .collect();

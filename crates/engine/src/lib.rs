@@ -18,6 +18,8 @@ use dispatch::Dispatch;
 #[derive(Debug, Default)]
 pub struct RunConfig {
     pub disabled: Vec<String>,
+    /// Opt-in groups to turn on.
+    pub enabled: Vec<String>,
     /// `[rules.<id>]` of `config.toml`.
     pub options: BTreeMap<String, toml::Table>,
     /// (file, fingerprint) pairs of `ignore.json`.

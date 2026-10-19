@@ -141,6 +141,7 @@ mod tests {
         groups: &[GroupDef {
             name: "core",
             requires_package: None,
+            opt_in: false,
         }],
         roles: Roles {
             tests: NO_ROLE,

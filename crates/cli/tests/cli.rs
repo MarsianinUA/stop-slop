@@ -531,6 +531,7 @@ fn check_fails_on_a_broken_config_or_ignore_file() {
     for (config, key) in [
         ("disabled = [\"no-such\"]\n", "disabled[0]"),
         ("[rules.no-any]\nx = 1\n", "rules.no-any.x"),
+        ("enabled = [\"no-such\"]\n", "enabled[0]"),
     ] {
         write_config(&t, config);
         let out = run(t.path(), &["check", "--base", "main"]);
