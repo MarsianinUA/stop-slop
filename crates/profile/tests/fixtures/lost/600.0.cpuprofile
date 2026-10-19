@@ -1,0 +1,10 @@
+{
+  "nodes": [
+    {"id":1,"callFrame":{"functionName":"(root)","scriptId":"0","url":"","lineNumber":-1,"columnNumber":-1},"hitCount":0,"children":[2]},
+    {"id":2,"callFrame":{"functionName":"(program)","scriptId":"0","url":"","lineNumber":-1,"columnNumber":-1},"hitCount":1}
+  ],
+  "startTime": 1000000,
+  "endTime": 1002000,
+  "samples": [2],
+  "timeDeltas": [1000]
+}
