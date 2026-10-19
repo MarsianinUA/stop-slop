@@ -1,13 +1,28 @@
+use std::ffi::OsString;
 use std::io;
 
 use camino::{Utf8Path, Utf8PathBuf};
 
 mod maps;
 mod read;
+mod run;
+
+/// Runs `command` and waits for it, with its input and output untouched. Every Node process it
+/// starts writes its CPU profile into `dir`, an existing folder that `read` reads afterwards.
+pub fn run(command: &[OsString], dir: &Utf8Path) -> Result<Exited, ProfileError> {
+    run::run(command, dir)
+}
 
 /// Sums the profiles `run` left in `dir` by function of the original sources.
 pub fn read(dir: &Utf8Path, root: &Utf8Path) -> Result<Samples, ProfileError> {
     read::read(dir, root)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Exited {
+    Code(i32),
+    /// Only on Unix: on Windows a killed process has an exit code too.
+    Signal,
 }
 
 #[derive(Debug)]
