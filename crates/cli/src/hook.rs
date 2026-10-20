@@ -13,7 +13,7 @@ use crate::check;
 use crate::error::{CliError, Exit};
 use crate::output;
 
-/// Without `deny_unknown_fields`: Claude Code sends more fields.
+/// Without `deny_unknown_fields`: the agent sends more fields.
 #[derive(Deserialize)]
 #[serde(crate = "kit::serde")]
 struct Input {
@@ -26,7 +26,7 @@ struct ToolInput {
     file_path: PathBuf,
 }
 
-/// Exit code 2 for findings too: Claude Code passes stderr to Claude only with code 2.
+/// Exit code 2 for findings too: the agent gets a hook's stderr only with code 2.
 pub(crate) fn run() -> Result<Exit, CliError> {
     // A `Write` input carries the whole file; `from_slice` is faster than `from_reader`.
     let mut bytes = Vec::new();
@@ -37,7 +37,7 @@ pub(crate) fn run() -> Result<Exit, CliError> {
     let input: Input = serde_json::from_slice(&bytes).map_err(input_error)?;
     // Not `canonicalize`: the filter of `errors` needs no file system, and `relativize`
     // resolves symlinks of the files that pass it. A relative path is from the cwd, the
-    // project folder where Claude Code starts the hook.
+    // project folder where the agent starts the hook.
     let file = path::absolute(&input.tool_input.file_path).map_err(input_error)?;
     let findings = errors(&rules::RULESET, &file)?;
     if findings.is_empty() {
@@ -60,7 +60,7 @@ fn errors(set: &'static Ruleset, file: &Path) -> Result<Vec<Finding>, CliError> 
     let dir = file
         .parent()
         .ok_or_else(|| CliError::HookInput(format!("`{}` has no folder", file.display())))?;
-    // The repo of the file, not of the cwd: Claude may edit a file of another repo. A git that
+    // The repo of the file, not of the cwd: the agent may edit a file of another repo. A git that
     // refuses the folder (inside `.git/`, dubious ownership) leaves the marker unread, so it
     // counts as no marker; `enable` could not have run there either. A git that does not
     // start is a failure.
