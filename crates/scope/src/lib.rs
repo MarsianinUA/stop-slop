@@ -75,6 +75,14 @@ pub enum ScopeError {
     NoBase,
     #[error("a revision needs a base")]
     RevWithoutBase,
+    /// A path of `--files` that does not exist, is a folder or lies outside the repository.
+    /// Every `source` names the path already.
+    #[error("{source}")]
+    BadFile {
+        path: PathBuf,
+        #[source]
+        source: RepoError,
+    },
 }
 
 /// The base and the files to check. Only `.ts`, `.tsx`, `.mts` and `.cts` files, without
@@ -97,7 +105,12 @@ pub fn resolve(
         }
         ScopeRequest::Files(paths) => paths
             .iter()
-            .map(|path| listed_file(repo, path))
+            .map(|path| {
+                listed_file(repo, path).map_err(|source| ScopeError::BadFile {
+                    path: path.clone(),
+                    source,
+                })
+            })
             .collect::<Result<_, _>>()?,
         ScopeRequest::All => snapshot.files()?,
     };

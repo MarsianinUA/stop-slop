@@ -540,15 +540,29 @@ fn write_leaves_a_read_only_file_alone() {
 #[test]
 fn a_git_error_carries_the_command_and_stderr() {
     let t = TempRepo::new();
-    t.write("a.ts", "a\n").commit("init");
 
-    match open(&t).at_rev("no-such") {
+    // Without a commit, `HEAD` names none.
+    match open(&t).worktree().head() {
         Err(RepoError::Git { command, stderr }) => {
             assert!(command.contains("rev-parse"), "{command}");
-            assert!(command.contains("no-such"), "{command}");
+            assert!(command.contains("HEAD"), "{command}");
             assert!(!stderr.is_empty());
         }
         other => panic!("{other:?}"),
+    }
+}
+
+#[test]
+fn at_rev_of_a_name_that_is_not_a_commit_is_unknown_rev() {
+    let t = TempRepo::new();
+    t.write("a.ts", "a\n").commit("init");
+    let tree = t.git(&["rev-parse", "HEAD^{tree}"]);
+
+    for rev in ["no-such", "-x", tree.as_str()] {
+        match open(&t).at_rev(rev) {
+            Err(RepoError::UnknownRev(name)) => assert_eq!(name, rev),
+            other => panic!("{rev}: {other:?}"),
+        }
     }
 }
 
