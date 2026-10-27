@@ -479,6 +479,8 @@ stop-slop/
     engine/         parsing, one walk of the tree, running rules, fixes
     kit/            what a rule sees: the tree, the file's role, options, report and fix, shared helpers
     catalog/        for the build and the rule tests, not in the program: reads and checks rules/, writes the list of rules
+  shared/           crates that take nothing from the workspace, so a second workspace can use them too
+    gitcmd/         runs git: a cleaned environment, LC_ALL=C, another try when the index is busy
     testkit/        tests only: a temporary git repository
   rules/            the rules, a crate of their own: Cargo.toml, build.rs, lib.rs, fixtures.rs, clippy.toml, roles.toml
     <group>/<rule-id>/
