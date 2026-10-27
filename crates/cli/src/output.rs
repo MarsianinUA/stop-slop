@@ -90,6 +90,20 @@ struct FixedJson<'c> {
     count: u32,
 }
 
+#[derive(Serialize)]
+#[serde(crate = "kit::serde", rename_all = "camelCase")]
+struct FailureLine<'f> {
+    failure: FailureJson<'f>,
+    next: &'f [String],
+}
+
+#[derive(Serialize)]
+#[serde(crate = "kit::serde", rename_all = "camelCase")]
+struct FailureJson<'f> {
+    phase: &'static str,
+    cause: &'f str,
+}
+
 pub(crate) fn rules_text(set: &Ruleset) -> String {
     let width = set
         .rules
@@ -224,6 +238,32 @@ pub(crate) fn ignore_text(entries: &[IgnoreEntry]) -> String {
         let _ = writeln!(text, "ignored {} {}", entry.fingerprint, entry.file);
     }
     text
+}
+
+pub(crate) fn failure_text(cause: &str, next: &[String]) -> String {
+    let mut text = format!("stop-slop: {cause}\n");
+    for command in next {
+        let _ = writeln!(text, "next: {command}");
+    }
+    text
+}
+
+/// What `--json` prints on 2 and 3 instead of the command's JSON. The stderr of git in `cause`
+/// can span lines, and the JSON keeps it on one.
+pub(crate) fn failure_json(phase: &'static str, cause: &str, next: &[String]) -> String {
+    let lines: Vec<&str> = cause
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .collect();
+    let line = FailureLine {
+        failure: FailureJson {
+            phase,
+            cause: &lines.join(" "),
+        },
+        next,
+    };
+    json_text(&line, JsonLayout::Line)
 }
 
 /// A closed pipe (`| head`) is the reader's choice and keeps the exit code. Any other error,

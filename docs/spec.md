@@ -195,9 +195,12 @@ Exit codes:
 
 - `0`: nothing found;
 - `1`: `check` found something, of any kind;
-- `2`: the program failed, and stderr says why.
+- `2`: the program refused its input: a bad flag, a bad `config.toml` or `ignore.json`, an unknown base or revision, a path of `--files` that does not exist or is a folder, a `package.json` or `tsconfig.json` that does not parse, a fingerprint `ignore` does not find, or a run outside a git repository;
+- `3`: the program itself broke: git failed in a way the program does not expect or did not start, or reading or writing a file failed.
 
-The hook is the exception. There, 2 also means "errors found", because the agent reads a hook's stderr only on 2.
+On 2 and 3, stderr says why and ends with a `next: <command>` line for each command that helps, such as `next: stop-slop check --base <ref> --json` when there is no base. With `--json`, `check` and `rules` print a [failure line](#json-output-of-check) instead of their JSON.
+
+The hook is the exception. It exits with 2 on errors found and on any failure, because the agent reads a hook's stderr only on 2.
 
 ### Text output
 
@@ -243,6 +246,16 @@ The program prints it on one line, because indents cost an agent tokens. `--pret
   - `fixable` is true when `--fix` applies the rule's fix at this place. A rule with a fix still leaves a finding without one where it cannot prove the fix is safe; the agent fixes those by hand.
   - `fingerprint`: see [Exceptions](#exceptions).
 - `fixed` counts the fixes `--fix` applied, per rule and file.
+
+On exit 2 and 3, `check --json` prints one line instead, even with `--pretty`, and so does `rules --json`:
+
+```json
+{"failure": {"phase": "base", "cause": "base `dev` is not a commit"}, "next": ["stop-slop check --base <ref> --json"]}
+```
+
+- `phase` names the step that failed: `args` (the flags), `repo` (git, the disk, the repository and `--rev`), `base`, `files` (a path of `--files`), `project` (`package.json` and `tsconfig.json`), `config` (a rule, option or group that `config.toml` names), `state` (the marker, `ignore.json` and a `config.toml` that does not parse) or `fingerprint`.
+- `cause` is the error of stderr on one line.
+- `next` holds the commands of the `next:` lines and is empty when no command helps.
 
 ### JSON output of `rules`
 

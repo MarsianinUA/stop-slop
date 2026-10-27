@@ -44,7 +44,7 @@ pub(crate) fn run() -> Result<Exit, CliError> {
         return Ok(Exit::Clean);
     }
     output::print_err(&output::hook_text(&findings));
-    Ok(Exit::Failure)
+    Ok(Exit::Refused)
 }
 
 fn input_error(error: impl Display) -> CliError {

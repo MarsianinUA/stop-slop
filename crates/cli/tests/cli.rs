@@ -160,7 +160,7 @@ fn rules_fails_when_stdout_cannot_be_written() {
         .stdout(full)
         .output()
         .expect("start stop-slop");
-    assert_eq!(code(&out), 2);
+    assert_eq!(code(&out), 3);
     assert!(stderr(&out).contains("stdout: "), "{}", stderr(&out));
 }
 
@@ -687,6 +687,87 @@ fn check_fails_with_the_cause() {
     }
 }
 
+/// The whole failure line of `--json`, with a `cause` that holds `cause`, and stderr that ends
+/// with the `next` commands.
+fn assert_failure(out: &Output, exit: i32, phase: &str, cause: &str, next: &[&str]) {
+    let (text, errors) = (stdout(out), stderr(out));
+    assert_eq!(code(out), exit, "{errors}");
+    assert_eq!(text.lines().count(), 1, "{text}");
+    let line = json(out);
+    let found = line["failure"]["cause"].as_str().unwrap_or_default();
+    assert!(found.contains(cause), "{line}");
+    assert_eq!(
+        line,
+        json!({"failure": {"phase": phase, "cause": found}, "next": next})
+    );
+    let tail: String = next
+        .iter()
+        .map(|command| format!("next: {command}\n"))
+        .collect();
+    assert!(errors.ends_with(&tail), "{errors}");
+    assert_eq!(errors.matches("\nnext: ").count(), next.len(), "{errors}");
+}
+
+#[test]
+fn json_prints_one_failure_line_with_the_phase_and_next_on_2_and_3() {
+    let base = ["stop-slop check --base <ref> --json"];
+    let t = branch_repo();
+    for (args, phase, cause, next) in [
+        (
+            &["check", "--base", "no-such", "--json"][..],
+            "base",
+            "base `no-such` is not a commit",
+            &base[..],
+        ),
+        (
+            &["check", "--rev", "no-such", "--base", "main", "--json"],
+            "repo",
+            "`no-such` is not a commit",
+            &[],
+        ),
+        (
+            &["check", "--files", "src/missing.constants.ts", "--json"],
+            "files",
+            "missing.constants.ts",
+            &[],
+        ),
+        (
+            &["check", "--json", "--bogus"],
+            "args",
+            "unexpected argument '--bogus' found",
+            &[],
+        ),
+    ] {
+        assert_failure(&run(t.path(), args), 2, phase, cause, next);
+    }
+
+    // On the only branch, without `origin`, no base is found.
+    let lone = TempRepo::new();
+    lone.write("src/a.constants.ts", ANY).commit("main");
+    let out = run(lone.path(), &["check", "--json"]);
+    assert_failure(&out, 2, "base", "no base branch", &base);
+
+    write_config(&t, "disabled = [\"no-such\"]\n");
+    for command in ["check", "rules"] {
+        let out = run(t.path(), &[command, "--json"]);
+        assert_failure(&out, 2, "config", "disabled[0]", &[]);
+    }
+    write_config(&t, "disabled = [");
+    let out = run(t.path(), &["check", "--json"]);
+    assert_failure(&out, 2, "state", "config.toml:1:", &[]);
+
+    let out = run_outside(&["rules", "--json"]);
+    assert_failure(&out, 2, "repo", "not inside a git repository", &[]);
+
+    let empty = tempfile::tempdir().expect("create a temp folder");
+    let out = exe(t.path())
+        .env("PATH", empty.path())
+        .args(["check", "--json"])
+        .output()
+        .expect("start stop-slop");
+    assert_failure(&out, 3, "repo", "git: ", &[]);
+}
+
 #[test]
 fn check_reports_a_file_that_does_not_parse() {
     let t = TempRepo::new();
@@ -901,7 +982,7 @@ fn check_holds_cognitive_complexity_to_the_max_of_config_toml() {
 
 fn messages(t: &TempRepo, file: &str, rule: &str) -> Vec<String> {
     let out = run(t.path(), &["check", "--files", file, "--json"]);
-    assert_ne!(code(&out), 2, "{}", stderr(&out));
+    assert!(code(&out) <= 1, "{}", stderr(&out));
     findings(&json(&out))
         .iter()
         .filter(|finding| finding["rule"] == rule)
@@ -1357,7 +1438,7 @@ fn hook_passes_a_folder_git_refuses_but_fails_without_git() {
         .args(["check", "--all"])
         .output()
         .expect("start stop-slop");
-    assert_eq!(code(&out), 2);
+    assert_eq!(code(&out), 3);
     assert!(
         stderr(&out).contains("dubious ownership"),
         "{}",
@@ -1366,10 +1447,18 @@ fn hook_passes_a_folder_git_refuses_but_fails_without_git() {
     let out = feed(foreign(), &hook_input(&t.path().join("src/a.constants.ts")));
     assert_eq!((code(&out), stderr(&out)), (0, String::new()), "foreign");
 
-    let mut no_git = exe(t.path());
-    no_git.env("PATH", empty.path());
-    let out = feed(no_git, &hook_input(&t.path().join("src/a.constants.ts")));
-    assert_eq!(code(&out), 2, "no git");
+    let no_git = || {
+        let mut command = exe(t.path());
+        command.env("PATH", empty.path());
+        command
+    };
+    let out = no_git()
+        .args(["check", "--all"])
+        .output()
+        .expect("start stop-slop");
+    assert_eq!(code(&out), 3, "check without git");
+    let out = feed(no_git(), &hook_input(&t.path().join("src/a.constants.ts")));
+    assert_eq!(code(&out), 2, "hook without git");
     assert!(stderr(&out).contains("git"), "{}", stderr(&out));
 }
 
@@ -1586,7 +1675,13 @@ fn ignore_of_an_unknown_fingerprint_fails() {
     let t = branch_repo();
     let out = run(t.path(), &["ignore", "no-any:000000", "--reason", "r"]);
     assert_eq!(code(&out), 2);
+    assert_eq!(stdout(&out), "");
     assert!(stderr(&out).contains("no-any:000000"), "{}", stderr(&out));
+    assert!(
+        stderr(&out).ends_with("\nnext: stop-slop check --json\n"),
+        "{}",
+        stderr(&out)
+    );
     assert!(!t.path().join(".git/info/stop-slop/ignore.json").exists());
 
     let t = old_repo();

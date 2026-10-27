@@ -13,7 +13,7 @@ stop-slop checks the TypeScript files a branch changes against personal conventi
 
 Run `stop-slop` inside the repository. If the command is missing, tell the user to install it with `cargo install --path crates/cli` from the stop-slop repository, and stop. stop-slop keeps its files in `<common>/info/stop-slop/`, where `<common>` is `git rev-parse --git-common-dir`.
 
-- Exit codes: `0` nothing found, `1` findings, `2` the program failed: show its stderr to the user and stop (a bad `config.toml` names the key).
+- Exit codes: `0` nothing found, `1` findings, `2` the program refused its input (a bad `config.toml` names the key), `3` the program itself broke. On 2 and 3, show its stderr to the user and stop. stderr ends with `next:` lines, commands that may help; `--json` prints `{"failure": {"phase", "cause"}, "next": [..]}` instead of its usual line.
 - `--json` prints one line. Leave `--pretty` off: it indents the same JSON by 2 spaces for a person, and the indents cost you tokens.
 - `stop-slop check --json` prints `base`, `files` (the branch files it checked: commits, uncommitted edits and untracked files), `skipped`, `findings` and `fixed` (`rule`, `file`, `count` of the fixes `--fix` applied).
   - `base` has `ref`, `sha` and `reason`: `flag` (given with `--base`), `pr` (the base of the branch's PR), `ancestor` (the nearest ancestor branch) or `default` (`origin/HEAD`).
