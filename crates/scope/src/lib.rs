@@ -10,7 +10,7 @@ mod base;
 mod files;
 mod pr_base;
 
-pub use pr_base::{GhPrBase, PrBase};
+pub use pr_base::{GhPrBase, PrBase, pull_request};
 
 #[derive(Debug)]
 pub enum ScopeRequest {
@@ -65,6 +65,17 @@ pub enum SkipReason {
     AlreadyInBase,
 }
 
+#[derive(Debug, PartialEq, Eq)]
+pub struct PullRequest {
+    pub number: u32,
+    /// `headRefOid`, full.
+    pub head: String,
+    /// `baseRefName`: `dev`, not `origin/dev`.
+    pub base: String,
+    /// The review draft header takes it.
+    pub title: String,
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum ScopeError {
     #[error(transparent)]
@@ -75,6 +86,9 @@ pub enum ScopeError {
     NoBase,
     #[error("a revision needs a base")]
     RevWithoutBase,
+    /// No `gh`, no network, or no such pull request.
+    #[error("pull request {number}: {message}")]
+    PullRequest { number: u32, message: String },
     /// A path of `--files` that does not exist, is a folder or lies outside the repository.
     /// Every `source` names the path already.
     #[error("{source}")]

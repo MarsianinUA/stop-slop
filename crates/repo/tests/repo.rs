@@ -567,6 +567,29 @@ fn at_rev_of_a_name_that_is_not_a_commit_is_unknown_rev() {
 }
 
 #[test]
+fn fetch_pr_takes_the_head_and_the_base_from_origin() {
+    let t = TempRepo::new();
+    t.write("a.ts", "a\n").commit("main");
+    t.branch("pr").write("a.ts", "pr\n").commit("pr");
+    let (main, head) = (t.git(&["rev-parse", "main"]), t.git(&["rev-parse", "pr"]));
+    let origin = tempfile::tempdir().unwrap();
+    let url = origin.path().to_str().expect("a UTF-8 temp path");
+    t.git(&["init", "-q", "--bare", url]);
+    // By URL: no `origin/*` refs exist before the fetch.
+    t.git(&["push", "-q", url, "main", "pr:refs/pull/1/head"]);
+    t.git(&["remote", "add", "origin", url]);
+
+    open(&t).fetch_pr(1, "main", &head).unwrap();
+    assert_eq!(t.git(&["rev-parse", "refs/stop-slop/pr-1"]), head);
+    assert_eq!(t.git(&["rev-parse", "refs/remotes/origin/main"]), main);
+
+    match open(&t).fetch_pr(1, "main", &main) {
+        Err(RepoError::PrMoved { number: 1 }) => {}
+        other => panic!("{other:?}"),
+    }
+}
+
+#[test]
 fn repo_and_snapshot_can_be_shared_between_threads() {
     fn assert_sync<T: Send + Sync>() {}
     assert_sync::<Repo>();
