@@ -248,6 +248,8 @@ The program prints it on one line, because indents cost an agent tokens. `--pret
   - `fingerprint`: see [Exceptions](#exceptions).
 - `fixed` counts the fixes `--fix` applied, per rule and file.
 
+`skill/SKILL.md` lists the top-level fields, the fields of `base` and those of a finding. A test holds that list to this output both ways, so a field added or dropped on one side fails it.
+
 On exit 2 and 3, `check --json` prints one line instead, even with `--pretty`, and so does `rules --json`:
 
 ```json
