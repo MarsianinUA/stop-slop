@@ -195,8 +195,9 @@ Exit codes:
 
 - `0`: nothing found;
 - `1`: `check` found something, of any kind;
-- `2`: the program refused its input: a bad flag, a bad `config.toml` or `ignore.json`, an unknown base or revision, a path of `--files` that does not exist or is a folder, a `package.json` or `tsconfig.json` that does not parse, a fingerprint `ignore` does not find, or a run outside a git repository;
-- `3`: the program itself broke: git failed in a way the program does not expect or did not start, or reading or writing a file failed.
+- `2`: the program refused its input: a bad flag, a bad `config.toml` or `ignore.json`, an unknown base or revision, a path of `--files` that does not exist, is a folder or lies outside the repository, a `package.json` or `tsconfig.json` that does not parse, a fingerprint `ignore` does not find, or a run outside a git repository;
+- `3`: the program itself broke: git failed in a way the program does not expect or did not start, or reading or writing a file failed;
+- `130`: Ctrl+C stopped it.
 
 On 2 and 3, stderr says why and ends with a `next: <command>` line for each command that helps, such as `next: stop-slop check --base <ref> --json` when there is no base. With `--json`, `check` and `rules` print a [failure line](#json-output-of-check) instead of their JSON.
 

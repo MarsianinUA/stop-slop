@@ -768,6 +768,41 @@ fn json_prints_one_failure_line_with_the_phase_and_next_on_2_and_3() {
     assert_failure(&out, 3, "repo", "git: ", &[]);
 }
 
+/// Windows has no way to send Ctrl+C to one child process.
+#[cfg(unix)]
+#[test]
+fn ctrl_c_exits_with_130() {
+    use std::os::unix::process::ExitStatusExt;
+    use std::thread;
+    use std::time::Duration;
+
+    let t = TempRepo::new();
+    // `SIGINT` before the handler is set ends the process by the signal, so a slow start gets
+    // a longer wait.
+    for wait in [100, 500, 2000] {
+        let mut child = exe(t.path())
+            .arg("hook")
+            .stdin(Stdio::piped())
+            .spawn()
+            .expect("start stop-slop");
+        // Held open, so the hook waits for its input; `wait` would close it.
+        let stdin = child.stdin.take();
+        thread::sleep(Duration::from_millis(wait));
+        let kill = Command::new("kill")
+            .args(["-INT", &child.id().to_string()])
+            .status()
+            .expect("start kill");
+        assert!(kill.success());
+        let status = child.wait().expect("wait for stop-slop");
+        drop(stdin);
+        if status.signal().is_none() {
+            assert_eq!(status.code(), Some(130));
+            return;
+        }
+    }
+    panic!("stop-slop did not set its Ctrl+C handler within 2 s");
+}
+
 #[test]
 fn check_reports_a_file_that_does_not_parse() {
     let t = TempRepo::new();

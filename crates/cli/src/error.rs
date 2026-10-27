@@ -112,4 +112,6 @@ pub(crate) enum Exit {
     Found = 1,
     Refused = 2,
     Broken = 3,
+    /// Ctrl+C: 128 and the number of `SIGINT`, as a shell reports it.
+    Interrupted = 130,
 }

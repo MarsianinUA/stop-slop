@@ -9,7 +9,7 @@ mod toggle;
 
 use std::collections::BTreeSet;
 use std::env;
-use std::process::ExitCode;
+use std::process::{self, ExitCode};
 
 use camino::Utf8PathBuf;
 use clap::Parser;
@@ -23,6 +23,8 @@ use error::{CliError, Exit};
 use output::JsonLayout;
 
 fn main() -> ExitCode {
+    // A handler that cannot be set leaves Ctrl+C as it was: the signal ends the process.
+    let _ = ctrlc::set_handler(|| process::exit(Exit::Interrupted as i32));
     let exit = match Command::try_parse() {
         Ok(command) => run(command),
         Err(error) => refuse_args(&error),
