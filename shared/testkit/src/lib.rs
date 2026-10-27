@@ -5,7 +5,7 @@ use std::process::{Command, Stdio};
 
 use tempfile::TempDir;
 
-/// The variables `repo` clears too. Set when tests run from a git hook or by the shell, they
+/// The variables `gitcmd` clears too. Set when tests run from a git hook or by the shell, they
 /// point git at the outer repo or change how the `*.ts` pathspecs of the tests match.
 const CLEARED_ENV: [&str; 11] = [
     "GIT_DIR",
@@ -36,7 +36,7 @@ impl TempRepo {
             dir: tempfile::tempdir().expect("create a temp folder"),
         };
         repo.git(&["init", "-q", "-b", "main"]);
-        // The local config beats global and system ones, also for the calls of `repo` in
+        // The local config beats global and system ones, also for the calls of `gitcmd` in
         // tests: CI runners have no identity, Windows sets `core.autocrlf=true`, a global
         // fsmonitor holds the temp folder, global hooks still run on checkout and after a
         // commit (`--no-verify` skips only `pre-commit` and `commit-msg`), and global
