@@ -1,0 +1,4 @@
+description = "A variable copied into itself in a loop or a listener: `all = [...all, item]`, `buffer = Buffer.concat([buffer, chunk])`"
+kind = "error"
+source = ["personal"]
+message = "`{name} = {copy}` copies all of `{name}` on every pass of the loop or listener around it: each copy is as large as everything gathered so far, so the work grows with the square of the passes. Change `{name}` in place instead (`push` into an array, set a key of an object), or gather buffer chunks in an array and join them once after the loop (`Buffer.concat(chunks)`)."

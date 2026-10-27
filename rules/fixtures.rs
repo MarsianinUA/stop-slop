@@ -166,6 +166,12 @@ fn run(def: &'static RuleDef, fixture: &Fixture, mode: Mode) -> Result<RunReport
                 .filter(|&id| id != def.meta.id)
                 .map(str::to_string)
                 .collect(),
+            enabled: RULESET
+                .groups
+                .iter()
+                .filter(|group| group.opt_in && group.name == def.meta.group)
+                .map(|group| group.name.to_string())
+                .collect(),
             ..RunConfig::default()
         },
     )?;
