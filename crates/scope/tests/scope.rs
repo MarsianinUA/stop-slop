@@ -338,10 +338,24 @@ fn files_and_all_give_repo_paths_without_a_base() {
     assert!(scope.files.iter().all(|file| file.changed.is_none()));
 
     let outside = tempfile::tempdir().unwrap();
-    fs::write(outside.path().join("x.ts"), "x\n").unwrap();
-    let error = files(&at_root, vec![outside.path().join("x.ts")]).unwrap_err();
+    let stranger = outside.path().join("x.ts");
+    fs::write(&stranger, "x\n").unwrap();
+    let error = files(&at_root, vec![stranger.clone()]).unwrap_err();
     assert!(
-        matches!(error, ScopeError::Repo(RepoError::OutsideRepo(_))),
+        matches!(
+            &error,
+            ScopeError::BadFile { path, source: RepoError::OutsideRepo(_) } if *path == stranger
+        ),
+        "{error:?}"
+    );
+
+    let error = files(&at_root, vec!["src/a.ts".into(), "src/missing.ts".into()]).unwrap_err();
+    assert!(
+        matches!(
+            &error,
+            ScopeError::BadFile { path, source: RepoError::Io { source, .. } }
+                if path == Path::new("src/missing.ts") && source.kind() == io::ErrorKind::NotFound
+        ),
         "{error:?}"
     );
 
@@ -350,7 +364,7 @@ fn files_and_all_give_repo_paths_without_a_base() {
         assert!(
             matches!(
                 &error,
-                ScopeError::Repo(RepoError::Io { path, source })
+                ScopeError::BadFile { path, source: RepoError::Io { source, .. } }
                     if path == Path::new(folder) && source.kind() == io::ErrorKind::IsADirectory
             ),
             "{error:?}"

@@ -12,6 +12,7 @@ path = "src/main.rs"
 [dependencies]
 camino.workspace = true
 clap.workspace = true
+ctrlc.workspace = true
 engine = { path = "../engine" }
 kit = { path = "../kit" }
 project = { path = "../project" }

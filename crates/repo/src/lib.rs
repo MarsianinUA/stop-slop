@@ -66,6 +66,8 @@ pub enum RepoError {
     NotARepo,
     #[error("`{}` is outside the repository", .0.display())]
     OutsideRepo(PathBuf),
+    #[error("`{0}` is not a commit")]
+    UnknownRev(String),
     #[error("`{command}` failed: {stderr}")]
     Git { command: String, stderr: String },
     #[error("{}: {source}", .path.display())]
@@ -146,9 +148,12 @@ impl Repo {
     }
 
     pub fn at_rev(&self, rev: &str) -> Result<Snapshot, RepoError> {
+        let oid = self
+            .resolve(rev)?
+            .ok_or_else(|| RepoError::UnknownRev(rev.to_owned()))?;
         Ok(Snapshot::Rev(Rev {
             root: self.root.clone(),
-            oid: commit(&self.root, rev)?,
+            oid,
         }))
     }
 

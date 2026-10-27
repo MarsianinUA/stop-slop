@@ -10,6 +10,7 @@ rust-version = "1.97"
 [workspace.dependencies]
 camino = "1"
 clap = { version = "4", features = ["derive"] }
+ctrlc = "3"
 json-strip-comments = "3"
 libtest-mimic = "0.8"
 oxc_sourcemap = "9"
