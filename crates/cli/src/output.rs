@@ -199,7 +199,7 @@ pub(crate) fn check_text(checked: &Checked) -> String {
     text
 }
 
-/// Over 20 findings, 19 and a line with the rest: Claude sees the list is cut, and its next
+/// Over 20 findings, 19 and a line with the rest: the agent sees the list is cut, and its next
 /// edit shows the others.
 pub(crate) fn hook_text(findings: &[Finding]) -> String {
     const MAX_LINES: usize = 20;

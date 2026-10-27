@@ -1,6 +1,6 @@
 ---
 name: stop-slop
-description: stop-slop convention linter for TypeScript. Use when the user mentions stop-slop - to fix the findings on their own branch, to draft review comments on a colleague's PR, or to send an approved draft.
+description: stop-slop convention linter for TypeScript. Use when the user mentions stop-slop and wants to fix the findings on their own branch, draft review comments on a colleague's PR, or send an approved draft.
 ---
 
 stop-slop checks the TypeScript files a branch changes against personal conventions. The program finds; you judge, fix and write. Every run takes one branch:
