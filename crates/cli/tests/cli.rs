@@ -75,6 +75,14 @@ fn is_nestjs(id: &str) -> bool {
     meta(id).group == "nestjs"
 }
 
+/// A rule of a group that stays off until `enabled` in `config.toml` names it.
+fn is_opt_in(id: &str) -> bool {
+    RULESET
+        .groups
+        .iter()
+        .any(|group| group.opt_in && group.name == meta(id).group)
+}
+
 const NEST_PACKAGE: &str = r#"{"dependencies": {"@nestjs/core": "11.0.0"}}"#;
 
 fn list(rules: &Value) -> &[Value] {
@@ -180,8 +188,11 @@ fn rules_json_lists_every_rule() {
         let rule_keys: BTreeSet<&str> = object.keys().map(String::as_str).collect();
         assert_eq!(rule_keys, keys, "{rule}");
     }
-    // No `package.json` depends on `@nestjs/core`.
-    let expected: Vec<_> = ids().into_iter().map(|id| (id, !is_nestjs(id))).collect();
+    // No `package.json` depends on `@nestjs/core`, and no `enabled` names an opt-in group.
+    let expected: Vec<_> = ids()
+        .into_iter()
+        .map(|id| (id, !is_nestjs(id) && !is_opt_in(id)))
+        .collect();
     assert_eq!(active(&rules), expected);
 
     let no_any = rule(&rules, "no-any");
@@ -206,7 +217,7 @@ fn rules_json_shows_a_disabled_rule_as_inactive() {
     assert_eq!(code(&out), 0, "{}", stderr(&out));
     let expected: Vec<_> = ids()
         .into_iter()
-        .map(|id| (id, id != "no-any" && !is_nestjs(id)))
+        .map(|id| (id, id != "no-any" && !is_nestjs(id) && !is_opt_in(id)))
         .collect();
     assert_eq!(active(&json(&out)), expected);
 }
@@ -233,6 +244,33 @@ fn rules_json_turns_the_nestjs_group_on_when_one_package_json_has_nestjs_core() 
     t.write("apps/api/package.json", "{}");
     let off = nestjs_states(&t);
     assert!(off.iter().all(|&active| !active), "{off:?}");
+}
+
+#[test]
+fn rules_json_turns_opt_in_groups_on_when_enabled_names_them() {
+    let opt_in_states = |t: &TempRepo| -> Vec<bool> {
+        let out = run(t.path(), &["rules", "--json"]);
+        assert_eq!(code(&out), 0, "{}", stderr(&out));
+        active(&json(&out))
+            .into_iter()
+            .filter(|(id, _)| is_opt_in(id))
+            .map(|(_, active)| active)
+            .collect()
+    };
+    let t = TempRepo::new();
+    let off = opt_in_states(&t);
+    assert!(!off.is_empty());
+    assert!(off.iter().all(|&active| !active), "{off:?}");
+
+    let names: Vec<String> = RULESET
+        .groups
+        .iter()
+        .filter(|group| group.opt_in)
+        .map(|group| format!("{:?}", group.name))
+        .collect();
+    write_config(&t, &format!("enabled = [{}]\n", names.join(", ")));
+    let on = opt_in_states(&t);
+    assert!(on.iter().all(|&active| active), "{on:?}");
 }
 
 #[test]
@@ -531,6 +569,7 @@ fn check_fails_on_a_broken_config_or_ignore_file() {
     for (config, key) in [
         ("disabled = [\"no-such\"]\n", "disabled[0]"),
         ("[rules.no-any]\nx = 1\n", "rules.no-any.x"),
+        ("enabled = [\"no-such\"]\n", "enabled[0]"),
     ] {
         write_config(&t, config);
         let out = run(t.path(), &["check", "--base", "main"]);
@@ -757,6 +796,117 @@ fn check_runs_the_nestjs_rules_only_under_a_package_with_nestjs_core() {
         .map(|finding| finding["file"].as_str().expect("file"))
         .collect();
     assert_eq!(files, ["apps/api/src/reports.controller.ts"]);
+}
+
+#[test]
+fn check_names_the_facts_of_a_lookup_in_a_loop_once_enabled_turns_performance_on() {
+    let t = TempRepo::new();
+    t.write(
+        "src/orders.ts",
+        "export function kept(orders: { id: string }[], ids: string[]): { id: string }[] {\n  \
+         return orders.filter((order) => ids.includes(order.id));\n}\n",
+    )
+    .commit("main");
+    let lookups = |t: &TempRepo| messages(t, "src/orders.ts", "no-lookup-in-loop");
+    assert!(lookups(&t).is_empty());
+
+    write_config(&t, "enabled = [\"performance\"]\n");
+    let found = lookups(&t);
+    let [message] = found.as_slice() else {
+        panic!("one lookup: {found:?}");
+    };
+    for fact in [
+        "`ids` is a parameter",
+        "`ids.includes(..)`",
+        "`filter` callback over `orders`",
+        "loop depth 1",
+        "by value",
+    ] {
+        assert!(message.contains(fact), "{fact}: {message}");
+    }
+}
+
+#[test]
+fn check_names_what_an_await_in_a_loop_carries_over_and_how_the_loop_ends() {
+    let t = TempRepo::new();
+    t.write(
+        "src/pages.ts",
+        "declare function fetchPage(cursor: string): Promise<{ next: string; sizes: number[] }>;\n\
+         export async function walk(): Promise<number> {\n  \
+           let total = 0;\n  \
+           for (let cursor = 'start'; cursor !== ''; ) {\n    \
+             const page = await fetchPage(cursor);\n    \
+             const sorted = page.sizes.sort((left, right) => {\n      \
+               let order = left - right;\n      \
+               order *= -1;\n      \
+               return order;\n    \
+             });\n    \
+             total += sorted[0] ?? 0;\n    \
+             cursor = page.next;\n    \
+             if (total > 100) break;\n  \
+           }\n  \
+           return total;\n\
+         }\n",
+    )
+    .commit("main");
+    write_config(&t, "enabled = [\"performance\"]\n");
+
+    let found = messages(&t, "src/pages.ts", "no-await-in-loop");
+    let [message] = found.as_slice() else {
+        panic!("one await: {found:?}");
+    };
+    for fact in [
+        "`await fetchPage(..)`",
+        "`fetchPage`, which by its name looks like a round trip",
+        // `order` is a local of the comparator, not of the loop.
+        "the body writes: `total`, `cursor`.",
+        "Early exit: `break`.",
+    ] {
+        assert!(message.contains(fact), "{fact}: {message}");
+    }
+}
+
+#[test]
+fn check_holds_cognitive_complexity_to_the_max_of_config_toml() {
+    let t = TempRepo::new();
+    t.write(
+        "src/sizes.ts",
+        "export function size(rows: { skip: boolean }[]): number {\n  \
+           let total = 0;\n  \
+           for (const row of rows) {\n    \
+             if (row.skip) continue;\n    \
+             total += 1;\n  \
+           }\n  \
+           return total;\n\
+         }\n",
+    )
+    .commit("main");
+    let complexity = || messages(&t, "src/sizes.ts", "max-cognitive-complexity");
+    write_config(&t, "enabled = [\"branching\"]\n");
+    assert!(complexity().is_empty());
+
+    write_config(
+        &t,
+        "enabled = [\"branching\"]\n\n[rules.max-cognitive-complexity]\nmax = 2\n",
+    );
+    let found = complexity();
+    let [message] = found.as_slice() else {
+        panic!("one function: {found:?}");
+    };
+    assert!(
+        message.starts_with("`size` has a cognitive complexity of 3, past the limit of 2"),
+        "{message}"
+    );
+}
+
+fn messages(t: &TempRepo, file: &str, rule: &str) -> Vec<String> {
+    let out = run(t.path(), &["check", "--files", file, "--json"]);
+    assert_ne!(code(&out), 2, "{}", stderr(&out));
+    findings(&json(&out))
+        .iter()
+        .filter(|finding| finding["rule"] == rule)
+        .map(|finding| finding["message"].as_str().expect("a message").to_owned())
+        .collect()
 }
 
 const IO_FEAT: &str = "import { readFileSync } from 'fs'; export const read: any = readFileSync;\n\

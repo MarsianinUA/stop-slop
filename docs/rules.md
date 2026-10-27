@@ -1,6 +1,6 @@
 # Rules
 
-All 103 rules stop-slop checks. `stop-slop rules` prints the same list, and each rule lives in its own folder under `rules/`.
+All 115 rules stop-slop checks. `stop-slop rules` prints the same list, and each rule lives in its own folder under `rules/`.
 
 - **error.** The rule is sure. After a fix, none of these may remain.
 - **candidate.** A hunch. The program flags it, the agent decides if it's a real problem, and a false one goes to the ignore list with a reason.
@@ -57,7 +57,7 @@ File, folder and symbol names.
 
 ## Functions and classes
 
-What goes in a class file and a functions file, parameters, branching, state.
+What goes in a class file and a functions file, parameters, `if` chains and `switch`, state.
 
 | Rule | What it catches | Kind | Fix |
 |---|---|---|---|
@@ -181,3 +181,29 @@ Test files only.
 | [`no-internal-module-mock`](../rules/tests/no-internal-module-mock/rule.toml) | `jest.mock('./..')` of a module of this project; packages may be mocked | error |  |
 | [`test-name`](../rules/tests/test-name/rule.toml) | A test name that says nothing: `it('works')`, `test1` | error |  |
 | [`test-quality`](../rules/tests/test-quality/rule.toml) | A test that detects changes, tests a mock or repeats the code | agent |  |
+
+## Performance
+
+Code that costs more on Node than it looks. Off until `enabled` in `config.toml` names the group.
+
+| Rule | What it catches | Kind | Fix |
+|---|---|---|---|
+| [`no-async-foreach`](../rules/performance/no-async-foreach/rule.toml) | `.forEach(async ..)`: nothing waits for the callbacks | error |  |
+| [`no-await-in-loop`](../rules/performance/no-await-in-loop/rule.toml) | `await` in the body of a loop, except `for await` | candidate |  |
+| [`no-copy-in-loop`](../rules/performance/no-copy-in-loop/rule.toml) | A variable copied into itself in a loop or a listener: `all = [...all, item]`, `buffer = Buffer.concat([buffer, chunk])` | error |  |
+| [`no-delete-property`](../rules/performance/no-delete-property/rule.toml) | `delete user.password` on an object with a fixed set of keys, not a dictionary | candidate |  |
+| [`no-lookup-in-loop`](../rules/performance/no-lookup-in-loop/rule.toml) | A search of an array in a loop over another collection: `ids.includes(order.id)` inside `for (const order of orders)` | candidate |  |
+| [`no-nested-quantifier`](../rules/performance/no-nested-quantifier/rule.toml) | A regex that repeats a group of one repeated character, with more to match after it: `^(a+)+$`, `([a-z]+-?)+@` | error |  |
+| [`no-recursive-next-tick`](../rules/performance/no-recursive-next-tick/rule.toml) | A function that passes itself to `process.nextTick` | error |  |
+| [`no-shift-in-loop`](../rules/performance/no-shift-in-loop/rule.toml) | `shift()` or `unshift()` of the array a loop goes through: `while (queue.length) queue.shift()` | candidate |  |
+| [`no-sync-in-handler`](../rules/performance/no-sync-in-handler/rule.toml) | `readFileSync`, `execSync`, `bcrypt.hashSync` and other blocking calls in a Nest handler or provider, outside the constructor and the startup hooks | candidate |  |
+
+## Branching
+
+Tests that decide nothing and functions too tangled to follow. Off until `enabled` in `config.toml` names the group.
+
+| Rule | What it catches | Kind | Fix |
+|---|---|---|---|
+| [`max-cognitive-complexity`](../rules/branching/max-cognitive-complexity/rule.toml) | A function with a cognitive complexity above 15, counted as SonarJS counts it | error |  |
+| [`no-identical-branches`](../rules/branching/no-identical-branches/rule.toml) | Branches that are the same code: an `if` and its `else`, an `if` and the `else if` after it, the two sides of `?:`, adjacent `case`s | error |  |
+| [`no-implied-condition`](../rules/branching/no-implied-condition/rule.toml) | A test an outer `if`, `?:`, `&&` or `\|\|` already decided, on a `const` or a parameter nothing reassigns: `if (user) { if (user) .. }` | error |  |

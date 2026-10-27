@@ -20,6 +20,8 @@ pub(crate) struct RuleToml {
 pub(crate) struct GroupToml {
     pub files: Option<Files>,
     pub requires_package: Option<String>,
+    #[serde(default)]
+    pub opt_in: bool,
 }
 
 #[derive(Deserialize, Default)]

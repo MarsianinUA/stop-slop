@@ -1,0 +1,7 @@
+description = "`shift()` or `unshift()` of the array a loop goes through: `while (queue.length) queue.shift()`"
+kind = "candidate"
+source = ["personal"]
+message = "`{array}.{method}()` runs on every pass of the {loop} and moves every other item of `{array}` by one place, so over a long `{array}` the work grows with the square of its length. Take items from the front with an index that moves forward (`{array}[head++]` while `head < {array}.length`), and add new ones at the end with `push()`."
+agent = """
+The loop takes items off the front of the array it goes through (`shift()`) or puts them there (`unshift()`), and each call moves every other item. When the array can grow past a few hundred items (a work queue, the frontier of a graph walk, buffered events), read it with a head index (`const item = queue[head++]` while `head < queue.length`) and add with `push()`; for `unshift()`, build the array in the other order and `reverse()` it once at the end. When the array stays small by design (a handful of steps or retries), ignore the finding with that reason.
+"""

@@ -18,6 +18,7 @@ pub(crate) struct Catalog {
 pub(crate) struct Group {
     pub name: String,
     pub requires_package: Option<String>,
+    pub opt_in: bool,
 }
 
 pub(crate) struct RuleFolder {
@@ -103,6 +104,7 @@ pub(crate) fn scan(rules_dir: &Path) -> Result<Catalog, Vec<FolderError>> {
         catalog.groups.push(Group {
             name: group,
             requires_package: group_toml.requires_package,
+            opt_in: group_toml.opt_in,
         });
     }
 

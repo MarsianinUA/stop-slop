@@ -3,7 +3,7 @@ use std::collections::BTreeSet;
 use camino::Utf8Path;
 use kit::oxc::ast::ast::{Expression, TSType};
 use kit::oxc::parser::ParseOptions;
-use kit::oxc::semantic::SemanticBuilder;
+use kit::oxc::semantic::{NodeId, SemanticBuilder};
 use kit::oxc::span::SourceType;
 use kit::prelude::*;
 use kit::{
@@ -2771,5 +2771,207 @@ fn boolean_parameter_has_a_boolean_type_or_a_boolean_default() {
             })
             .collect();
         assert_eq!(booleans, [true, true, false, true, false, false]);
+    });
+}
+
+/// The `probe()` calls, in source order.
+fn probe_ids(file: &File<'_>) -> Vec<NodeId> {
+    file.semantic
+        .nodes()
+        .iter()
+        .filter(|node| {
+            matches!(node.kind(), AstKind::CallExpression(call)
+                if matches!(&call.callee, Expression::Identifier(id) if id.name == "probe"))
+        })
+        .map(AstNode::id)
+        .collect()
+}
+
+fn probes<T>(file: &File<'_>, of: impl Fn(NodeId) -> T) -> Vec<T> {
+    probe_ids(file).into_iter().map(of).collect()
+}
+
+fn loops_of_probes<'a>(file: &File<'a>) -> Vec<Option<(LoopKind, Option<&'a str>, u32)>> {
+    probes(file, |probe| loop_around(file, probe))
+        .into_iter()
+        .map(|around| {
+            around.map(|around| {
+                let over = around.over.map(|over| source(file, over));
+                (around.kind, over, around.depth)
+            })
+        })
+        .collect()
+}
+
+#[test]
+fn loop_around_names_each_kind_of_loop_its_collection_and_the_depth() {
+    let text = "declare function probe(): void;
+declare const rows: number[];
+declare const stream: AsyncIterable<number> & { on(event: string, listener: () => void): void };
+declare const index: Record<string, number>;
+export async function f() {
+  for (let i = 0; i < rows.length; i++) probe();
+  for (const row of rows) probe();
+  for await (const chunk of stream) probe();
+  for (const key in index) probe();
+  while (rows.length) probe();
+  do probe(); while (rows.length);
+  rows.forEach(() => probe());
+  stream.on('data', () => probe());
+  for (const row of rows) rows.map(() => rows.forEach(() => probe()));
+}";
+    with_file(text, |file| {
+        assert_eq!(
+            loops_of_probes(file),
+            [
+                Some((LoopKind::For, Some("rows"), 1)),
+                Some((LoopKind::ForOf, Some("rows"), 1)),
+                Some((LoopKind::ForAwaitOf, Some("stream"), 1)),
+                Some((LoopKind::ForIn, Some("index"), 1)),
+                Some((LoopKind::While, None, 1)),
+                Some((LoopKind::DoWhile, None, 1)),
+                Some((LoopKind::Callback, Some("rows"), 1)),
+                Some((LoopKind::Listener, None, 1)),
+                // Through the `map` callback to the `for..of` around it.
+                Some((LoopKind::Callback, Some("rows"), 3)),
+            ]
+        );
+        let labels: Vec<String> = probes(file, |probe| loop_around(file, probe))
+            .into_iter()
+            .map(|around| around.expect("a loop").label(file))
+            .collect();
+        assert_eq!(
+            labels,
+            [
+                "`for` loop over `rows`",
+                "`for..of` loop over `rows`",
+                "`for await` loop over `stream`",
+                "`for..in` loop over `index`",
+                "`while` loop",
+                "`do..while` loop",
+                "`forEach` callback over `rows`",
+                "`on` listener",
+                "`forEach` callback over `rows`",
+            ]
+        );
+    });
+}
+
+#[test]
+fn loop_around_skips_what_runs_once_and_stops_at_other_functions() {
+    let text = "declare function probe(): number;
+declare function later(run: () => void): void;
+declare const rows: number[];
+export function g() {
+  probe();
+  for (let i = probe(); i < 3; i++) {}
+  for (const row of [probe()]) {}
+  for (let i = 0; probe() > i; i += probe()) {}
+  for (const row of rows) {
+    const run = () => probe();
+    later(() => probe());
+    rows.forEach(() => probe(), probe());
+  }
+  while (rows.length) {
+    function inner() { probe(); }
+  }
+  for (let i = probe(); i < 3; i++) for (const row of rows) probe();
+}";
+    with_file(text, |file| {
+        assert_eq!(
+            loops_of_probes(file),
+            [
+                None,
+                // The `init` of `for` and the collection of `for..of` run once.
+                None,
+                None,
+                // The test and the update run on every pass.
+                Some((LoopKind::For, None, 1)),
+                Some((LoopKind::For, None, 1)),
+                // A function that is not a per-item callback runs whenever it is called.
+                None,
+                None,
+                Some((LoopKind::Callback, Some("rows"), 2)),
+                // The second argument of `forEach` runs once per pass of the `for..of`.
+                Some((LoopKind::ForOf, Some("rows"), 1)),
+                None,
+                None,
+                Some((LoopKind::ForOf, Some("rows"), 2)),
+            ]
+        );
+        let &[.., init, body] = probe_ids(file).as_slice() else {
+            panic!("the probes of the last loops");
+        };
+        let inner = loop_around(file, body).expect("the inner loop");
+        let outer = loop_around(file, inner.node.id()).expect("the outer loop");
+        // The `init` of the outer `for` runs once; the body of the inner loop runs on every pass
+        // of both.
+        assert_eq!(
+            [
+                outer.runs_each_pass(file, init),
+                outer.runs_each_pass(file, body),
+                inner.runs_each_pass(file, body),
+            ],
+            [false, true, true]
+        );
+    });
+}
+
+#[test]
+fn nest_role_names_the_role_of_the_method_around_a_node_in_a_class_nest_decorates() {
+    let text = "import { Controller, Get, Injectable } from '@nestjs/common';
+import { MessagePattern } from '@nestjs/microservices';
+import { WebSocketGateway } from '@nestjs/websockets';
+declare function probe(): void;
+probe();
+@Controller('orders')
+export class OrdersController {
+  constructor() { probe(); }
+  @Get(':id')
+  find() { probe(); }
+  @MessagePattern('orders.created')
+  created() { [1].forEach(() => probe()); }
+  onModuleInit() { probe(); }
+  private format() { probe(); }
+  @Get(String(probe()))
+  other() {}
+}
+@Injectable()
+export class OrdersService {
+  load() { probe(); }
+  static create() { probe(); }
+  afterInit() { probe(); }
+  run() { class Inner { m() { probe(); } } }
+}
+@WebSocketGateway()
+export class EventsGateway {
+  afterInit() { probe(); }
+}
+export class Plain {
+  load() { probe(); }
+}";
+    with_file(text, |file| {
+        assert_eq!(
+            probes(file, |probe| nest_role(file, probe)),
+            [
+                None,
+                Some(NestRole::Constructor),
+                Some(NestRole::RouteHandler),
+                // Through the callback to the method around it.
+                Some(NestRole::MessageHandler),
+                Some(NestRole::Lifecycle),
+                Some(NestRole::ProviderMethod),
+                // A decorator's argument runs once, when the class is declared.
+                None,
+                Some(NestRole::ProviderMethod),
+                Some(NestRole::ProviderMethod),
+                // `afterInit` is a hook of a gateway only.
+                Some(NestRole::ProviderMethod),
+                // The innermost class decides.
+                None,
+                Some(NestRole::Lifecycle),
+                None,
+            ]
+        );
     });
 }

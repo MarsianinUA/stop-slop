@@ -348,15 +348,27 @@ static SET: Ruleset = Ruleset {
             },
             imp: Impl::Agent,
         },
+        check::<PerFile>(RuleMeta {
+            id: "extra-rule",
+            group: "extra",
+            ..META
+        }),
     ],
     groups: &[
         GroupDef {
             name: "core",
             requires_package: None,
+            opt_in: false,
         },
         GroupDef {
             name: "nestjs",
             requires_package: Some("@nestjs/core"),
+            opt_in: false,
+        },
+        GroupDef {
+            name: "extra",
+            requires_package: None,
+            opt_in: true,
         },
     ],
     roles: Roles {
@@ -480,6 +492,99 @@ fn a_disabled_rule_is_silent_and_an_unknown_id_is_an_error() {
         Some(ConfigError::UnknownRule {
             key: "rules.no-such".into()
         })
+    );
+}
+
+#[test]
+fn an_opt_in_group_runs_only_when_enabled_names_it() {
+    let observe = |config: RunConfig| {
+        let engine = Engine::new(&SET, config).unwrap();
+        let run = |mode| {
+            brief(
+                &engine
+                    .run(vec![source("src/a.ts", "")], &no_facts(), mode)
+                    .findings,
+            )
+        };
+        let active = engine
+            .rule_states(&no_facts(), &[])
+            .iter()
+            .any(|state| state.meta.id == "extra-rule" && state.active);
+        (run(Mode::Check), run(Mode::Hook), active)
+    };
+
+    assert_eq!(observe(only(&["extra-rule"])), (vec![], vec![], false));
+
+    let found = vec!["src/a.ts:1:1 extra-rule".to_string()];
+    let on = RunConfig {
+        enabled: vec!["extra".into()],
+        ..only(&["extra-rule"])
+    };
+    assert_eq!(observe(on), (found.clone(), found, true));
+}
+
+#[test]
+fn disabled_turns_off_a_rule_of_an_enabled_group() {
+    let config = RunConfig {
+        enabled: vec!["extra".into()],
+        ..only(&["per-file"])
+    };
+    let findings = check_files(
+        &Engine::new(&SET, config).unwrap(),
+        vec![source("src/a.ts", "")],
+    );
+
+    assert_eq!(brief(&findings), ["src/a.ts:1:1 per-file"]);
+}
+
+#[test]
+fn enabled_names_only_opt_in_groups_and_is_checked_after_disabled() {
+    let with_enabled = |names: &[&str]| RunConfig {
+        enabled: names.iter().map(|name| name.to_string()).collect(),
+        ..RunConfig::default()
+    };
+    let error = |config| Engine::new(&SET, config).err();
+
+    assert_eq!(
+        error(with_enabled(&["extra", "no-such"])),
+        Some(ConfigError::UnknownGroup {
+            key: "enabled[1]".into()
+        })
+    );
+    assert_eq!(
+        error(with_enabled(&["per-file"])),
+        Some(ConfigError::UnknownGroup {
+            key: "enabled[0]".into()
+        }),
+        "a rule id is not a group"
+    );
+    assert_eq!(
+        error(with_enabled(&["core"])),
+        Some(ConfigError::NotOptIn {
+            key: "enabled[0]".into()
+        })
+    );
+
+    let bad_disabled = RunConfig {
+        disabled: vec!["no-such".into()],
+        ..with_enabled(&["core"])
+    };
+    assert_eq!(
+        error(bad_disabled),
+        Some(ConfigError::UnknownRule {
+            key: "disabled[0]".into()
+        })
+    );
+    let bad_rules = RunConfig {
+        options: BTreeMap::from([("no-such".into(), toml::Table::new())]),
+        ..with_enabled(&["core"])
+    };
+    assert_eq!(
+        error(bad_rules),
+        Some(ConfigError::NotOptIn {
+            key: "enabled[0]".into()
+        }),
+        "`enabled` comes before `rules.*`"
     );
 }
 

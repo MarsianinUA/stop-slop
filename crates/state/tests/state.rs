@@ -112,6 +112,18 @@ fn config_toml_gives_disabled_rules_and_options() {
 }
 
 #[test]
+fn config_toml_gives_enabled_groups() {
+    let temp = TempDir::new().unwrap();
+    let state = State::open(temp.path());
+
+    write(&temp, "config.toml", "enabled = [\"performance\"]\n");
+    assert_eq!(state.config().unwrap().enabled, ["performance"]);
+
+    write(&temp, "config.toml", "disabled = [\"no-any\"]\n");
+    assert!(state.config().unwrap().enabled.is_empty());
+}
+
+#[test]
 fn broken_config_toml_gives_the_path_and_the_line() {
     let temp = TempDir::new().unwrap();
     let state = State::open(temp.path());

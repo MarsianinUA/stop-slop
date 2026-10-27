@@ -25,7 +25,7 @@ The skill has three branches, and each run takes one: fix the user's branch, rev
 
 ### Fix your branch
 
-The agent fixes everything at once, with no approval step. The run ends when `check` is clean, with no `error` left and every `candidate` either fixed or ignored with a reason.
+The agent fixes everything at once, with no approval step. The run ends when `check` is clean, with no `error` left and every `candidate` either fixed or ignored with a reason. A `performance` or `branching` fix the project's tests reject is the exception: it is reverted, and its finding goes to the report.
 
 1. `git fetch`, so the base is fresh. With no remote, or when the fetch fails, the run goes on and the report says so.
 2. `stop-slop check --json`. The agent keeps this first list for the report, outside the repository. Its `inHunk` tells the user's own lines from cleanup in old code.
@@ -40,14 +40,14 @@ The agent fixes everything at once, with no approval step. The run ends when `ch
 6. The agent checks each `agent` rule with `active: true` itself, in the branch files its `files` covers.
 7. `check --fix --json` again. While an `error` or an undecided `candidate` remains, the agent goes back to step 5. Then it puts each candidate it judged fine into the exception list with `stop-slop ignore <fingerprint> --reason "..."`. Ignoring comes last, because editing the flagged code changes its fingerprint.
 8. If the project uses `prettier`, `biome` or `dprint`, the agent runs it on the changed files. Then `check` runs once more and stays clean.
-9. The agent runs the `typecheck` and `lint` scripts of `package.json`, if they exist.
+9. The agent runs the `typecheck` and `lint` scripts of `package.json`, if they exist. After a fix of a `performance` or `branching` finding, it runs the `test` script too. A fix the tests reject is reverted, and its finding stays open.
 10. The agent leaves the commit to the user. The report gives:
     - the base and why the program picked it;
     - the fixes in the user's own lines, by rule;
     - the cleanup in old code, by file and line, so the user can commit it apart;
     - the files that renames and moves touched;
     - every ignored finding with its reason, and every rule a convention turned off;
-    - the formatter, `typecheck` and `lint` results.
+    - the formatter, `typecheck`, `lint` and `test` results, and each `performance` or `branching` fix the tests rejected.
 
 ### Review a colleague's PR
 
@@ -255,7 +255,7 @@ One object per rule:
 - `source`: where the rule comes from, see [Sources](#sources);
 - `message`: the text of its findings, with `{placeholders}` the rule fills in;
 - `agent`: how to judge, fix or check the rule, or `null` when the message says enough;
-- `active`: whether the rule runs in this repository, after `disabled` and the group conditions. In a monorepo, a group condition holds when any `package.json` meets it.
+- `active`: whether the rule runs in this repository, after `disabled`, `enabled` and the group conditions. In a monorepo, a group condition holds when any `package.json` meets it.
 
 Without `--json`, `rules` prints `id  kind  fix  description`, one rule per line, and works outside a repository too.
 
@@ -269,7 +269,7 @@ The state of a repository sits in `<common>/info/stop-slop/`, where `<common>` i
 |---|---|
 | `enabled` | The hook's marker. |
 | `ignore.json` | Exceptions. `ignore.json.lock` guards writes to it. |
-| `config.toml` | Rules turned off and rule options for this repository. |
+| `config.toml` | Rules turned off, opt-in groups turned on, and rule options for this repository. |
 | `reviews/pr-<n>.md`, `reviews/pr-<n>.json` | The skill's review drafts. |
 
 ### Exceptions
@@ -299,18 +299,20 @@ Every other exception goes into `ignore.json`:
 
 ```toml
 disabled = ["no-boolean-param"]
+enabled = ["performance", "branching"]
 
 [rules.max-nesting]
 max = 5
 ```
 
 - `disabled` turns rules off for this repository. The agent does this when the project's conventions contradict a rule, because the project wins over personal rules.
+- `enabled` turns opt-in groups on for this repository. It takes group names, not rule ids (see [Groups](#groups)). `disabled` wins, so a rule it names stays off in an enabled group.
 - `[rules.<id>]` overrides the `[options]` of that rule's `rule.toml`. It takes only the keys the rule has.
-- An unknown rule, an unknown option or a value of the wrong type makes every command that reads the file exit with 2. The message names the file and the key, such as `disabled[0]` or `rules.max-nesting.max`, or the line when the TOML itself is wrong.
+- An unknown rule, an unknown option, a value of the wrong type, or a group in `enabled` that does not exist or is not opt-in makes every command that reads the file exit with 2. The message names the file and the key, such as `disabled[0]`, `enabled[0]` or `rules.max-nesting.max`, or the line when the TOML itself is wrong.
 
 ## Rules
 
-The program has 103 rules in 12 groups: 73 `error`, 24 `candidate` and 6 `agent`. 16 of them fix code themselves. `stop-slop rules` lists them, and so does [rules.md](rules.md); each one lives in `rules/<group>/<id>/`. The catalog is generic. It names no paths, packages or domains of one project. The ideas I turned down are in [Not checked, on purpose](#not-checked-on-purpose).
+The program has 115 rules in 14 groups: 80 `error`, 29 `candidate` and 6 `agent`. 16 of them fix code themselves. The 12 rules of `performance` and `branching` stay off until `enabled` names them. `stop-slop rules` lists them, and so does [rules.md](rules.md); each one lives in `rules/<group>/<id>/`. The catalog is generic. It names no paths, packages or domains of one project. The ideas I turned down are in [Not checked, on purpose](#not-checked-on-purpose).
 
 ### Kinds
 
@@ -344,7 +346,7 @@ Two more terms the rules use:
 |---|---|---|
 | `types` | 19 | `any`, type and non-null assertions, needless annotations, optional and nullable fields, enums over string unions, dictionary and `object` types, where types live, reshaping own types |
 | `naming` | 15 | file and folder names, case, `I` and `_` prefixes, booleans, acronyms, vague and single-letter names, units in names |
-| `functions-classes` | 18 | what goes in a class file and a functions file, parameters, branching, singletons, module state, member order, mutation |
+| `functions-classes` | 18 | what goes in a class file and a functions file, parameters, `if` chains and `switch`, singletons, module state, member order, mutation |
 | `wandering-data` | 4 | objects that travel through functions that do not use them |
 | `imports` | 6 | import order, the `node:` protocol, Node globals, path style, barrels, banned packages |
 | `config` | 2 | `process.env` and loose constants |
@@ -354,11 +356,14 @@ Two more terms the rules use:
 | `nestjs` | 8 | `@HttpCode`, request scope, `getOrThrow`, response DTOs, routes, inject tokens |
 | `comments` | 4 | `TODO` owners, commented-out code, comments as sentences, comments that retell the code |
 | `tests` | 3 | mocks of own modules, test names, test quality |
+| `performance` | 9 | opt-in: searches, copies, `shift` and `await` inside loops, `forEach(async ..)`, blocking calls in Nest handlers, `delete` on objects, recursive `process.nextTick`, regexes that backtrack exponentially |
+| `branching` | 3 | opt-in: a test an outer test already decided, branches that are the same code, cognitive complexity of a function |
 
 A group can have a `group.toml`:
 
 - `requires-package` runs the group only for files whose package depends on it. The program looks in the nearest `package.json` and every one above it, up to the repository root, the way Node resolves packages from `node_modules`. So the dependencies of a monorepo's root count for every package. `nestjs` requires `@nestjs/core`.
 - `files` sets the default `files` of its rules. The `tests` group sets `tests`.
+- `opt-in = true` keeps the group off until `enabled` in [config.toml](#configtoml) names it. Only such a group can go into `enabled`.
 
 ### Sources
 
@@ -375,6 +380,7 @@ These came up while I built the catalog, and I turned them down:
 
 - **Rules of one project.** A work project's conventions gave rules that only make sense there: its own value types and helpers, folder boundaries and import subpaths, error code ranges, API versioning and Swagger examples, its business domain and its database.
 - **What the project's ESLint often has already.** `consistent-type-imports`, which wants `import type`, and `no-wrapper-object-types`, which bans `String` in place of `string`.
+- **What ESLint's recommended set checks.** Unreachable code (`no-unreachable`), constant conditions (`no-constant-condition`), an `else if` that repeats an earlier test (`no-dupe-else-if`), a value assigned and never read (`no-useless-assignment`) and `new Promise(async ..)` (`no-async-promise-executor`). A project with ESLint has them on already. Two of them, unreachable code and a value never read, would need a control-flow graph the program does not build.
 - **Three anti-slop rules.** `no-unknown-parameters` would forbid `parseUser(input: unknown)`, yet untrusted data should come in as `unknown`, and the code narrows it from there. `require-readable-spacing` is formatting, which belongs to Prettier. `no-runtime-typeof` is stricter than the catalog wants.
 - **Rules for a "direct" style.** That style uses plain data and functions instead of class hierarchies. My projects are object-oriented, so these went: a class with only `static` members, a file named for a class role, like `*.service.ts`, with no class in it, `abstract class`, any class in a direct-style project, a wrapper function that only forwards a call, an interface with a single implementation, and a function with a mode of any kind. A boolean flag is still a rule, `no-boolean-param`. From the same notes: `/* */` comments instead of `//`, `/** */` comments inside a function body, and the `// direct:` comment format.
 - **Rules that need TypeScript types.** See [Not in v1](#not-in-v1).

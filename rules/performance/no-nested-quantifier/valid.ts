@@ -1,0 +1,21 @@
+declare const part: string;
+
+export const CSV_LINE = /^(\d+,)*\d+$/;
+export const SPACED_WORDS = /^(?:\w+\s)+$/;
+export const SLUG = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
+export const PAIRS = /^(ab)+$/;
+export const TRIPLES = /^(\d{3})+$/;
+export const SINGLES = /^(a?)+$/;
+export const BOUNDED = /^(a+){2,5}$/;
+export const SEPARATED = /^(a+b+)+$/;
+export const CLASS = /^[\w-]+$/;
+export const TRAILING = /(a+)+/;
+export const TRAILING_WORDS = /(\w*)*/;
+export const TRAILING_BUILT = new RegExp('(x+)+');
+export const ANYTHING_AFTER = /^(a+)+.*/;
+export const IN_LOOKAHEAD = /(?=(a+)+)b/;
+export const IN_LOOKBEHIND = /(?<=(a+)+b)c/;
+export const UNPARSED_LITERAL = /(a+)+(/;
+export const UNPARSED = new RegExp('(a+)+(');
+export const BUILT_AT_RUN_TIME = new RegExp(`(${part}+)+`);
+export const FROM_A_VARIABLE = new RegExp(part);

@@ -10,6 +10,8 @@ use serde::{Deserialize, Serialize};
 #[serde(default, deny_unknown_fields)]
 pub struct Config {
     pub disabled: Vec<String>,
+    /// Opt-in groups to turn on. Checked by `Engine::new`, not here.
+    pub enabled: Vec<String>,
     /// `[rules.<id>]`. The ids and the keys are checked by `Engine::new`, not here.
     pub rules: BTreeMap<String, toml::Table>,
 }
