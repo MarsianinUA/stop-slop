@@ -1,0 +1,7 @@
+description = "`readFileSync`, `execSync`, `bcrypt.hashSync` and other blocking calls in a Nest handler or provider, outside the constructor and the startup hooks"
+kind = "candidate"
+source = ["personal"]
+message = "`{call}` in `{method}`, {role}, blocks the event loop until the work is done: every other request, message and timer of the process waits for it. Use the async form: `fs.promises`, `zlib` and `crypto` with a callback or `util.promisify`, `bcrypt.hash` and `bcrypt.compare`, `execFile` with a callback."
+agent = """
+The message names the blocking call, the class and method, and the method's role. Switch to the async form when the method runs per request, per message or per job: `await fs.promises.readFile(..)`, `await promisify(gzip)(..)`, `await promisify(randomBytes)(n)`, `await bcrypt.hash(..)`, `execFile` through `promisify`. Ignore the finding with the reason when the method runs only at startup or in a CLI command (only `onModuleInit`, a constructor or a bootstrap script calls it), when the result is computed once and kept (a template read on first use and cached in a field), or when the call is quick by nature: `randomBytes(n)` for a token or a salt of a few dozen bytes takes microseconds. A `*Sync` hash in `bcrypt` takes tens of milliseconds: it always goes async.
+"""

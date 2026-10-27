@@ -1,4 +1,4 @@
-use kit::oxc::ast::ast::{Expression, LabelIdentifier, Statement};
+use kit::oxc::ast::ast::{Argument, Expression, LabelIdentifier, Statement};
 use kit::prelude::*;
 
 #[derive(Deserialize)]
@@ -39,6 +39,22 @@ impl Rule for Check {
             return;
         };
         let file = cx.file();
+        // A pass that starts a batch together, such as the chunk the message suggests. A fixed
+        // list, `Promise.all([load(user), save(user)])`, still waits once per item.
+        if call_of(&awaited.argument).is_some_and(|call| {
+            matches!(
+                global_member(file, &call.callee),
+                Some(("Promise", "all" | "allSettled"))
+            ) && !matches!(
+                call.arguments
+                    .first()
+                    .and_then(Argument::as_expression)
+                    .map(Expression::get_inner_expression),
+                Some(Expression::ArrayExpression(_))
+            )
+        }) {
+            return;
+        }
         let mut around = loop_around(file, node.id());
         let (around, body) = loop {
             let Some(current) = around else {
@@ -64,7 +80,6 @@ impl Rule for Check {
     }
 }
 
-/// The body of a loop statement other than `for await`.
 fn body<'a>(kind: AstKind<'a>) -> Option<&'a Statement<'a>> {
     match kind {
         AstKind::ForStatement(statement) => Some(&statement.body),
@@ -146,8 +161,9 @@ fn is_round_trip(expression: &Expression<'_>) -> bool {
 /// one may need the pass before it.
 fn writes(file: &File<'_>, around: &LoopAround<'_>, body: Span) -> String {
     let scoping = file.semantic.scoping();
+    let nodes = file.semantic.nodes();
     let mut names: Vec<&str> = Vec::new();
-    for node in file.semantic.nodes().iter() {
+    for node in nodes.iter() {
         let AstKind::IdentifierReference(id) = node.kind() else {
             continue;
         };
@@ -156,10 +172,14 @@ fn writes(file: &File<'_>, around: &LoopAround<'_>, body: Span) -> String {
             continue;
         };
         let name = scoping.symbol_name(symbol);
+        let declaration = scoping.symbol_declaration(symbol);
+        // `runs_each_pass` stops at a function that is not a per-item callback, such as a `sort`
+        // comparator, but its locals start anew on each call too.
         if reference.is_write()
             && body.contains_inclusive(id.span)
             && !names.contains(&name)
-            && !around.runs_each_pass(file, scoping.symbol_declaration(symbol))
+            && !body.contains_inclusive(nodes.get_node(declaration).span())
+            && !around.runs_each_pass(file, declaration)
         {
             names.push(name);
         }

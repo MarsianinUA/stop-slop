@@ -1,0 +1,7 @@
+description = "`delete user.password` on an object with a fixed set of keys, not a dictionary"
+kind = "candidate"
+source = ["personal"]
+message = "`delete {target}` removes a key from {origin}. Unless that key was the last one added, V8 turns the object into a dictionary: from then on every read and write of its keys is a hash lookup, and the code that touches it is no longer optimized for its shape. Set the key to `undefined` instead, or build a new object without it: `const { key, ...rest } = object`."
+agent = """
+The message names the deleted key and where the object comes from. Rewrite when the object lives on after the `delete`: a field of a class (`delete this.cache` becomes `this.cache = undefined`), a long-lived or shared object, an object that hot code reads. When the object is about to be returned or sent, build a copy without the key: `const { password, ...safe } = user; return safe;`. Ignore the finding with the reason when the object is a dictionary by design even though its type does not show it (an imported type with an index signature, headers, an env or query object, a cache keyed by data), or when nothing reads it after the `delete`.
+"""

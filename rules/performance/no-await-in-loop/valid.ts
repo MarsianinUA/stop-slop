@@ -58,6 +58,12 @@ export function each(): void {
   });
 }
 
+export async function chunked(): Promise<void> {
+  for (let start = 0; start < orders.length; start += 10) {
+    await Promise.all(orders.slice(start, start + 10).map((order) => ordersRepository.save(order)));
+  }
+}
+
 export async function once(): Promise<boolean> {
   return await notify(orders[0]);
 }

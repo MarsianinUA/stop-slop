@@ -251,7 +251,6 @@ fn key(file: &File<'_>, method: &str, call: &CallExpression<'_>) -> Option<Strin
     compared(file, &item, result)
 }
 
-/// The value of a body that is one `return`.
 fn returned<'b, 'a>(body: &'b FunctionBody<'a>) -> Option<&'b Expression<'a>> {
     match body.statements.as_slice() {
         [Statement::ReturnStatement(statement)] => statement.argument.as_ref(),

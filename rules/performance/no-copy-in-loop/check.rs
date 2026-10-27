@@ -56,11 +56,12 @@ fn copy(file: &File<'_>, value: &Expression<'_>, symbol: SymbolId, name: &str) -
     };
     match value.get_inner_expression() {
         Expression::ArrayExpression(array) => {
-            let spreads = array.elements.iter().any(|element| {
+            let at = array.elements.iter().position(|element| {
                 matches!(element, ArrayExpressionElement::SpreadElement(spread)
                     if is_self(&spread.argument))
-            });
-            (spreads && array.elements.len() > 1).then(|| format!("[...{name}, ..]"))
+            })?;
+            let len = array.elements.len();
+            (len > 1).then(|| format!("[{}]", listed(&format!("...{name}"), at, len)))
         }
         Expression::ObjectExpression(object) => {
             let spreads = object.properties.iter().any(|property| {
@@ -83,12 +84,12 @@ fn copy(file: &File<'_>, value: &Expression<'_>, symbol: SymbolId, name: &str) -
                 else {
                     return None;
                 };
-                let has_self = parts
+                let at = parts
                     .elements
                     .iter()
-                    .any(|part| part.as_expression().is_some_and(is_self));
-                return (has_self && parts.elements.len() > 1)
-                    .then(|| format!("Buffer.concat([{name}, ..])"));
+                    .position(|part| part.as_expression().is_some_and(is_self))?;
+                let len = parts.elements.len();
+                return (len > 1).then(|| format!("Buffer.concat([{}])", listed(name, at, len)));
             }
             let member = call.callee.get_member_expr()?;
             let is_concat = member.static_property_name() == Some("concat")
@@ -98,6 +99,13 @@ fn copy(file: &File<'_>, value: &Expression<'_>, symbol: SymbolId, name: &str) -
             is_concat.then(|| format!("{name}.concat(..)"))
         }
     }
+}
+
+/// `part` at `at` of a list of `len` items, the others as `..`: `.., ...seen` of `[i, ...seen]`.
+fn listed(part: &str, at: usize, len: usize) -> String {
+    let before = if at > 0 { ".., " } else { "" };
+    let after = if at + 1 < len { ", .." } else { "" };
+    format!("{before}{part}{after}")
 }
 
 /// `concat` copies an array but joins a string: the type or the first value of the variable

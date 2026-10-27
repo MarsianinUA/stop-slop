@@ -13,7 +13,7 @@ pub enum LoopKind {
     ForIn,
     While,
     DoWhile,
-    /// A function given to `forEach`, `map` or another method of `PER_ITEM`.
+    /// A function given to `forEach`, `map` or another array method that calls it once per item.
     Callback,
     /// A function given to `.on(event, ..)`, `.addListener(..)` or `.addEventListener(..)`.
     Listener,
