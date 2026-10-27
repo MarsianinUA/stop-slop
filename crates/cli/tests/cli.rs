@@ -737,9 +737,21 @@ fn json_prints_one_failure_line_with_the_phase_and_next_on_2_and_3() {
             "unexpected argument '--bogus' found",
             &[],
         ),
+        (
+            &["check", "--rev", "HEAD", "--json"],
+            "args",
+            "not provided: --base <BASE>",
+            &[],
+        ),
     ] {
         assert_failure(&run(t.path(), args), 2, phase, cause, next);
     }
+    let out = run(t.path(), &["enable", "--json"]);
+    assert_eq!(
+        (code(&out), stdout(&out)),
+        (2, String::new()),
+        "no `--json`"
+    );
 
     // On the only branch, without `origin`, no base is found.
     let lone = TempRepo::new();
@@ -774,7 +786,7 @@ fn json_prints_one_failure_line_with_the_phase_and_next_on_2_and_3() {
 fn ctrl_c_exits_with_130() {
     use std::os::unix::process::ExitStatusExt;
     use std::thread;
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
 
     let t = TempRepo::new();
     // `SIGINT` before the handler is set ends the process by the signal, so a slow start gets
@@ -785,16 +797,26 @@ fn ctrl_c_exits_with_130() {
             .stdin(Stdio::piped())
             .spawn()
             .expect("start stop-slop");
-        // Held open, so the hook waits for its input; `wait` would close it.
-        let stdin = child.stdin.take();
         thread::sleep(Duration::from_millis(wait));
         let kill = Command::new("kill")
             .args(["-INT", &child.id().to_string()])
             .status()
             .expect("start kill");
         assert!(kill.success());
-        let status = child.wait().expect("wait for stop-slop");
-        drop(stdin);
+        // `try_wait` keeps the piped stdin open, so the hook waits for its input; `wait` would
+        // close it. A `SIGINT` the process inherited as ignored, before the handler, would leave
+        // the hook waiting forever: the panic drops `child` with its stdin, and the hook ends.
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let status = loop {
+            if let Some(status) = child.try_wait().expect("wait for stop-slop") {
+                break status;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "stop-slop outlived SIGINT by 10 s"
+            );
+            thread::sleep(Duration::from_millis(10));
+        };
         if status.signal().is_none() {
             assert_eq!(status.code(), Some(130));
             return;

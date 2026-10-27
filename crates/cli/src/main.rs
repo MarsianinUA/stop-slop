@@ -74,12 +74,19 @@ fn refuse_args(error: &clap::Error) -> Exit {
     if !error.use_stderr() {
         return Exit::Clean;
     }
-    // Nothing parsed, so `--json` is looked for among the raw arguments.
-    if env::args_os().skip(1).any(|arg| arg == "--json") {
-        // The first line is the error; usage and tips for a person follow it on stderr.
+    // Nothing parsed, so the command and `--json` are looked for among the raw arguments.
+    let mut args = env::args_os().skip(1);
+    let prints_json = args
+        .next()
+        .is_some_and(|command| command == "check" || command == "rules");
+    if prints_json && args.any(|arg| arg == "--json") {
+        // The error runs to the first empty line: a missing flag has a line of its own after
+        // `the following required arguments were not provided:`. Usage and tips for a person
+        // follow, and stderr keeps them.
         let text = error.to_string();
-        let first = text.lines().next().unwrap_or_default();
-        print_failure("args", first.strip_prefix("error: ").unwrap_or(first), &[]);
+        let message = text.split("\n\n").next().unwrap_or_default();
+        let message = message.strip_prefix("error: ").unwrap_or(message);
+        print_failure("args", message, &[]);
     }
     Exit::Refused
 }

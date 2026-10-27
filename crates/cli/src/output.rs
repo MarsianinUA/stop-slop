@@ -251,15 +251,10 @@ pub(crate) fn failure_text(cause: &str, next: &[String]) -> String {
 /// What `--json` prints on 2 and 3 instead of the command's JSON. The stderr of git in `cause`
 /// can span lines, and the JSON keeps it on one.
 pub(crate) fn failure_json(phase: &'static str, cause: &str, next: &[String]) -> String {
-    let lines: Vec<&str> = cause
-        .lines()
-        .map(str::trim)
-        .filter(|line| !line.is_empty())
-        .collect();
     let line = FailureLine {
         failure: FailureJson {
             phase,
-            cause: &lines.join(" "),
+            cause: &kit::one_line(cause),
         },
         next,
     };

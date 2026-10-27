@@ -58,14 +58,13 @@ impl CliError {
     /// `failure.phase` of the `--json` line on 2 and 3.
     pub(crate) fn phase(&self) -> &'static str {
         match self {
-            CliError::Repo(
+            CliError::Repo(error) | CliError::Scope(ScopeError::Repo(error)) => match error {
                 RepoError::NotARepo
                 | RepoError::OutsideRepo(_)
                 | RepoError::UnknownRev(_)
                 | RepoError::Git { .. }
-                | RepoError::Io { .. },
-            )
-            | CliError::Scope(ScopeError::Repo(_)) => "repo",
+                | RepoError::Io { .. } => "repo",
+            },
             CliError::Scope(
                 ScopeError::UnknownBase(_) | ScopeError::NoBase | ScopeError::RevWithoutBase,
             ) => "base",
@@ -86,16 +85,14 @@ impl CliError {
                 vec!["stop-slop check --base <ref> --json".to_owned()]
             }
             CliError::UnknownFingerprint(_) => vec!["stop-slop check --json".to_owned()],
-            CliError::Repo(
+            CliError::Repo(error) | CliError::Scope(ScopeError::Repo(error)) => match error {
                 RepoError::NotARepo
                 | RepoError::OutsideRepo(_)
                 | RepoError::UnknownRev(_)
                 | RepoError::Git { .. }
-                | RepoError::Io { .. },
-            )
-            | CliError::Scope(
-                ScopeError::Repo(_) | ScopeError::RevWithoutBase | ScopeError::BadFile { .. },
-            )
+                | RepoError::Io { .. } => Vec::new(),
+            },
+            CliError::Scope(ScopeError::RevWithoutBase | ScopeError::BadFile { .. })
             | CliError::Project(_)
             | CliError::Config { .. }
             | CliError::State(_)
