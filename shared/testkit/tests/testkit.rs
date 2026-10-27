@@ -17,10 +17,11 @@ fn commit_needs_no_global_identity_and_runs_no_global_hooks() {
     // git calls of the other tests: the test runs again in a test process of its own.
     let global = env::var_os("GIT_CONFIG_GLOBAL");
     if global.is_some_and(|path| Path::new(&path).ends_with(GLOBAL_CONFIG)) {
-        TempRepo::new()
-            .write("a.ts", "a\n")
-            .commit("init")
-            .branch("next");
+        let t = TempRepo::new();
+        t.write("a.ts", "a\n").commit("init").branch("next");
+        // The control: without the local `hooksPath` the global hooks run.
+        t.git(&["config", "--unset", "core.hooksPath"]);
+        t.checkout("main");
         return;
     }
     let home = tempfile::tempdir().unwrap();
@@ -73,8 +74,10 @@ fn commit_needs_no_global_identity_and_runs_no_global_hooks() {
         String::from_utf8_lossy(&out.stderr)
     );
     assert!(stdout.contains("1 passed"), "{stdout}");
+    // Only the control's checkout. No line at all would mean the hooks cannot run here, and
+    // the test would prove nothing.
     let ran = fs::read_to_string(&mark).unwrap_or_default();
-    assert!(ran.is_empty(), "{ran}");
+    assert_eq!(ran.trim_end(), "post-checkout", "{ran}");
 }
 
 /// `\` is an escape in a git config value; git and its `sh` on Windows take `C:/...`.

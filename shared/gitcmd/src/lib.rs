@@ -26,7 +26,7 @@ const CLEARED_ENV: [&str; 11] = [
     "GIT_DIFF_OPTS",
 ];
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct Git {
     dir: PathBuf,
     overrides: Vec<(String, OsString)>,
@@ -139,11 +139,10 @@ pub fn root(dir: &Path) -> Result<Option<Root>, GitError> {
         "--git-common-dir",
     ];
     let out = match Git::at(dir).run(&args) {
-        Ok(out) => out,
         Err(GitError::Failed { stderr, .. }) if stderr.contains("not a git repository") => {
             return Ok(None);
         }
-        Err(error) => return Err(error),
+        other => other?,
     };
     let (worktree, common) = str::from_utf8(&out)
         .ok()
