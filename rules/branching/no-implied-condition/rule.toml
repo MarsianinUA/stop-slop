@@ -1,0 +1,4 @@
+description = "A test an outer `if`, `?:`, `&&` or `||` already decided, on a `const` or a parameter nothing reassigns: `if (user) { if (user) .. }`"
+kind = "error"
+source = ["personal"]
+message = "`{condition}` is always {value} here: {check} on line {line} already tested it, and `{name}` is {binding}, so its value is the same. Drop the test: keep what runs when it is {value} and delete what never runs. Or test what you meant."
