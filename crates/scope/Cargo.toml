@@ -12,4 +12,4 @@ thiserror.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
-testkit = { path = "../testkit" }
+testkit = { path = "../../shared/testkit" }
