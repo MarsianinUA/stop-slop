@@ -12,7 +12,7 @@ use clap::{Args, Parser};
 pub(crate) enum Command {
     /// Checks the files of the branch.
     Check(CheckArgs),
-    /// Checks the file of a Claude Code hook given as JSON on stdin.
+    /// Checks the file of an agent hook given as JSON on stdin.
     Hook,
     /// Adds an exception for a finding of the branch.
     Ignore {

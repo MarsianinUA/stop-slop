@@ -1,8 +1,8 @@
 # Third-party code
 
-Rules whose `rule.toml` lists `anti-slop` in `source` are ported from
+Rules whose `rule.toml` lists `anti-slop` in `source` come from the `src/rules/` folder of
 [dmmulroy/anti-slop](https://github.com/dmmulroy/anti-slop), commit
-`c44ef22ca116d0ba62a3ff663a0bd13a3f3fa40b`, folder `src/rules/`, under the MIT License:
+`c44ef22ca116d0ba62a3ff663a0bd13a3f3fa40b`. I ported them under its MIT License:
 
 ```text
 MIT License

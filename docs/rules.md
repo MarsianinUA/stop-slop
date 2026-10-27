@@ -2,14 +2,14 @@
 
 All 115 rules stop-slop checks. `stop-slop rules` prints the same list, and each rule lives in its own folder under `rules/`.
 
-- **error**: the rule is sure. After a fix, none of these may be left.
-- **candidate**: a hunch. The program flags it, the agent decides if it's a real problem, and a false one goes to the ignore list with a reason.
-- **agent**: the program can't see it, so the agent checks it by hand.
-- **Fix**: the program fixes it itself, without changing what the code does.
+- **error.** The rule is sure. After a fix, none of these may remain.
+- **candidate.** A hunch. The program flags it, the agent decides if it's a real problem, and a false one goes to the ignore list with a reason.
+- **agent.** The program can't see it, so the agent checks it by hand.
+- **Fix.** A "yes" means the program fixes it itself, without changing what the code does.
 
 ## Types
 
-How types are written and where they live.
+How to write types and where to keep them.
 
 | Rule | What it catches | Kind | Fix |
 |---|---|---|---|
