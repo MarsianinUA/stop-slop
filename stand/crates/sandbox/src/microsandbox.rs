@@ -3,8 +3,8 @@
 //! The SDK is async; each port call blocks on a private runtime and runs its future as a task on a
 //! worker with a 16 MiB stack, since the SDK's futures overflow the 1 MiB main thread of a Windows
 //! debug build. `home` is microsandbox's own home (runtime, images, VMs, snapshots) and holds the
-//! adapter's `vm/<vm>/` (the host side of the VM's `/stand/run` and `/stand/net`, and the tar of
-//! `copy_out` on its way) and `guest/<version>/` (`/stand/bin`).
+//! adapter's `vm/<vm>/` (the host side of the VM's `/stand/run` and `/stand/net`, and the fault
+//! switch on its way) and `guest/<version>/` (`/stand/bin`).
 
 mod guest;
 mod network;
@@ -39,6 +39,8 @@ const GUEST_CALL: Duration = Duration::from_secs(30);
 /// `create` includes a cold image pull.
 const CREATE: Duration = Duration::from_secs(600);
 const POLL: Duration = Duration::from_millis(25);
+/// A healthcheck attempt whose program does not start, as a shell ends a command it cannot run.
+const NOT_STARTED: i32 = 127;
 const METRICS_EVERY: Duration = Duration::from_secs(1);
 
 pub struct Microsandbox {
@@ -66,7 +68,8 @@ struct Live {
     /// Guest paths of the disks the VM owns: its volumes and the version disk.
     owned: Vec<String>,
     service: Job,
-    execs: Mutex<BTreeMap<String, Job>>,
+    /// Healthcheck attempts by `ExecId`; `None` for one whose program did not start.
+    execs: Mutex<BTreeMap<String, Option<Job>>>,
     peak: Arc<AtomicU64>,
     sampler: tokio::task::AbortHandle,
 }
@@ -122,12 +125,24 @@ impl Sandbox for Microsandbox {
         self.block(|inner| async move { inner.create(batch).await })
     }
 
-    fn exec_detached(&self, id: &SandboxId, argv: &[String]) -> Result<ExecId, SandboxError> {
+    fn exec_detached(
+        &self,
+        id: &SandboxId,
+        argv: &[String],
+        timeout: Duration,
+    ) -> Result<ExecId, SandboxError> {
         let (id, argv) = (id.clone(), argv.to_vec());
-        self.block(|inner| async move {
+        self.block(move |inner| async move {
             let live = inner.live(&id)?;
-            let job = process::exec_detached(&live, &argv).await?;
-            let exec = format!("{}/{}", live.name, job.id());
+            let job = process::exec_detached(&live, &argv, timeout).await?;
+            let exec = match &job {
+                Some(job) => format!("{}/{}", live.name, job.id()),
+                None => format!(
+                    "{}/unstarted-{}",
+                    live.name,
+                    inner.seq.fetch_add(1, Ordering::Relaxed)
+                ),
+            };
             live.execs.lock().unwrap().insert(exec.clone(), job);
             Ok(ExecId::new(exec))
         })
@@ -463,14 +478,21 @@ impl Inner {
         deadline: Instant,
     ) -> Result<Option<Exited>, SandboxError> {
         loop {
+            // Of two that ended since the last look, the one that ended first.
+            let mut first: Option<Exited> = None;
             for waitable in &what {
-                if let Some(code) = self.exit_of(waitable).await? {
-                    return Ok(Some(Exited {
+                if let Some((code, at)) = self.exit_of(waitable).await?
+                    && first.as_ref().is_none_or(|first| at < first.at)
+                {
+                    first = Some(Exited {
                         what: waitable.clone(),
                         code,
-                        at: Instant::now(),
-                    }));
+                        at,
+                    });
                 }
+            }
+            if first.is_some() {
+                return Ok(first);
             }
             let now = Instant::now();
             if now >= deadline {
@@ -480,8 +502,11 @@ impl Inner {
         }
     }
 
-    /// `None` while it runs, else its code; a code of `None` when it was killed without one.
-    async fn exit_of(&self, what: &Waitable) -> Result<Option<Option<i32>>, SandboxError> {
+    /// `None` while it runs, else its code and when it ended.
+    async fn exit_of(
+        &self,
+        what: &Waitable,
+    ) -> Result<Option<(Option<i32>, Instant)>, SandboxError> {
         match what {
             Waitable::Sandbox(id) => {
                 let live = self.live(id)?;
@@ -489,7 +514,8 @@ impl Inner {
                 if info.state.is_active() {
                     return Ok(None);
                 }
-                process::service_code(&live, &info).await.map(Some)
+                let code = process::service_code(&live, &info).await?;
+                Ok(Some((code, ended_at(&info))))
             }
             Waitable::Exec(exec) => {
                 let vm = exec.as_str().split_once('/').map_or("", |(vm, _)| vm);
@@ -502,12 +528,18 @@ impl Inner {
                     .get(exec.as_str())
                     .cloned();
                 let job = job.ok_or_else(|| backend(format!("no exec `{exec}`")))?;
+                let Some(job) = job else {
+                    return Ok(Some((Some(NOT_STARTED), Instant::now())));
+                };
                 let info = inspect(&job, &id).await?;
-                Ok(match info.state {
-                    state if state.is_active() => None,
-                    JobState::Exited => Some(info.exit_code),
-                    _ => Some(None),
-                })
+                let code = match info.state {
+                    state if state.is_active() => return Ok(None),
+                    // The kill leaves -1 as the code; an exit that raced it is past the timeout too.
+                    _ if info.timed_out => None,
+                    JobState::Exited => info.exit_code,
+                    _ => None,
+                };
+                Ok(Some((code, ended_at(&info))))
             }
         }
     }
@@ -664,6 +696,18 @@ async fn inspect(job: &Job, id: &SandboxId) -> Result<msb::jobs::JobInfo, Sandbo
     }
 }
 
+/// When the runtime saw the job end, on this host's clock: the moment of the exit, not of the look
+/// that found it.
+fn ended_at(info: &msb::jobs::JobInfo) -> Instant {
+    let now = Instant::now();
+    let ended = info.finished_at.and_then(|ms| u64::try_from(ms).ok());
+    let ago = ended.and_then(|ms| {
+        let ended = UNIX_EPOCH + Duration::from_millis(ms);
+        SystemTime::now().duration_since(ended).ok()
+    });
+    ago.and_then(|ago| now.checked_sub(ago)).unwrap_or(now)
+}
+
 /// Forced: the service has stopped or no longer matters. A destroy that hangs gets a kill, then
 /// one more destroy.
 async fn destroy_vm(name: &str) -> Result<(), SandboxError> {
@@ -733,6 +777,14 @@ fn backend(error: impl Display) -> SandboxError {
 
 fn guest_error(message: String) -> SandboxError {
     SandboxError::Guest { message }
+}
+
+/// The SDK's own deadline of an exec is a guest call past its deadline too.
+fn exec_error(error: msb::MicrosandboxError) -> SandboxError {
+    match error {
+        msb::MicrosandboxError::ExecTimeout(_) => guest_error(error.to_string()),
+        error => backend(error),
+    }
 }
 
 /// The SDK does not export the registry's error type, so a missing image is told by its text;

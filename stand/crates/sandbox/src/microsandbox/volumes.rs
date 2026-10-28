@@ -214,7 +214,7 @@ pub(super) async fn seed_tree(
         if sent.is_ok() {
             sent = sink.close().await;
         }
-        let output = handle.collect().await.map_err(backend)?;
+        let output = handle.collect().await.map_err(super::exec_error)?;
         Ok::<_, SandboxError>((sent, output))
     };
     let (sent, output) = within(TREE + GUEST_CALL, "unpack the version tree", unpack).await??;

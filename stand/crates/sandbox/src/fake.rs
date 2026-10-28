@@ -40,11 +40,14 @@ pub struct Rule {
 pub struct Script {
     /// Exit code and the time after `create`; `None` runs until `destroy`.
     pub exit: Option<(i32, Duration)>,
-    /// Exit codes of successive healthchecks; the last one repeats.
-    pub health: Vec<i32>,
+    /// How successive healthcheck attempts end, the last one repeating: with a code the moment they
+    /// start, or with `None` at their `timeout`, as a hung attempt the guest kills there.
+    pub health: Vec<Option<i32>>,
     /// By the file name of the `stdout` of an `exec` (`probe.orders.jsonl`): its outcome and bytes; an unscripted
     /// `exec` exits 0 with nothing.
     pub probes: Vec<(String, ExecOutcome, Vec<u8>)>,
+    /// What `stop` reports; the service then ends with 0, as a clean shutdown, or with 137 when
+    /// `killed` at the grace.
     pub stop: Stopped,
     pub metrics: Metrics,
     /// `metrics` after `fault`: what the relays saw under it.
@@ -66,6 +69,7 @@ pub enum Call {
     ExecDetached {
         id: SandboxId,
         argv: Vec<String>,
+        timeout: Duration,
     },
     Wait {
         what: Vec<Waitable>,
@@ -124,12 +128,12 @@ struct Vm {
     scratch: Vec<(String, Vec<u8>)>,
 }
 
-/// A healthcheck attempt: it ends the moment it starts.
+/// A healthcheck attempt.
 struct Job {
     id: ExecId,
     vm: SandboxId,
     at: Instant,
-    code: i32,
+    code: Option<i32>,
 }
 
 struct Snap {
@@ -269,20 +273,31 @@ impl Sandbox for Fake {
         made
     }
 
-    fn exec_detached(&self, id: &SandboxId, argv: &[String]) -> Result<ExecId, SandboxError> {
+    fn exec_detached(
+        &self,
+        id: &SandboxId,
+        argv: &[String],
+        timeout: Duration,
+    ) -> Result<ExecId, SandboxError> {
         let mut state = self.record(Call::ExecDetached {
             id: id.clone(),
             argv: argv.to_vec(),
+            timeout,
         });
-        let at = state.clock;
+        let clock = state.clock;
         let vm = state.vm_mut(id)?;
         let health = &vm.script.health;
         let code = health
             .get(vm.healthchecks)
             .or(health.last())
             .copied()
-            .unwrap_or(0);
+            .unwrap_or(Some(0));
         vm.healthchecks += 1;
+        let at = if code.is_some() {
+            clock
+        } else {
+            clock + timeout
+        };
         let exec = ExecId::new(format!("exec-{}", state.next()));
         state.execs.push(Job {
             id: exec.clone(),
@@ -305,7 +320,7 @@ impl Sandbox for Fake {
                 Waitable::Exec(exec) => {
                     let job = state.job(exec);
                     state.vm(&job.vm)?;
-                    Some((job.at, Some(job.code)))
+                    Some((job.at, job.code))
                 }
             };
             if let Some((at, code)) = end
@@ -517,9 +532,10 @@ impl Vm {
             .script
             .exit
             .map(|(code, after)| (self.started + after, Some(code)));
+        let stop_code = if self.script.stop.killed { 128 + 9 } else { 0 };
         match (exit, self.stopped) {
             (Some(exit), Some(stopped)) if exit.0 <= stopped => Some(exit),
-            (_, Some(stopped)) => Some((stopped, None)),
+            (_, Some(stopped)) => Some((stopped, Some(stop_code))),
             (exit, None) => exit,
         }
     }
@@ -556,11 +572,12 @@ fn restorable(snap: &Snap, launch: &Launch) -> Result<(), SandboxError> {
             )));
         }
     }
-    for volume in volumes(launch) {
-        if !snap.disks.contains(&volume) {
+    // By guest path, as microsandbox's snapshot knows its disks.
+    for (name, guest) in volumes(launch) {
+        if !snap.disks.iter().any(|(_, carried)| *carried == guest) {
             return Err(backend(format!(
-                "snapshot `{}` carries no volume `{}` at `{}`, and a restore adds none",
-                snap.id, volume.0, volume.1
+                "snapshot `{}` carries no volume at `{guest}` for `{name}`, and a restore adds none",
+                snap.id
             )));
         }
     }

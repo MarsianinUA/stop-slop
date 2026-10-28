@@ -4,10 +4,12 @@
 //! it names, never downloaded and never checked. The pin moves with each `guest-v*` tag (plan,
 //! "`guest`: релизы").
 
+use std::time::Duration;
+
 use camino::{Utf8Path, Utf8PathBuf};
 use sha2::{Digest, Sha256};
 
-use super::{backend, guest_error};
+use super::{backend, guest_error, within};
 use crate::{PortStats, SandboxError, Unexposed};
 
 /// In the guest, bound read-only from `Binary::dir`.
@@ -16,6 +18,7 @@ pub(super) const BIN: &str = "/stand/bin/stand-guest";
 const FILE: &str = "stand-guest";
 const RELEASES: &str = "https://github.com/MarsianinUA/stop-slop/releases/download";
 const LOCAL_BUILD: &str = "STOP_SLOP_STAND_GUEST";
+const DOWNLOAD: Duration = Duration::from_secs(300);
 
 struct Pin {
     version: &'static str,
@@ -87,7 +90,7 @@ pub(super) async fn install(
             let missing = match placed {
                 Ok(bytes) if checked(&bytes, sha256).is_ok() => None,
                 _ => {
-                    let bytes = download(&url).await?;
+                    let bytes = within(DOWNLOAD, "download stand-guest", download(&url)).await??;
                     checked(&bytes, sha256)?;
                     Some(bytes)
                 }

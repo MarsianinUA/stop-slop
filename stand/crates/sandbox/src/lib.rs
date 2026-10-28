@@ -32,7 +32,15 @@ pub trait Sandbox {
     /// never onto the VM (a restored VM has no VM env), and every later exec of the VM gets the same env.
     fn create(&self, batch: &[Launch]) -> Result<Vec<SandboxId>, SandboxError>;
     /// Healthcheck attempts: `run` waits on them together with every sandbox of the batch and `Cancel`.
-    fn exec_detached(&self, id: &SandboxId, argv: &[String]) -> Result<ExecId, SandboxError>;
+    /// At `timeout` the guest kills the attempt with its process group, as Docker kills a check past
+    /// its `timeout`, and `wait` gives it `code: None`. A program that does not start ends the
+    /// attempt at once with 127, as a shell gives it.
+    fn exec_detached(
+        &self,
+        id: &SandboxId,
+        argv: &[String],
+        timeout: Duration,
+    ) -> Result<ExecId, SandboxError>;
     /// The first of `what` to exit, or `None` at `deadline`.
     fn wait(&self, what: &[Waitable], deadline: Instant) -> Result<Option<Exited>, SandboxError>;
     /// Probes and `inspect`: killed at `deadline`; its sockets reach only the guest's own loopback;
@@ -109,8 +117,8 @@ pub struct Pulled {
 pub enum Seed {
     /// The image, root disk and owned disks come from the snapshot; cpus, memory, outbound, ports and
     /// binds from the `Launch` (plan, row 87). `image` equals the snapshot's (`spec` and `run` keep it so);
-    /// a `Mount::Volume` names a disk the snapshot carries, since a restore adds none. A bind path of the
-    /// snapshotted VM missing from `mounts` is `Backend`, in `Fake` too.
+    /// a `Mount::Volume` names by its guest path a disk the snapshot carries, since a restore adds
+    /// none. A bind path of the snapshotted VM missing from `mounts` is `Backend`, in `Fake` too.
     Snapshot(SnapshotId),
     /// A fresh owned ext4 version disk at the parent folder of `at`, and `tar` unpacked into `at` by the
     /// image's user before the command. Input goes through `stdin_pipe` in chunks up to 1 MiB: `stdin_bytes`
@@ -191,7 +199,9 @@ pub enum Waitable {
     Exec(ExecId),
 }
 
-/// `code` is `None` when the process was killed without one.
+/// `code` is `None` when there is none to give: the VM went away under the process, or the guest
+/// killed a healthcheck attempt at its `timeout`. A service ended by `stop` has the code it ended
+/// with, 137 after the kill at grace. `at` is when it ended, not when `wait` saw it.
 #[derive(Debug, Clone)]
 pub struct Exited {
     pub what: Waitable,

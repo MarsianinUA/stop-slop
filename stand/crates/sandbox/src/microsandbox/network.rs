@@ -6,6 +6,7 @@
 
 use std::collections::BTreeMap;
 use std::net::{Ipv4Addr, TcpListener};
+use std::ops::Range;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -16,9 +17,9 @@ use camino::{Utf8Path, Utf8PathBuf};
 use msb::sandbox::FsSetAttrs;
 
 use super::{GUEST_CALL, Live, backend, guest, process, within};
-use crate::{Fault, FaultMode, Launch, Outbound, SandboxError};
+use crate::{Exposed, Fault, FaultMode, Launch, Outbound, SandboxError};
 
-/// Root writes it: `net` its counters, the adapter its fault switch.
+/// Root writes it: `net` its counters, the adapter its fault switch, root's `tar` of `copy_out`.
 pub(super) const NET_DIR: &str = "/stand/net";
 const COUNTERS: &str = "counters.json";
 const FAULT: &str = "fault.json";
@@ -30,7 +31,11 @@ const HOSTS_END: &str = "# stop-slop-stand end";
 const MAX_NAMES: usize = 253;
 /// `net` reads the switch every 100 ms and says nothing back.
 const FAULT_SETTLE: Duration = Duration::from_millis(200);
-const FREE_PORT_TRIES: usize = 16;
+/// Below the ephemeral ports of Linux (from 32768), Windows and macOS (from 49152), from which the
+/// runtime takes the source port of each connection to a published port: a host port from there
+/// could be held by the stand's own traffic when a VM publishes it.
+const HOST_PORTS: Range<u16> = 20000..32768;
+const FREE_PORT_TRIES: usize = 64;
 
 /// The host side of `NET_DIR` in the adapter's folder of a VM.
 pub(super) fn net_dir(folder: &Utf8Path) -> Utf8PathBuf {
@@ -45,29 +50,55 @@ pub(super) fn counters(folder: &Utf8Path) -> Utf8PathBuf {
 /// peer already routes to it, and a later VM of the same replica publishes the same port. Two live
 /// VMs of one (service, replica) would clash on it, so `run` never holds them at once.
 #[derive(Default)]
-pub(super) struct Ports(BTreeMap<(String, u32, u16), u16>);
+pub(super) struct Ports {
+    given: BTreeMap<(String, u32, u16), u16>,
+    next: u16,
+}
 
 impl Ports {
     fn of(&mut self, service: &str, replica: u32, port: u16) -> Result<u16, SandboxError> {
         let key = (service.to_owned(), replica, port);
-        if let Some(host) = self.0.get(&key) {
+        if let Some(host) = self.given.get(&key) {
             return Ok(*host);
         }
-        // The listener closes at once, so the OS may give the same port again to a later key.
         for _ in 0..FREE_PORT_TRIES {
-            let host = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
-                .and_then(|listener| listener.local_addr())
-                .map_err(|error| backend(format!("find a free host port: {error}")))?
-                .port();
-            if !self.0.values().any(|&taken| taken == host) {
-                self.0.insert(key, host);
+            let host = HOST_PORTS.start + self.next % HOST_PORTS.len() as u16;
+            self.next = self.next.wrapping_add(1);
+            if !self.given.values().any(|&taken| taken == host) && free(host) {
+                self.given.insert(key, host);
                 return Ok(host);
             }
         }
         Err(backend(format!(
-            "no free host port the adapter has not given out, in {FREE_PORT_TRIES} tries"
+            "no free host port in {FREE_PORT_TRIES} tries of {HOST_PORTS:?}"
         )))
     }
+
+    /// (host, guest) per port the VM publishes. The SDK binds them only after `create` returns and
+    /// merely logs a port it cannot bind, so a port held at this point is refused here.
+    fn published(
+        &mut self,
+        service: &str,
+        replica: u32,
+        exposed: &[Exposed],
+    ) -> Result<Vec<(u16, u16)>, SandboxError> {
+        let mut published = Vec::with_capacity(exposed.len());
+        for &Exposed(port) in exposed {
+            let host = self.of(service, replica, port)?;
+            if !free(host) {
+                return Err(backend(format!(
+                    "host port {host} of `{service}` replica {replica} port {port} is in use: by \
+                     another live VM of that replica, or by another program"
+                )));
+            }
+            published.push((host, port));
+        }
+        Ok(published)
+    }
+}
+
+fn free(host: u16) -> bool {
+    TcpListener::bind((Ipv4Addr::LOCALHOST, host)).is_ok()
 }
 
 pub(super) struct Wiring {
@@ -78,16 +109,7 @@ pub(super) struct Wiring {
 }
 
 pub(super) fn wire(ports: &mut Ports, launch: &Launch) -> Result<Wiring, SandboxError> {
-    let published = launch
-        .ports
-        .iter()
-        .map(|exposed| {
-            Ok((
-                ports.of(&launch.service, launch.replica, exposed.0)?,
-                exposed.0,
-            ))
-        })
-        .collect::<Result<Vec<_>, SandboxError>>()?;
+    let published = ports.published(&launch.service, launch.replica, &launch.ports)?;
     let mut peers: Vec<_> = launch.peers.iter().collect();
     peers.sort_by(|a, b| a.service.cmp(&b.service));
     if peers.len() > MAX_NAMES {
@@ -298,6 +320,31 @@ mod tests {
         distinct.sort_unstable();
         distinct.dedup();
         assert_eq!(distinct.len(), given.len(), "{given:?}");
+        assert!(
+            given.iter().all(|port| HOST_PORTS.contains(port)),
+            "{given:?}"
+        );
         assert_eq!(ports.of("srv", 7, 8080).unwrap(), given[6]);
+    }
+
+    #[test]
+    fn a_host_port_in_use_at_create_is_refused() {
+        // Away from the ports the other test tries at the same time.
+        let mut ports = Ports {
+            next: 4096,
+            ..Ports::default()
+        };
+        let exposed = [Exposed(8080)];
+        let [(host, 8080)] = ports.published("srv", 1, &exposed).unwrap()[..] else {
+            panic!("one port");
+        };
+        let held = TcpListener::bind((Ipv4Addr::LOCALHOST, host)).unwrap();
+        let refused = ports.published("srv", 1, &exposed);
+        assert!(
+            matches!(refused, Err(SandboxError::Backend { .. })),
+            "{refused:?}"
+        );
+        drop(held);
+        assert_eq!(ports.published("srv", 1, &exposed).unwrap(), [(host, 8080)]);
     }
 }

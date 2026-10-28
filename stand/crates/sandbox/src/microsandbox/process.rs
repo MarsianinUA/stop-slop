@@ -16,7 +16,7 @@ use microsandbox_image::{GlobalCache, Reference};
 use msb::jobs::{Job, JobInfo, JobLogOptions, JobState};
 use msb::sandbox::{ExecOptionsBuilder, FsSetAttrs};
 
-use super::{GUEST_CALL, Live, POLL, backend, guest, guest_error, within};
+use super::{GUEST_CALL, Live, POLL, backend, exec_error, guest, guest_error, network, within};
 use crate::{ExecOutcome, ImageRef, Launch, Mount, SandboxError, Stopped};
 
 /// Where `run` keeps its status file: the service's user writes it, so it is a bind of its own and
@@ -25,8 +25,9 @@ pub(super) const RUN_DIR: &str = "/stand/run";
 const STATUS: &str = "status.json";
 /// Room for `stand-guest` to act at its own deadline and report before the SDK gives up.
 const MARGIN: Duration = Duration::from_secs(10);
-/// Outside any folder a service would ask for, and gone right after the copy.
-const COPY_TAR: &str = "/tmp/stop-slop-stand-copy.tar";
+/// In `/stand/net`, where only root writes: a link the service's user put at a name in a folder of
+/// its own could turn root's write anywhere. The tar reaches the host through the bind.
+const COPY_TAR: &str = "copy.tar";
 const STOP_SIGNAL: &str = "SIGTERM";
 const COPY: Duration = Duration::from_secs(300);
 /// `run` passes on its command's output for at most 1 s after the end.
@@ -215,21 +216,37 @@ pub(super) async fn service_code(live: &Live, info: &JobInfo) -> Result<Option<i
     }
 }
 
-/// Healthcheck attempts, as the image's user with the VM's env.
-pub(super) async fn exec_detached(live: &Live, argv: &[String]) -> Result<Job, SandboxError> {
+/// Healthcheck attempts, as the image's user with the VM's env. At `timeout` the SDK's runtime marks
+/// the job timed out and has the agent kill its process group. `None`: the program did not start,
+/// which Docker counts as a failed attempt, not as an error.
+pub(super) async fn exec_detached(
+    live: &Live,
+    argv: &[String],
+    timeout: Duration,
+) -> Result<Option<Job>, SandboxError> {
     let (program, args) = argv
         .split_first()
         .ok_or_else(|| backend("an empty healthcheck command"))?;
     let args = args.to_vec();
+    // The runtime refuses a timeout of 0; an attempt with no time left dies at once.
+    let timeout = timeout.max(Duration::from_millis(1));
     let start = live.vm.exec_detached_with(program.clone(), |options| {
-        with_env(options.args(args).stdin_null(), &live.launch, &live.image)
+        let options = options.args(args).stdin_null().timeout(timeout);
+        with_env(options, &live.launch, &live.image)
     });
-    within(GUEST_CALL, "start a healthcheck", start)
-        .await?
-        .map_err(backend)
+    match within(GUEST_CALL, "start a healthcheck", start).await? {
+        Ok(job) => Ok(Some(job)),
+        Err(msb::JobError::Operation { code, .. }) if code == "exec_failed" => Ok(None),
+        Err(error) => Err(backend(error)),
+    }
 }
 
 pub(super) async fn stop(live: &Live) -> Result<Stopped, SandboxError> {
+    // `create` returns once `run` wrote the file, so without it the command never started, and
+    // `stand-guest stop` would fail on the missing file.
+    if !run_dir(&live.folder).join(STATUS).exists() {
+        return Ok(Stopped::default());
+    }
     let grace = live.launch.stop_grace;
     let args = Command::Stop(StopArgs {
         status: status_in_guest(),
@@ -420,19 +437,22 @@ pub(super) async fn copy_out(
             "{host}: not empty, copy_out takes an empty folder"
         )));
     }
-    let args = ["-c", "-f", COPY_TAR, "-C", guest, "."].map(str::to_owned);
+    let tar = format!("{}/{COPY_TAR}", network::NET_DIR);
+    let args = ["-c", "-f", &tar, "-C", guest, "."].map(str::to_owned);
     let packed = root(&live.vm, "tar", args.to_vec(), COPY).await?;
-    if packed.status().code != 0 {
-        return Err(guest_failed(&format!("tar -c of {guest}"), &packed));
-    }
-    let staged = live.folder.join("copy.tar");
+    let unpacked = (packed.status().code == 0).then(|| {
+        let staged = network::net_dir(&live.folder).join(COPY_TAR);
+        std::fs::File::open(&staged).and_then(|file| tar::Archive::new(file).unpack(host))
+    });
+    // Through the agent, so the guest's view of the bind never keeps a file the host removed.
     let fs = live.vm.fs();
-    let copied = within(COPY, "copy a tar out", fs.copy_to_host(COPY_TAR, &staged)).await;
-    let _ = within(GUEST_CALL, "remove the copied tar", fs.remove(COPY_TAR)).await;
-    copied?.map_err(backend)?;
-    let unpacked = std::fs::File::open(&staged).and_then(|tar| tar::Archive::new(tar).unpack(host));
-    let _ = std::fs::remove_file(&staged);
-    unpacked.map_err(|error| backend(format!("unpack {guest} into {host}: {error}")))
+    let _ = within(GUEST_CALL, "remove the tar", fs.remove(&tar)).await;
+    match unpacked {
+        None => Err(guest_failed(&format!("tar -c of {guest}"), &packed)),
+        Some(unpacked) => {
+            unpacked.map_err(|error| backend(format!("unpack {guest} into {host}: {error}")))
+        }
+    }
 }
 
 pub(super) async fn root(
@@ -458,7 +478,7 @@ async fn run_for(
     let call = vm.exec_with(program, |given| options(given).timeout(limit));
     within(limit + MARGIN, program, call)
         .await?
-        .map_err(backend)
+        .map_err(exec_error)
 }
 
 /// `Ok(None)` once `file` shows on the host; the job's state when it ended without it.
