@@ -465,7 +465,9 @@ max = 4
 
 - Each rule has the fixtures above.
 - Each crate has its own tests. The base search runs on temporary git repositories: a stack of three branches, a descendant branch, a parent squash-merged into the base.
-- CI runs `cargo fmt --check`, `rustfmt --check` on every `check.rs`, `cargo clippy --workspace --all-targets -- -D warnings` and `cargo test --workspace` on Ubuntu, macOS and Windows.
+- CI has two jobs, each on Ubuntu, macOS and Windows. A change in `shared/` runs both.
+  - The linter's job, `ci.yml`, runs on changes outside `stand/`: `cargo fmt --check`, `rustfmt --check` on every `check.rs`, `cargo clippy --workspace --all-targets -- -D warnings` and `cargo test --workspace`.
+  - The stand's job, `stand.yml`, runs on changes in `stand/`: `cargo fmt --check`, `cargo clippy --workspace --all-targets -- -D warnings` and `cargo test --workspace` in `stand/`, with Node 22 for the tests of the preload.
 - I measure speed by hand with `check --all` on a real repository, read-only.
 
 ## Speed
@@ -484,9 +486,11 @@ I measured this in October 2026 with all 103 rules, a release build, Windows 11 
 
 ```text
 stop-slop/
-  Cargo.toml        the workspace
+  Cargo.toml        the linter's workspace
   .gitattributes    *.ts text eol=lf, so fixtures compare the same on Windows
-  .github/workflows/ci.yml
+  .github/workflows/
+    ci.yml          the linter's checks
+    stand.yml       the stand's checks
   crates/
     cli/            commands, flags, text and JSON output, the hook
     repo/           git and the disk: a snapshot of files (the working tree or a revision)
