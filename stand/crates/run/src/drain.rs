@@ -1,15 +1,19 @@
 //! The end of a phase: the cut, the clean stop of every long-running service, the sizes before a
-//! snapshot, then the drain (logs) and `destroy`; after it a VM gives nothing.
+//! snapshot, then the drain (logs, the profile chunks by one `copy_out`) and `destroy`; after it
+//! a VM gives nothing, so the profiles are read on the host.
 
 use std::collections::BTreeMap;
 use std::fs;
 
 use camino::{Utf8Path, Utf8PathBuf};
+use profile::{Coverage, PathMap, ProfileError};
+use report::ProfileOutcome;
 use sandbox::{Metrics, Mount, Sandbox, SandboxError, SandboxId, SnapshotId, Stopped};
 use serde::Serialize;
 use spec::ServiceKind;
 
 use crate::StandFault;
+use crate::launch::PROFILE;
 use crate::ready::{Fleet, Member};
 
 /// One member at the cut: the end of the measured window.
@@ -67,11 +71,20 @@ pub(crate) fn has_volume(member: &Member) -> bool {
         .any(|mount| matches!(mount, Mount::Volume { .. }))
 }
 
+pub(crate) fn is_profiled(member: &Member) -> bool {
+    let mut mounts = member.launch.mounts.iter();
+    mounts.any(|mount| matches!(mount, Mount::Scratch { guest } if guest == PROFILE))
+}
+
 pub(crate) fn log_path(dir: &Utf8Path, member: &Member) -> Utf8PathBuf {
     dir.join(format!(
         "{}-{}.log",
         member.launch.service, member.launch.replica
     ))
+}
+
+fn profile_dir(dir: &Utf8Path, service: &str, replica: u32) -> Utf8PathBuf {
+    dir.join("profile").join(format!("{service}-{replica}"))
 }
 
 #[derive(Serialize)]
@@ -110,8 +123,8 @@ pub(crate) fn write_metrics(
     fs::write(&path, bytes).map_err(StandFault::io(&path))
 }
 
-/// Logs, then `destroy`, member by member: on an error the members not yet destroyed stay in
-/// `fleet` for `teardown`.
+/// Logs, the profile chunks of a profiled member, then `destroy`, member by member: on an error
+/// the members not yet destroyed stay in `fleet` for `teardown`.
 pub(crate) fn drain(
     sandbox: &impl Sandbox,
     fleet: &mut Fleet,
@@ -121,6 +134,14 @@ pub(crate) fn drain(
         let log = log_path(dir, member);
         let bytes = sandbox.logs(&member.id).map_err(StandFault::Sandbox)?;
         fs::write(&log, bytes).map_err(StandFault::io(&log))?;
+        if is_profiled(member) {
+            // `copy_out` takes an existing empty folder.
+            let host = profile_dir(dir, &member.launch.service, member.launch.replica);
+            fs::create_dir_all(&host).map_err(StandFault::io(&host))?;
+            sandbox
+                .copy_out(&member.id, PROFILE, &host)
+                .map_err(StandFault::Sandbox)?;
+        }
         sandbox.destroy(&member.id).map_err(StandFault::Sandbox)?;
         fleet.members.remove(0);
     }
@@ -135,5 +156,33 @@ pub(crate) fn teardown(sandbox: &impl Sandbox, fleet: &mut Fleet, dir: &Utf8Path
             let _ = fs::write(log_path(dir, &member), bytes);
         }
         let _ = sandbox.destroy(&member.id);
+    }
+}
+
+/// The CPU samples of a profiled instance of a measured repeat, after its `destroy`.
+pub(crate) fn samples(
+    dir: &Utf8Path,
+    service: &str,
+    replica: u32,
+) -> Result<ProfileOutcome, StandFault> {
+    let paths = PathMap::new(spec::TREE);
+    match profile::read(&profile_dir(dir, service, replica), &paths) {
+        Ok(samples) => Ok(ProfileOutcome::Read(samples)),
+        Err(ProfileError::NoProfile) => Ok(ProfileOutcome::NoProfile),
+        Err(error) => Err(StandFault::Profile(error)),
+    }
+}
+
+/// The calls of a profiled instance of the coverage repeat; a replica without chunks adds none.
+pub(crate) fn coverage(
+    dir: &Utf8Path,
+    service: &str,
+    replica: u32,
+) -> Result<Coverage, StandFault> {
+    let paths = PathMap::new(spec::TREE);
+    match profile::read_coverage(&profile_dir(dir, service, replica), &paths) {
+        Ok(coverage) => Ok(coverage),
+        Err(ProfileError::NoProfile) => Ok(Coverage::default()),
+        Err(error) => Err(StandFault::Profile(error)),
     }
 }

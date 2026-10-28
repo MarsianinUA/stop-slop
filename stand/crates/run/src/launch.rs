@@ -6,12 +6,15 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
 
 use camino::Utf8Path;
+use profile::{ProfileMode, node_env};
 use sandbox::{Exposed, ImageRef, Launch, Mount, Outbound, Peer, Seed, SnapshotId, VolumeName};
 use spec::{Profiler, Service, ServiceKind, ServiceName, Stand};
 
 use crate::ready::{Health, Start};
 
 const OUT: &str = "/stand/out";
+const PRELOAD: &str = "/stand/preload";
+pub(crate) const PROFILE: &str = "/stand/profile";
 
 /// What the VMs of a version start from once its setup passed.
 #[derive(Debug, Default)]
@@ -34,6 +37,10 @@ pub(crate) struct Frame<'a> {
     pub(crate) out: &'a Utf8Path,
     pub(crate) tar: &'a Utf8Path,
     pub(crate) seeds: &'a Seeds,
+    /// `None` in setup: only the repeats are measured.
+    pub(crate) mode: Option<ProfileMode>,
+    /// The host folder of `/stand/preload`.
+    pub(crate) preload: &'a Utf8Path,
     pub(crate) span: Duration,
 }
 
@@ -104,6 +111,7 @@ pub(crate) fn starts(stand: &Stand, level: &[&ServiceName], frame: &Frame) -> Ve
 
 pub(crate) fn of(stand: &Stand, name: &ServiceName, replica: u32, frame: &Frame) -> Launch {
     let service = &stand.services[name];
+    let mut env = service.environment.clone();
     let mut mounts = Vec::new();
     for mount in &service.mounts {
         match mount {
@@ -131,13 +139,26 @@ pub(crate) fn of(stand: &Stand, name: &ServiceName, replica: u32, frame: &Frame)
             read_only: false,
         });
     }
+    if let (Some(mode), Some(Profiler::Node)) = (frame.mode, profiler(service)) {
+        mounts.push(Mount::Bind {
+            host: frame.preload.to_owned(),
+            guest: PRELOAD.to_owned(),
+            read_only: true,
+        });
+        mounts.push(Mount::Scratch {
+            guest: PROFILE.to_owned(),
+        });
+        let inherited = env.get("NODE_OPTIONS").cloned();
+        let vars = node_env(PRELOAD, PROFILE, inherited.as_deref(), mode).into_vars();
+        env.extend(vars.map(|(key, value)| (key.to_owned(), value)));
+    }
     Launch {
         service: name.as_str().to_owned(),
         replica,
         image: ImageRef::new(&service.image),
         cpus: service.cpus.get().div_ceil(1000),
         memory: service.memory.get(),
-        env: service.environment.clone(),
+        env,
         workdir: service.working_dir.clone(),
         entrypoint: service.entrypoint.clone(),
         command: service.command.clone(),

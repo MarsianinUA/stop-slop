@@ -122,8 +122,8 @@ impl Cancel {
 }
 
 /// `phase` is the step the run was in, for `failure.phase` of the line on exit 3 and 130: `Setup`
-/// in the setup of a version, `Ready` in a repeat before the batch with the workload is created,
-/// `Workload` from it to the end of the repeat and at the end of the run.
+/// in the setup of a version and before the first one, `Ready` in a repeat before the batch with
+/// the workload is created, `Workload` from it to the end of the repeat and at the end of the run.
 #[derive(Debug, thiserror::Error)]
 pub enum RunError {
     #[error("the app failed")]

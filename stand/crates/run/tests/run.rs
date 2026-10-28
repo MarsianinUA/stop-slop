@@ -7,7 +7,10 @@ use std::fs;
 use std::time::{Duration, Instant};
 
 use camino::{Utf8Path, Utf8PathBuf};
-use report::{BeforeOutcome, Cause, Phase, ProbeRan, Raw, Role};
+use profile::ProfileError;
+use report::{
+    BeforeOutcome, Cause, CoverageOutcome, Failure, Phase, ProbeRan, ProfileOutcome, Raw, Role,
+};
 use run::{Cancel, RunError, SetupCache, Side, StandFault, Version, Versions};
 use sandbox::{
     Call, ExecId, ExecOutcome, Exited, Fake, Fault, ImageRef, Launch, Leftovers, Metrics, Mount,
@@ -353,7 +356,12 @@ fn the_prepare_service_unpacks_the_tree_and_its_snapshot_seeds_the_other_tree_se
         let api = made
             .iter()
             .filter(|(launch, _)| launch.service == "api" && restores(launch));
-        assert_eq!(api.count(), 2 * 3, "replicas x repeats");
+        let coverage = usize::from(side == Side::Head);
+        assert_eq!(
+            api.count(),
+            2 * (3 + coverage),
+            "replicas x repeats, and the coverage repeat of the head"
+        );
         // The version snapshot comes after the prepare service exited, before `migrate` starts.
         let taken = index_of(
             &journal,
@@ -368,10 +376,9 @@ fn the_prepare_service_unpacks_the_tree_and_its_snapshot_seeds_the_other_tree_se
     assert_clean(&fake, &[]);
 }
 
-#[test]
-fn without_a_prepare_service_every_tree_service_unpacks_the_tree() {
-    // `api` runs in setup, for `fill`, and in both repeats; no setup service mounts the tree.
-    let recipe = r#"
+/// No prepare service: the profiled `api` runs in setup, for `fill`, and in every repeat; the
+/// setup service `fill` says `profile` too. No setup service mounts the tree.
+const NO_PREPARE: &str = r#"
 services:
   api:
     image: node:22
@@ -379,11 +386,13 @@ services:
     expose: [3000]
     healthcheck: { test: ["CMD", "true"], interval: 1s }
     deploy: { resources: { limits: { cpus: "1", memory: 512m } } }
+    x-stand: { profile: node }
   fill:
     image: node:22
     command: ["node", "fill.js", "http://api:3000"]
     depends_on: { api: { condition: service_healthy } }
     deploy: { resources: { limits: { cpus: "1", memory: 512m } } }
+    x-stand: { profile: node }
   load:
     image: node:22
     depends_on:
@@ -392,20 +401,31 @@ services:
     deploy: { resources: { limits: { cpus: "1", memory: 512m } } }
 x-stand: { workload: load, repeat: 2 }
 "#;
-    let case = Case::new(recipe);
-    assert!(case.stand.prepare.is_none());
-    let fake = fake(vec![
+
+fn no_prepare_rules() -> Vec<Rule> {
+    vec![
         rule("api", stops(SECOND)),
         rule("fill", exits(0, 2 * SECOND)),
         rule("load", exits(0, 5 * SECOND)),
-    ]);
+    ]
+}
+
+#[test]
+fn without_a_prepare_service_every_tree_service_unpacks_the_tree() {
+    let case = Case::new(NO_PREPARE);
+    assert!(case.stand.prepare.is_none());
+    let fake = fake(no_prepare_rules());
     case.run(&fake, &case.versions(false)).unwrap();
     let journal = fake.journal();
     let api: Vec<_> = created(&journal)
         .into_iter()
         .filter(|(launch, _)| launch.service == "api")
         .collect();
-    assert_eq!(api.len(), 1 + 2);
+    assert_eq!(
+        api.len(),
+        1 + 2 + 1,
+        "setup, the repeats, the coverage repeat"
+    );
     for (launch, _) in api {
         assert!(matches!(launch.seed, Some(Seed::Tree { tar, .. }) if tar == case.tar(Side::Head)));
     }
@@ -906,6 +926,25 @@ x-stand: { workload: load }
             .any(|call| matches!(call, Call::Snapshot { .. }))
     );
     assert_left(&fake, &[]);
+
+    // `preload` in the run folder is a file: the preload of `api` cannot be written, and nothing
+    // starts.
+    let case = Case::new(EXAMPLE);
+    let preload = case.run_dir().join("preload");
+    fs::write(&preload, b"").unwrap();
+    let blocked = crate::fake(example_rules());
+    let result = case.run(&blocked, &case.versions(false));
+    assert!(
+        matches!(
+            &result,
+            Err(RunError::Stand {
+                phase: Phase::Setup,
+                fault: StandFault::Io { path, .. },
+            }) if *path == preload
+        ),
+        "{result:?}"
+    );
+    assert!(blocked.journal().is_empty());
 }
 
 #[test]
@@ -995,6 +1034,7 @@ fn a_failure_of_before_stops_only_its_lane() {
         "repeat-1-head",
         "repeat-2-head",
         "repeat-3-head",
+        "coverage",
     ];
     assert_eq!(workload_folders(&case, &dying.journal()), repeats);
     assert!(case.run_dir().join("repeat-1-before/api-1.log").is_file());
@@ -1042,10 +1082,11 @@ fn setup_runs_once_and_the_repeats_start_from_its_snapshots_by_levels() {
     let numbers: Vec<u32> = raw.head.iter().map(|output| output.repeat).collect();
     assert_eq!(numbers, [1, 2, 3]);
     let journal = fake.journal();
-    // Setup, then each repeat by levels: `db`, the two `api`, `load`; setup services once.
+    // Setup, then each repeat by levels: `db`, the two `api`, `load`; setup services once. The
+    // coverage repeat comes last.
     let repeat = ["db-1", "api-1", "api-2", "load-1"];
     let mut expected = vec!["db-1", "prepare-1", "migrate-1"];
-    for _ in 0..3 {
+    for _ in 0..3 + 1 {
         expected.extend(repeat);
     }
     assert_eq!(services(&journal), expected);
@@ -1120,6 +1161,7 @@ fn with_before_the_repeats_take_turns_and_the_harness_is_the_same() {
         "repeat-2-head",
         "repeat-3-before",
         "repeat-3-head",
+        "coverage",
     ];
     assert_eq!(workload_folders(&case, &journal), turns);
     // Each `db` of a repeat starts from the setup snapshot of its own version.
@@ -1331,9 +1373,10 @@ fn every_repeat_ends_with_the_stop_of_each_long_running_service_dependents_first
             _ => None,
         })
         .collect();
-    // Setup stops `db`; each repeat the two `api` in reverse, then `db`; the workload never.
+    // Setup stops `db`; each repeat, the coverage repeat too, the two `api` in reverse, then `db`;
+    // the workload never.
     let mut expected = vec!["db-1"];
-    for _ in 0..3 {
+    for _ in 0..3 + 1 {
         expected.extend(["api-2", "api-1", "db-1"]);
     }
     let names: Vec<&str> = stops.iter().map(|(_, name)| name.as_str()).collect();
@@ -1878,6 +1921,420 @@ fn stand_out_goes_to_the_workload_and_every_service_with_a_probe() {
         }
         let probed: BTreeSet<String> = probed.iter().map(|name| name.to_string()).collect();
         assert_eq!(bound, probed);
+        assert_clean(&fake, &[]);
+    }
+}
+
+// --- profiles and the coverage repeat ----------------------------------------------------------
+
+/// One chunk of a Node process: `order` at 5:16 of `dist/main.js` in the tree, three samples of
+/// 1 ms.
+const CPU_PROFILE: &str = r#"{"nodes":[{"id":1,"callFrame":{"functionName":"(root)","scriptId":"0","url":"","lineNumber":-1,"columnNumber":-1},"children":[2]},{"id":2,"callFrame":{"functionName":"order","scriptId":"1","url":"file:///w/app/dist/main.js","lineNumber":4,"columnNumber":15}}],"startTime":0,"endTime":4000,"samples":[2,2,2],"timeDeltas":[1000,1000,1000]}"#;
+
+/// One coverage chunk of the same process: three calls of `order`.
+const COVERAGE_CHUNK: &str = r#"[{"url":"file:///w/app/dist/main.js","functions":[{"functionName":"order","ranges":[{"count":3}],"line":4,"column":15}]}]"#;
+
+/// `example_rules` with an `api` whose one Node process leaves `files` in `/stand/profile`.
+fn chunks(files: &[(&str, &str)]) -> Vec<Rule> {
+    let mut writes = vec![("/stand/profile/1.start.json".to_owned(), b"{}".to_vec())];
+    for (name, text) in files {
+        writes.push((format!("/stand/profile/{name}"), text.as_bytes().to_vec()));
+    }
+    let api = Script {
+        writes,
+        ..stops(100 * Duration::from_millis(1))
+    };
+    with("api", api)
+}
+
+/// The host folder of the read-only `/stand/preload` bind of `launch`, and whether it has the
+/// `Scratch` folder `/stand/profile`.
+fn profile_mounts(launch: &Launch) -> (Option<&Utf8Path>, bool) {
+    let preload = launch.mounts.iter().find_map(|mount| match mount {
+        Mount::Bind {
+            host,
+            guest,
+            read_only: true,
+        } if guest == "/stand/preload" => Some(host.as_path()),
+        _ => None,
+    });
+    let scratch = launch
+        .mounts
+        .iter()
+        .any(|mount| matches!(mount, Mount::Scratch { guest } if guest == "/stand/profile"));
+    (preload, scratch)
+}
+
+fn snapshot_of(journal: &[Call], id: &SandboxId) -> SnapshotId {
+    let taken = journal.iter().find_map(|call| match call {
+        Call::Snapshot { id: of, snapshot } if of == id => snapshot.clone(),
+        _ => None,
+    });
+    taken.unwrap_or_else(|| panic!("no snapshot of {id}"))
+}
+
+#[test]
+fn a_profiled_service_gets_the_preload_its_chunks_folder_and_its_node_options_after_the_preload() {
+    let case = Case::new(EXAMPLE);
+    let fake = fake(example_rules());
+    case.run(&fake, &case.versions(true)).unwrap();
+    let preload = case.run_dir().join("preload");
+    assert_eq!(
+        fs::read_to_string(preload.join("preload.cjs")).unwrap(),
+        profile::PRELOAD
+    );
+    let mut modes = Vec::new();
+    for (launch, _) in created(&fake.journal()) {
+        if launch.service != "api" {
+            assert_eq!(profile_mounts(&launch), (None, false), "{}", launch.service);
+            assert!(
+                !launch.env.contains_key("NODE_OPTIONS"),
+                "{}",
+                launch.service
+            );
+            continue;
+        }
+        assert_eq!(profile_mounts(&launch), (Some(preload.as_path()), true));
+        assert_eq!(
+            launch.env["NODE_OPTIONS"],
+            r#"--require "/stand/preload/preload.cjs" --max-old-space-size=512"#
+        );
+        assert_eq!(launch.env["STOP_SLOP_PROFILE_DIR"], "/stand/profile");
+        modes.push(launch.env["STOP_SLOP_PROFILE_MODE"].clone());
+    }
+    // Both replicas in each of the six measured repeats, then in the coverage repeat.
+    let mut expected = vec!["cpu"; 2 * 6];
+    expected.extend(["coverage"; 2]);
+    assert_eq!(modes, expected);
+    assert_clean(&fake, &[]);
+
+    // `api` gets no preload in setup, and the setup service `fill` never does.
+    let case = Case::new(NO_PREPARE);
+    let fake = crate::fake(no_prepare_rules());
+    case.run(&fake, &case.versions(false)).unwrap();
+    let preload = case.run_dir().join("preload");
+    let mut profiled = Vec::new();
+    for (launch, _) in created(&fake.journal()) {
+        let (bound, scratch) = profile_mounts(&launch);
+        assert_eq!(
+            bound,
+            scratch.then_some(preload.as_path()),
+            "{}",
+            launch.service
+        );
+        if scratch {
+            let options = &launch.env["NODE_OPTIONS"];
+            assert_eq!(options, r#"--require "/stand/preload/preload.cjs""#);
+        }
+        profiled.push((launch.service, scratch));
+    }
+    let expected = [
+        ("api", false),
+        ("fill", false),
+        ("api", true),
+        ("load", false),
+        ("api", true),
+        ("load", false),
+        ("api", true),
+        ("load", false),
+    ];
+    let expected: Vec<(String, bool)> = expected
+        .iter()
+        .map(|(service, scratch)| (service.to_string(), *scratch))
+        .collect();
+    assert_eq!(profiled, expected);
+    assert_clean(&fake, &[]);
+}
+
+#[test]
+fn the_chunks_come_out_before_destroy_and_an_empty_folder_is_no_profile() {
+    // `api` leaves no chunk: each of its folders comes out empty.
+    let case = Case::new(EXAMPLE);
+    let fake = fake(example_rules());
+    let raw = case.run(&fake, &case.versions(false)).unwrap();
+    let journal = fake.journal();
+    let mut hosts = Vec::new();
+    for (index, call) in journal.iter().enumerate() {
+        let Call::CopyOut { id, guest, host } = call else {
+            continue;
+        };
+        assert_eq!(guest, "/stand/profile");
+        let stopped = index_of(
+            &journal,
+            |call| matches!(call, Call::Stop(made) if made == id),
+        );
+        let gone = index_of(
+            &journal,
+            |call| matches!(call, Call::Destroy(made) if made == id),
+        );
+        assert!(stopped < index && index < gone, "{host}");
+        assert!(host.is_dir(), "{host}");
+        hosts.push(host.clone());
+    }
+    let mut expected = Vec::new();
+    for phase in [
+        "repeat-1-head",
+        "repeat-2-head",
+        "repeat-3-head",
+        "coverage",
+    ] {
+        for replica in [1, 2] {
+            let folder = case.run_dir().join(phase).join("profile");
+            expected.push(folder.join(format!("api-{replica}")));
+        }
+    }
+    assert_eq!(hosts, expected);
+    for output in &raw.head {
+        for instance in &output.instances {
+            match instance.service.as_str() {
+                "api" => assert!(matches!(instance.profile, Some(ProfileOutcome::NoProfile))),
+                _ => assert!(instance.profile.is_none(), "{}", instance.service),
+            }
+        }
+    }
+    assert_clean(&fake, &[]);
+
+    // A chunk comes out and is read on the host, with paths from the repo root; a failed repeat
+    // brings its chunks out too.
+    let cases = [example_rules(), with("load", exits(3, SECOND))];
+    for rules in cases {
+        let case = Case::new(EXAMPLE);
+        let load = rules.iter().find(|rule| rule.service == "load").unwrap();
+        let mut rules = chunks(&[("1.0.cpuprofile", CPU_PROFILE)]);
+        rules.retain(|rule| rule.service != "load");
+        rules.push(load.clone());
+        let fake = crate::fake(rules);
+        let head = match case.run(&fake, &case.versions(false)) {
+            Ok(raw) => raw.head,
+            Err(RunError::App(failed)) => failed.raw.head,
+            Err(other) => panic!("{other:?}"),
+        };
+        for output in &head {
+            let api = output
+                .instances
+                .iter()
+                .filter(|instance| instance.service == "api");
+            for instance in api {
+                let Some(ProfileOutcome::Read(samples)) = &instance.profile else {
+                    panic!("api-{}: {:?}", instance.replica, instance.profile)
+                };
+                let functions: Vec<(&str, u32, u32, &str, f64)> = samples
+                    .functions
+                    .iter()
+                    .map(|f| {
+                        (
+                            f.file.as_str(),
+                            f.line,
+                            f.column,
+                            f.name.as_str(),
+                            f.self_ms,
+                        )
+                    })
+                    .collect();
+                assert_eq!(functions, [("dist/main.js", 5, 16, "order", 3.0)]);
+                assert_eq!(samples.processes, 1);
+            }
+        }
+        assert_clean(&fake, &[]);
+    }
+
+    // A chunk the host cannot read breaks the stand: in the first measured repeat, and, as a
+    // coverage chunk, which a CPU read leaves alone, in the coverage repeat.
+    let cases = [
+        ("1.0.cpuprofile", "repeat-1-head"),
+        ("1.0.coverage.json", "coverage"),
+    ];
+    for (file, phase) in cases {
+        let case = Case::new(EXAMPLE);
+        let fake = crate::fake(chunks(&[(file, "{")]));
+        let result = case.run(&fake, &case.versions(false));
+        assert!(
+            matches!(
+                &result,
+                Err(RunError::Stand {
+                    phase: Phase::Workload,
+                    fault: StandFault::Profile(ProfileError::BadProfile { path, .. }),
+                }) if path.starts_with(case.run_dir().join(phase))
+            ),
+            "{file}: {result:?}"
+        );
+        assert_clean(&fake, &[]);
+    }
+}
+
+#[test]
+fn the_coverage_repeat_runs_once_for_the_head_with_its_longer_timeout() {
+    let case = Case::new(EXAMPLE);
+    let fake = fake(chunks(&[("1.0.coverage.json", COVERAGE_CHUNK)]));
+    let raw = case.run(&fake, &case.versions(true)).unwrap();
+    assert_eq!(
+        raw.head.len(),
+        3,
+        "the coverage repeat is not a measured one"
+    );
+    let Some(BeforeOutcome::Passed(before)) = &raw.before else {
+        panic!("{:?}", raw.before)
+    };
+    assert_eq!(before.len(), 3);
+    // The calls of the two replicas add up.
+    let Some(CoverageOutcome::Read(calls)) = &raw.coverage else {
+        panic!("{:?}", raw.coverage)
+    };
+    let mut called = Vec::new();
+    for (service, coverage) in calls {
+        for c in &coverage.called {
+            let at = (c.file.as_str(), c.line, c.column, c.name.as_str());
+            called.push((service.as_str(), at, c.calls));
+        }
+    }
+    assert_eq!(called, [("api", ("dist/main.js", 5, 16, "order"), 6)]);
+    // Last, once, from the snapshots of the head: its setup snapshot of `db`, its version snapshot.
+    let journal = fake.journal();
+    let made = created(&journal);
+    let coverage = case.run_dir().join("coverage");
+    let last = &made[made.len() - 4..];
+    let names: Vec<String> = last
+        .iter()
+        .map(|(launch, _)| format!("{}-{}", launch.service, launch.replica))
+        .collect();
+    assert_eq!(names, ["db-1", "api-1", "api-2", "load-1"]);
+    assert_eq!(out_of(&last[3].0), Some(coverage.join("out").as_path()));
+    let setup_head = case.run_dir().join("setup-head");
+    let in_setup = |service: &str| {
+        let found = made.iter().find(|(launch, _)| {
+            launch.service == service
+                && match &launch.seed {
+                    Some(Seed::Tree { tar, .. }) => *tar == case.tar(Side::Head),
+                    None => out_of(launch).is_some_and(|out| out.starts_with(&setup_head)),
+                    Some(Seed::Snapshot(_)) => false,
+                }
+        });
+        found.unwrap().1.clone()
+    };
+    let db = snapshot_of(&journal, &in_setup("db"));
+    let version = snapshot_of(&journal, &in_setup("prepare"));
+    for ((launch, _), seed) in last[..3].iter().zip([&db, &version, &version]) {
+        let restores = matches!(&launch.seed, Some(Seed::Snapshot(id)) if id == seed);
+        assert!(restores, "{}-{}", launch.service, launch.replica);
+    }
+    let folders = workload_folders(&case, &journal);
+    assert_eq!(
+        folders
+            .iter()
+            .filter(|folder| *folder == "coverage")
+            .count(),
+        1
+    );
+    // No probe, and a whole end: logs, `metrics.json`, the chunks.
+    assert!(
+        execs(&journal)
+            .iter()
+            .all(|(_, stdout, _)| !stdout.starts_with(&coverage))
+    );
+    assert!(coverage.join("metrics.json").is_file());
+    assert!(coverage.join("api-2.log").is_file());
+    assert!(coverage.join("profile/api-2/1.0.coverage.json").is_file());
+    assert_clean(&fake, &[]);
+
+    // Its workload never ends: the repeat ends at 1.5 x `timeout` from its start.
+    let case = Case::new(EXAMPLE);
+    let fake = crate::fake(example_rules());
+    let sandbox = Hooked {
+        hang: Some(("load", 3 + 1)),
+        ..Hooked::new(&fake)
+    };
+    let raw = sandbox.run(&case, &case.versions(false)).unwrap();
+    assert!(matches!(raw.coverage, Some(CoverageOutcome::Failed(_))));
+    let journal = fake.journal();
+    let db = &created(&journal)[3 + 4 * 3].1;
+    let start = index_of(
+        &journal,
+        |call| matches!(call, Call::Create { ids, .. } if ids.contains(db)),
+    );
+    let waits: Vec<Instant> = journal[start..]
+        .iter()
+        .filter_map(|call| match call {
+            Call::Wait { deadline, .. } => Some(*deadline),
+            _ => None,
+        })
+        .collect();
+    // The first wait ends a chunk of 1 s after the start, the last one at the deadline.
+    assert_eq!(*waits.iter().max().unwrap() - waits[0], (450 - 1) * SECOND);
+    assert_clean(&fake, &[]);
+}
+
+#[test]
+fn a_coverage_repeat_past_one_and_a_half_timeout_is_a_fact_and_the_run_passes() {
+    // The workload of the coverage repeat never ends; `api` leaves a coverage chunk the host could
+    // not read, and a failed coverage repeat reads none.
+    let case = Case::new(EXAMPLE);
+    let fake = fake(chunks(&[("1.0.coverage.json", "[")]));
+    let sandbox = Hooked {
+        hang: Some(("load", 2 * 3 + 1)),
+        ..Hooked::new(&fake)
+    };
+    let raw = sandbox.run(&case, &case.versions(true)).unwrap();
+    let Some(CoverageOutcome::Failed(failure)) = &raw.coverage else {
+        panic!("{:?}", raw.coverage)
+    };
+    let coverage = case.run_dir().join("coverage");
+    // No `on-failure` probe either.
+    let expected = Failure {
+        phase: Phase::Workload,
+        service: Some("load".into()),
+        repeat: None,
+        cause: Cause::Timeout,
+        logs: Some(coverage.clone()),
+        probes: Vec::new(),
+    };
+    assert_eq!(failure, &expected);
+    assert_eq!(raw.head.len(), 3);
+    assert!(matches!(&raw.before, Some(BeforeOutcome::Passed(before)) if before.len() == 3));
+    let journal = fake.journal();
+    assert!(
+        execs(&journal)
+            .iter()
+            .all(|(_, stdout, _)| !stdout.starts_with(&coverage))
+    );
+    assert!(coverage.join("load-1.log").is_file());
+    assert!(coverage.join("metrics.json").is_file());
+    assert!(coverage.join("profile/api-1/1.0.coverage.json").is_file());
+    assert_clean(&fake, &[]);
+}
+
+#[test]
+fn without_a_profiled_service_there_is_no_coverage_repeat() {
+    // No `profile` at all, and one only on the setup service `migrate`, which no repeat runs.
+    let plain = EXAMPLE.replace("    x-stand: { profile: node }\n", "");
+    let command = "    command: [\"node\", \"dist/migrate.js\"]\n";
+    let setup_only = plain.replace(
+        command,
+        &format!("{command}    x-stand: {{ profile: node }}\n"),
+    );
+    assert!(plain != EXAMPLE && setup_only != plain);
+    for recipe in [plain, setup_only] {
+        let case = Case::new(&recipe);
+        // Two halves of `timeout` per measured repeat, none for coverage.
+        let span = (20 + 3 * 5 * 2 + 10) * 60 * SECOND;
+        assert_eq!(run::span(&case.stand), span);
+        let fake = fake(example_rules());
+        let raw = case.run(&fake, &case.versions(false)).unwrap();
+        assert!(raw.coverage.is_none());
+        let journal = fake.journal();
+        let repeats = ["repeat-1-head", "repeat-2-head", "repeat-3-head"];
+        assert_eq!(workload_folders(&case, &journal), repeats);
+        assert!(!case.run_dir().join("coverage").exists());
+        assert!(!case.run_dir().join("preload").exists());
+        for (launch, _) in created(&journal) {
+            assert_eq!(profile_mounts(&launch), (None, false), "{}", launch.service);
+        }
+        assert!(
+            !journal
+                .iter()
+                .any(|call| matches!(call, Call::CopyOut { .. }))
+        );
+        let mut instances = raw.head.iter().flat_map(|output| &output.instances);
+        assert!(instances.all(|instance| instance.profile.is_none()));
         assert_clean(&fake, &[]);
     }
 }
