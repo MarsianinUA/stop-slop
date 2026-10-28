@@ -499,6 +499,9 @@ stop-slop/
   shared/           crates that take nothing from the workspace, so a second workspace can use them too
     gitcmd/         runs git: a cleaned environment, LC_ALL=C, another try when the index is busy
     testkit/        tests only: a temporary git repository
+  stand/            the stand, a second workspace with its own Cargo.toml and Cargo.lock
+    crates/
+      profile/      the Node preload that writes CPU profiles, and the reading of them
   rules/            the rules, a crate of their own: Cargo.toml, build.rs, lib.rs, fixtures.rs, clippy.toml, roles.toml
     <group>/<rule-id>/
   skill/            the skill: SKILL.md, fix.md, review.md, send.md, agents/openai.yaml
