@@ -39,7 +39,7 @@ const WHOLE_FILE: &str = "toml";
 
 pub struct StorePaths {
     pub root: Utf8PathBuf,
-    /// `stand.toml`; it may lie in `root`.
+    /// `stand.toml`; on macOS the config and data folders are one, so it lies in `root`.
     pub config: Utf8PathBuf,
 }
 
@@ -121,7 +121,8 @@ impl Store {
         remove(&self.paths.root.join(TREES))
     }
 
-    /// `Sessions` also appends `{cleanedAt}` to the journal of every session.
+    /// `Sessions` also appends `{cleanedAt}` to the journal of every session. `All` leaves only
+    /// `lock`, and `stand.toml` when it lies in `root`.
     pub fn clean(&self, what: Clean) -> Result<(), StoreError> {
         let root = &self.paths.root;
         match what {

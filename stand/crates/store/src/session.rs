@@ -277,11 +277,11 @@ impl Session {
     /// `cli` drops.
     pub fn keep(&self, run: &RunPaths) -> Result<Option<RunPaths>, StoreError> {
         let mut state = self.state()?;
-        let before = state.kept.replace(run.id.clone());
+        let previous = state.kept.replace(run.id.clone());
         self.write(&state)?;
-        Ok(before
-            .filter(|before| *before != run.id)
-            .map(|before| self.run(&before)))
+        Ok(previous
+            .filter(|previous| *previous != run.id)
+            .map(|previous| self.run(&previous)))
     }
 
     /// The kept run: the last run that wrote a `kept.json`; `inspect` takes it.
