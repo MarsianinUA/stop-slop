@@ -19,6 +19,9 @@ use guest::{
 use crate::sniff::HttpSniff;
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
+/// The network limit of microsandbox closes a connection 0.5-1 s after it opens; an upstream that
+/// closes a quiet connection later, on an idle timeout, has not hit it.
+const DROP_WITHIN: Duration = Duration::from_secs(3);
 const COUNTERS_EVERY: Duration = Duration::from_millis(100);
 const FAULT_EVERY: Duration = Duration::from_millis(100);
 
@@ -123,7 +126,12 @@ impl Relay {
     pub fn serve(self: &Arc<Relay>, dialed: SocketAddrV4, client: TcpStream) {
         if let Some(index) = self.targets.iter().position(|target| target.at == dialed) {
             let relay = Arc::clone(self);
-            thread::spawn(move || relay.relay(&relay.targets[index], client));
+            // `thread::spawn` panics in a guest out of threads, and would end the accept loop.
+            let spawned =
+                thread::Builder::new().spawn(move || relay.relay(&relay.targets[index], client));
+            if let Err(error) = spawned {
+                eprintln!("stand-guest net: closed a connection to {dialed}: no thread: {error}");
+            }
         } else if let Some(name) = self
             .unexposed
             .iter()
@@ -135,12 +143,20 @@ impl Relay {
     }
 
     /// Rewrites `path` on change, at most once per `COUNTERS_EVERY`, until `stop` is set; a change
-    /// just before the stop is written on the way out.
+    /// just before the stop is written on the way out. A failed write is tried again next round
+    /// and reported on stderr once: the adapter waits for the file and would see only a timeout.
     pub fn write_counters(&self, path: &Path, stop: &AtomicBool) {
+        let mut problem = Problem::default();
         loop {
             let stopping = stop.load(Ordering::Acquire);
-            if self.changed.swap(false, Ordering::AcqRel) && self.snapshot().write(path).is_err() {
-                self.mark();
+            if self.changed.swap(false, Ordering::AcqRel) {
+                match self.snapshot().write(path) {
+                    Ok(()) => problem.gone(),
+                    Err(error) => {
+                        self.mark();
+                        problem.show(format!("write {}: {error}", path.display()));
+                    }
+                }
             }
             if stopping {
                 return;
@@ -155,19 +171,14 @@ impl Relay {
     pub fn watch_fault(self: &Arc<Relay>, path: PathBuf) {
         let relay = Arc::clone(self);
         thread::spawn(move || {
-            let mut reported = None;
+            let mut problem = Problem::default();
             loop {
                 match read_fault(&path) {
                     Ok(switch) => {
                         relay.apply_fault(switch.as_ref());
-                        reported = None;
+                        problem.gone();
                     }
-                    Err(problem) => {
-                        if reported.as_ref() != Some(&problem) {
-                            eprintln!("stand-guest net: {problem}");
-                            reported = Some(problem);
-                        }
-                    }
+                    Err(why) => problem.show(why),
                 }
                 thread::sleep(FAULT_EVERY);
             }
@@ -209,6 +220,7 @@ impl Relay {
             counts.drops.fetch_add(1, Ordering::Relaxed);
             return;
         };
+        let connected = Instant::now();
         let Some(upstream) = target.attach(&conn, upstream) else {
             return;
         };
@@ -234,9 +246,13 @@ impl Relay {
             if conn.is_cut() {
                 return;
             }
-            // The upstream closed before any reply and before the client: how the network limit
-            // of microsandbox shows from inside a guest.
-            if reply.by_source && reply.bytes == 0 && !client_closed.load(Ordering::Acquire) {
+            // The upstream closed soon, before any reply and before the client: how the network
+            // limit of microsandbox shows from inside a guest.
+            if reply.by_source
+                && reply.bytes == 0
+                && !client_closed.load(Ordering::Acquire)
+                && connected.elapsed() <= DROP_WITHIN
+            {
                 counts.drops.fetch_add(1, Ordering::Relaxed);
                 self.mark();
             }
@@ -357,6 +373,23 @@ impl Relay {
                 })
                 .collect(),
         }
+    }
+}
+
+/// A problem of a loop that runs every 100 ms goes to stderr once, until it changes or goes.
+#[derive(Default)]
+struct Problem(Option<String>);
+
+impl Problem {
+    fn show(&mut self, problem: String) {
+        if self.0.as_ref() != Some(&problem) {
+            eprintln!("stand-guest net: {problem}");
+            self.0 = Some(problem);
+        }
+    }
+
+    fn gone(&mut self) {
+        self.0 = None;
     }
 }
 

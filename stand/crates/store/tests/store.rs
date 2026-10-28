@@ -63,7 +63,6 @@ impl Home {
     }
 }
 
-/// 2026-10-28T12:00:00Z and `seconds` after.
 fn at(seconds: u64) -> SystemTime {
     humantime::parse_rfc3339("2026-10-28T12:00:00Z").unwrap() + Duration::from_secs(seconds)
 }

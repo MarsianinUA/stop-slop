@@ -3,7 +3,7 @@
 //! `StopReport`; the binary does the opposite.
 
 use std::fs;
-use std::io;
+use std::io::{self, Write};
 use std::net::Ipv4Addr;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -431,7 +431,8 @@ impl FaultSwitch {
 }
 
 /// One JSON line on the stdout of `stand-guest stop`. `after_ms` runs from the signal to the exit, or to the
-/// kill when `killed`; `code` is `None` when the command had not exited even after the kill.
+/// kill when `killed`; `code` is `None` when `run` recorded none within 2 s of either: the command outlived
+/// the kill, or `run` itself is gone.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct StopReport {
@@ -467,10 +468,16 @@ fn json(value: &impl Serialize) -> String {
     serde_json::to_string(value).expect("the files of guest serialize")
 }
 
-/// The reader on the other side of the bind sees the old file or the new one, never a part.
+/// The reader on the other side of the bind sees the old file or the new one, never a part. The
+/// temp file is made anew: in the guest root writes it in a folder the service's user can write,
+/// and must not follow a link that user put at its name.
 fn write_whole(path: &Path, text: &str) -> io::Result<()> {
     let mut tmp = path.as_os_str().to_owned();
     tmp.push(".tmp");
-    fs::write(&tmp, text)?;
+    match fs::remove_file(&tmp) {
+        Err(error) if error.kind() != io::ErrorKind::NotFound => return Err(error),
+        _ => {}
+    }
+    fs::File::create_new(&tmp)?.write_all(text.as_bytes())?;
     fs::rename(&tmp, path)
 }

@@ -10,8 +10,8 @@ camino.workspace = true
 gitcmd = { path = "../../../shared/gitcmd" }
 sha2.workspace = true
 tar.workspace = true
+tempfile.workspace = true
 thiserror.workspace = true
 
 [dev-dependencies]
-tempfile.workspace = true
 testkit = { path = "../../../shared/testkit" }

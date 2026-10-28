@@ -174,11 +174,19 @@ fn user_id(user: &str) -> Result<libc::uid_t, String> {
     Err(format!("no user `{name}` in /etc/passwd"))
 }
 
+/// Made anew: root makes them in a folder the service's processes can write, and must not follow
+/// a link put at either name.
 fn outputs(out: &Path) -> Result<(File, File), String> {
     let mut err = out.as_os_str().to_owned();
     err.push(".err");
     let create = |path: &Path| {
-        File::create(path).map_err(|error| format!("create {}: {error}", path.display()))
+        let removed = match fs::remove_file(path) {
+            Err(error) if error.kind() != io::ErrorKind::NotFound => Err(error),
+            _ => Ok(()),
+        };
+        removed
+            .and_then(|()| File::create_new(path))
+            .map_err(|error| format!("create {}: {error}", path.display()))
     };
     Ok((create(out)?, create(Path::new(&err))?))
 }
@@ -235,7 +243,6 @@ fn recorded_code(path: &Path, deadline: Instant) -> Option<i32> {
     poll(deadline, || read_status(path).ok()?.code)
 }
 
-/// `check` every `POLL` until it gives a value, or `None` once `deadline` has passed.
 fn poll<T>(deadline: Instant, mut check: impl FnMut() -> Option<T>) -> Option<T> {
     loop {
         if let Some(value) = check() {
@@ -269,7 +276,19 @@ fn write_status(path: &Path, status: &Status) -> io::Result<()> {
 fn read_status(path: &Path) -> Result<Status, String> {
     let text =
         fs::read_to_string(path).map_err(|error| format!("read {}: {error}", path.display()))?;
-    serde_json::from_str(&text).map_err(|error| format!("parse {}: {error}", path.display()))
+    let status: Status = serde_json::from_str(&text)
+        .map_err(|error| format!("parse {}: {error}", path.display()))?;
+    // The service's user can write the file, and `kill` and `killpg` read 0, -1 and 1 as whole
+    // sets of processes, which a root `stop` would reach.
+    if status.pid <= 1 || status.pgid <= 1 {
+        return Err(format!(
+            "{}: pid {} in group {} is not a command's",
+            path.display(),
+            status.pid,
+            status.pgid
+        ));
+    }
+    Ok(status)
 }
 
 fn now_ms() -> u64 {

@@ -82,7 +82,7 @@ function start(dir, coverage) {
       // anchor without sending the whole run's profile, as `console.profileEnd` would.
       post('Profiler.disable');
     } catch {
-      // The rare hang above, not an error in the program's exit.
+      // `disable` only guards against the rare hang above; its failure must not fail the exit.
     }
   });
 

@@ -179,6 +179,24 @@ fn the_files_keep_their_json_shape() {
     );
 }
 
+#[cfg(unix)]
+#[test]
+fn a_file_is_written_past_a_link_at_its_temp_name() {
+    let temp = tempfile::tempdir().unwrap();
+    let victim = temp.path().join("victim");
+    std::fs::write(&victim, "kept").unwrap();
+    std::os::unix::fs::symlink(&victim, temp.path().join("counters.json.tmp")).unwrap();
+    let path = temp.path().join("counters.json");
+    let counters = Counters {
+        targets: vec![],
+        unexposed: vec![],
+    };
+    counters.write(&path).unwrap();
+    assert_eq!(std::fs::read_to_string(&victim).unwrap(), "kept");
+    let written = Counters::parse(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    assert_eq!(written, counters);
+}
+
 /// On Windows the binary is the `cfg(not(unix))` stub, which exits non-zero; elsewhere an unknown
 /// subcommand does.
 #[test]
@@ -203,7 +221,6 @@ mod forwarder {
 
     const LOOPBACK: Ipv4Addr = Ipv4Addr::LOCALHOST;
 
-    /// A loopback listener on a free port, handed to `serve` in a thread of its own.
     fn listen(serve: impl FnOnce(TcpListener) + Send + 'static) -> u16 {
         let listener = TcpListener::bind((LOOPBACK, 0)).unwrap();
         let port = listener.local_addr().unwrap().port();
@@ -233,9 +250,15 @@ mod forwarder {
         })
     }
 
-    /// Closes each connection at once, before any reply.
-    fn closing_upstream() -> u16 {
-        listen(|listener| listener.incoming().for_each(drop))
+    fn closing_upstream(after: Duration) -> u16 {
+        listen(move |listener| {
+            for stream in listener.incoming().flatten() {
+                thread::spawn(move || {
+                    thread::sleep(after);
+                    drop(stream);
+                });
+            }
+        })
     }
 
     fn free_port() -> u16 {
@@ -456,25 +479,28 @@ mod forwarder {
     }
 
     #[test]
-    fn a_target_that_refuses_or_closes_first_counts_a_drop() {
+    fn a_target_that_refuses_or_soon_closes_first_counts_a_drop() {
         let (refusing, _held) = refusing_port();
         let fwd = Forwarder::start(vec![
             route("refused", &[refusing]),
-            route("closing", &[closing_upstream()]),
+            route("closing", &[closing_upstream(Duration::ZERO)]),
             route("quiet", &[upstream(b"")]),
+            route("idle", &[closing_upstream(Duration::from_secs(4))]),
         ]);
         assert_eq!(fwd.request(0, b"ping"), b"");
         // The client sends nothing and waits, so the upstream closes first.
         let _ = fwd.connect(1).read_to_end(&mut Vec::new());
         // The client closes first, and the upstream answers nothing: not a drop.
         assert_eq!(fwd.request(2, b"ping"), b"");
+        // The upstream closes first, but long after the limit of microsandbox would have.
+        let _ = fwd.connect(3).read_to_end(&mut Vec::new());
         let drops: Vec<u64> = fwd
             .counters_until(settled)
             .targets
             .iter()
             .map(|target| target.drops)
             .collect();
-        assert_eq!(drops, [1, 1, 0]);
+        assert_eq!(drops, [1, 1, 0, 0]);
     }
 
     #[test]
@@ -595,6 +621,29 @@ mod process {
     }
 
     #[test]
+    fn stop_refuses_a_status_file_that_names_no_command() {
+        use std::os::unix::process::CommandExt;
+
+        let temp = tempfile::tempdir().unwrap();
+        let status = temp.path().join("status.json");
+        let whole_group = serde_json::json!({"pid": 0, "pgid": 0, "code": null, "exitedAt": null});
+        fs::write(&status, whole_group.to_string()).unwrap();
+        let mut stop = guest(&Command::Stop(StopArgs {
+            status: status.clone(),
+            signal: "SIGTERM".into(),
+            grace: Duration::ZERO,
+        }));
+        // A group of its own: a `stop` that signals pid 0 reaches itself, not the test.
+        let output = stop.process_group(0).output().unwrap();
+        assert_eq!(output.status.code(), Some(125));
+        let stderr = String::from_utf8(output.stderr).unwrap();
+        assert!(
+            stderr.contains("pid 0 in group 0 is not a command's"),
+            "{stderr}"
+        );
+    }
+
+    #[test]
     fn a_command_that_ignores_the_signal_is_killed_with_its_group_at_the_grace() {
         let (mut run, status, _temp) = service("trap '' TERM");
         let report = stop(&status, Duration::from_millis(300));
@@ -612,11 +661,16 @@ mod process {
     fn exec_writes_the_outputs_to_files_and_its_group_ends_with_the_command() {
         let temp = tempfile::tempdir().unwrap();
         let out = temp.path().join("probe.jsonl");
+        // In a guest root makes the files, in a folder the service can write.
+        let victim = temp.path().join("victim");
+        fs::write(&victim, "kept").unwrap();
+        std::os::unix::fs::symlink(&victim, temp.path().join("probe.jsonl.err")).unwrap();
         let script = "sleep 30 & echo $$; echo oops >&2; exit 3";
         let exit = exec(&out, LONG, "", script).status().unwrap();
         assert_eq!(exit.code(), Some(3));
         let err = fs::read_to_string(temp.path().join("probe.jsonl.err")).unwrap();
         assert_eq!(err, "oops\n");
+        assert_eq!(fs::read_to_string(&victim).unwrap(), "kept");
         assert_group_ends(fs::read_to_string(&out).unwrap().trim().parse().unwrap());
     }
 
