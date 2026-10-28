@@ -10,7 +10,7 @@ use profile::{ProfileMode, node_env};
 use sandbox::{Exposed, ImageRef, Launch, Mount, Outbound, Peer, Seed, SnapshotId, VolumeName};
 use spec::{Profiler, Service, ServiceKind, ServiceName, Stand};
 
-use crate::ready::{Health, Start};
+use crate::ready::Start;
 
 pub(crate) const OUT: &str = "/stand/out";
 const PRELOAD: &str = "/stand/preload";
@@ -21,8 +21,8 @@ pub(crate) const PROFILE: &str = "/stand/profile";
 pub(crate) struct Seeds {
     /// The snapshot of the prepare service after it exited 0: the version snapshot.
     pub(crate) version: Option<SnapshotId>,
-    /// The setup snapshot of each service with a volume that runs in setup.
-    pub(crate) volumes: BTreeMap<ServiceName, SnapshotId>,
+    /// The setup snapshot of each service with a volume that runs in setup, by service.
+    pub(crate) volumes: BTreeMap<String, SnapshotId>,
 }
 
 impl Seeds {
@@ -93,7 +93,6 @@ pub(crate) fn any_profiled(stand: &Stand) -> bool {
         .any(|service| profiler(service).is_some())
 }
 
-/// Every replica of every service of `level`.
 pub(crate) fn starts(stand: &Stand, level: &[&ServiceName], frame: &Frame) -> Vec<Start> {
     let mut starts = Vec::new();
     for name in level {
@@ -102,7 +101,7 @@ pub(crate) fn starts(stand: &Stand, level: &[&ServiceName], frame: &Frame) -> Ve
             starts.push(Start {
                 kind: service.kind,
                 launch: of(stand, name, replica, frame),
-                health: service.healthcheck.as_ref().map(Health::from),
+                health: service.healthcheck.clone(),
             });
         }
     }
@@ -202,7 +201,12 @@ fn seed(name: &ServiceName, service: &Service, frame: &Frame) -> Option<Seed> {
                 .map_or_else(fresh, Seed::Snapshot),
         );
     }
-    frame.seeds.volumes.get(name).cloned().map(Seed::Snapshot)
+    frame
+        .seeds
+        .volumes
+        .get(name.as_str())
+        .cloned()
+        .map(Seed::Snapshot)
 }
 
 fn probed(stand: &Stand, name: &ServiceName) -> bool {

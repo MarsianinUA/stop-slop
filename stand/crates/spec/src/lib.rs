@@ -290,7 +290,7 @@ pub enum Profiler {
 }
 
 /// `CMD-SHELL` and a string `test` become `["sh", "-c", <text>]`.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Healthcheck {
     pub test: Vec<String>,
     pub interval: Duration,

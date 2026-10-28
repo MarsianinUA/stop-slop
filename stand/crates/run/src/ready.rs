@@ -12,38 +12,17 @@ use crate::Cancel;
 
 const CHUNK: Duration = Duration::from_secs(1);
 
-#[derive(Debug, Clone)]
-pub(crate) struct Health {
-    pub(crate) test: Vec<String>,
-    pub(crate) interval: Duration,
-    pub(crate) timeout: Duration,
-    pub(crate) retries: u32,
-    pub(crate) start_period: Duration,
-}
-
-impl From<&Healthcheck> for Health {
-    fn from(check: &Healthcheck) -> Health {
-        Health {
-            test: check.test.clone(),
-            interval: check.interval,
-            timeout: check.timeout,
-            retries: check.retries,
-            start_period: check.start_period,
-        }
-    }
-}
-
 /// A member to start: its launch and what the waits need to know of it.
 pub(crate) struct Start {
     pub(crate) kind: ServiceKind,
     pub(crate) launch: Launch,
-    pub(crate) health: Option<Health>,
+    pub(crate) health: Option<Healthcheck>,
 }
 
 pub(crate) struct Member {
     pub(crate) kind: ServiceKind,
     pub(crate) launch: Launch,
-    pub(crate) health: Option<Health>,
+    pub(crate) health: Option<Healthcheck>,
     pub(crate) id: SandboxId,
     pub(crate) created: Instant,
     /// How its command ended: the code (`None` when killed without one) and when.
@@ -91,14 +70,17 @@ impl Fleet {
         sandbox: &impl Sandbox,
         batch: Vec<Start>,
     ) -> Result<Instant, Halt> {
-        let launches: Vec<Launch> = batch.iter().map(|start| start.launch.clone()).collect();
+        let (launches, waits): (Vec<Launch>, Vec<_>) = batch
+            .into_iter()
+            .map(|start| (start.launch, (start.kind, start.health)))
+            .unzip();
         let ids = sandbox.create(&launches)?;
         let created = sandbox.now();
-        for (start, id) in batch.into_iter().zip(ids) {
+        for ((launch, (kind, health)), id) in launches.into_iter().zip(waits).zip(ids) {
             self.members.push(Member {
-                kind: start.kind,
-                launch: start.launch,
-                health: start.health,
+                kind,
+                launch,
+                health,
                 id,
                 created,
                 exit: None,

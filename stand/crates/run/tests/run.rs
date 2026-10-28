@@ -229,12 +229,27 @@ fn example_rules() -> Vec<Rule> {
     ]
 }
 
-/// `example_rules` with the script of `service` replaced.
-fn with(service: &str, script: Script) -> Vec<Rule> {
-    let mut rules = example_rules();
+/// `rules` with `script` for the VMs of `service` on the tree of "before" (the first rule
+/// that matches wins).
+fn on_before(case: &Case, mut rules: Vec<Rule>, service: &str, script: Script) -> Vec<Rule> {
+    let before = Rule {
+        service: service.into(),
+        tree: Some(case.tar(Side::Before)),
+        script,
+    };
+    rules.insert(0, before);
+    rules
+}
+
+fn replaced(mut rules: Vec<Rule>, service: &str, script: Script) -> Vec<Rule> {
     rules.retain(|rule| rule.service != service);
     rules.push(rule(service, script));
     rules
+}
+
+/// `example_rules` with the script of `service` replaced.
+fn with(service: &str, script: Script) -> Vec<Rule> {
+    replaced(example_rules(), service, script)
 }
 
 fn fake(rules: Vec<Rule>) -> Fake {
@@ -314,6 +329,21 @@ fn names_in(dir: &Utf8Path) -> Vec<String> {
     names
 }
 
+/// The instances of `dir/metrics.json`.
+fn metrics_in(dir: &Utf8Path) -> Vec<serde_json::Value> {
+    let text = fs::read_to_string(dir.join("metrics.json")).unwrap();
+    serde_json::from_str(&text).unwrap()
+}
+
+/// The service of each instance, and whether it has `stopped`.
+fn stopped(metrics: &[serde_json::Value]) -> Vec<(&str, bool)> {
+    let instances = metrics.iter().map(|instance| {
+        let service = instance["service"].as_str().unwrap();
+        (service, !instance["stopped"].is_null())
+    });
+    instances.collect()
+}
+
 /// The files under `dir` with their bytes, by their path from it.
 fn files_in(dir: &Utf8Path) -> BTreeMap<String, Vec<u8>> {
     let mut files = BTreeMap::new();
@@ -384,11 +414,7 @@ fn the_prepare_service_unpacks_the_tree_and_its_snapshot_seeds_the_other_tree_se
             .iter()
             .find(|(launch, _)| launch.service == "prepare" && unpacks(launch))
             .unwrap_or_else(|| panic!("prepare of the {side} side"));
-        let snapshot = journal.iter().find_map(|call| match call {
-            Call::Snapshot { id, snapshot } if id == prepare => snapshot.clone(),
-            _ => None,
-        });
-        let version = snapshot.expect("a snapshot of the prepare VM");
+        let version = snapshot_of(&journal, prepare);
         let restores =
             |launch: &Launch| matches!(&launch.seed, Some(Seed::Snapshot(id)) if *id == version);
         let seeded: BTreeSet<&str> = made
@@ -518,19 +544,9 @@ fn setup_stops_each_volume_vm_then_takes_its_size_and_snapshot() {
         "db in setup, and at the end of the last repeat"
     );
     // Only the long-running `db` is stopped; the setup services have exited.
-    let text = fs::read_to_string(case.run_dir().join("setup-head/metrics.json")).unwrap();
-    let metrics: serde_json::Value = serde_json::from_str(&text).unwrap();
-    let stopped: Vec<(&str, bool)> = metrics
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|instance| {
-            let service = instance["service"].as_str().unwrap();
-            (service, !instance["stopped"].is_null())
-        })
-        .collect();
+    let metrics = metrics_in(&case.run_dir().join("setup-head"));
     assert_eq!(
-        stopped,
+        stopped(&metrics),
         [("db", true), ("prepare", false), ("migrate", false)]
     );
     assert!(case.run_dir().join("setup-head/db-1.log").is_file());
@@ -707,15 +723,11 @@ fn a_healthcheck_attempt_waits_with_every_running_vm_and_a_neighbour_dies_in_it(
 
     // `db` never gets healthy and `prepare` crashes meanwhile: the crash ends setup, not the deadline.
     let case = Case::new(EXAMPLE);
-    let mut rules = with(
-        "db",
-        Script {
-            health: vec![Some(1)],
-            ..Script::default()
-        },
-    );
-    rules.retain(|rule| rule.service != "prepare");
-    rules.push(rule("prepare", exits(2, SECOND)));
+    let db = Script {
+        health: vec![Some(1)],
+        ..Script::default()
+    };
+    let rules = replaced(with("db", db), "prepare", exits(2, SECOND));
     let crashing = crate::fake(rules);
     let failure = app_failure(case.run(&crashing, &case.versions(false))).failure;
     assert_eq!(
@@ -1014,17 +1026,13 @@ x-stand: { workload: load }
 #[test]
 fn a_failure_of_before_stops_only_its_lane() {
     let case = Case::new(EXAMPLE);
-    let mut rules = example_rules();
     // `migrate` of the before tree fails; the head's passes.
-    rules.insert(
-        0,
-        Rule {
-            service: "migrate".into(),
-            tree: Some(case.tar(Side::Before)),
-            script: exits(1, SECOND),
-        },
-    );
-    let fake = fake(rules);
+    let fake = fake(on_before(
+        &case,
+        example_rules(),
+        "migrate",
+        exits(1, SECOND),
+    ));
     let raw = case.run(&fake, &case.versions(true)).unwrap();
     let Some(BeforeOutcome::Failed(failure)) = &raw.before else {
         panic!("{:?}", raw.before)
@@ -1044,12 +1052,7 @@ fn a_failure_of_before_stops_only_its_lane() {
         });
         found.unwrap().1.clone()
     };
-    let before = prepare(Side::Before);
-    let version = journal.iter().find_map(|call| match call {
-        Call::Snapshot { id, snapshot } if *id == before => snapshot.clone(),
-        _ => None,
-    });
-    let version = version.expect("the version snapshot of before");
+    let version = snapshot_of(&journal, &prepare(Side::Before));
     let dropped = index_of(
         &journal,
         |call| matches!(call, Call::DropSnapshot(id) if *id == version),
@@ -1070,18 +1073,11 @@ fn a_failure_of_before_stops_only_its_lane() {
 
     // `api` of the before tree dies in its first repeat: "before" runs no other repeat.
     let case = Case::new(EXAMPLE);
-    let mut rules = example_rules();
-    rules.insert(
-        0,
-        Rule {
-            service: "api".into(),
-            tree: Some(case.tar(Side::Before)),
-            script: Script {
-                exit: Some((1, 5 * SECOND)),
-                ..stops(SECOND)
-            },
-        },
-    );
+    let dies = Script {
+        exit: Some((1, 5 * SECOND)),
+        ..stops(SECOND)
+    };
+    let rules = on_before(&case, example_rules(), "api", dies);
     let dying = crate::fake(rules);
     let raw = case.run(&dying, &case.versions(true)).unwrap();
     let Some(BeforeOutcome::Failed(failure)) = &raw.before else {
@@ -1119,26 +1115,50 @@ fn out_of(launch: &Launch) -> Option<&Utf8Path> {
     })
 }
 
+/// The folder of the phase whose `/stand/out` `launch` binds: `setup-head`, `repeat-2-before`.
+fn phase_of(launch: &Launch) -> &str {
+    let out = out_of(launch).expect("a bind of /stand/out");
+    out.parent().unwrap().file_name().unwrap()
+}
+
 /// The folder of each phase that started the workload, by name, in order.
 fn workload_folders(case: &Case, journal: &[Call]) -> Vec<String> {
     let made = created(journal);
     let loads = made
         .iter()
         .filter(|(launch, _)| launch.service == case.stand.workload.as_str());
-    let folders = loads.map(|(launch, _)| {
-        let out = out_of(launch).expect("the workload binds /stand/out");
-        out.parent().unwrap().file_name().unwrap().to_owned()
-    });
-    folders.collect()
+    loads
+        .map(|(launch, _)| phase_of(launch).to_owned())
+        .collect()
+}
+
+/// `service-replica`.
+fn vm(launch: &Launch) -> String {
+    format!("{}-{}", launch.service, launch.replica)
 }
 
 /// `service-replica` of each VM, in the order of creation.
 fn services(journal: &[Call]) -> Vec<String> {
-    let made = created(journal);
-    let names = made
+    created(journal)
         .iter()
-        .map(|(launch, _)| format!("{}-{}", launch.service, launch.replica));
-    names.collect()
+        .map(|(launch, _)| vm(launch))
+        .collect()
+}
+
+/// From the first `wait` after the `create` of `id` to the deadline of the last one.
+fn waited(journal: &[Call], id: &SandboxId) -> Duration {
+    let start = index_of(
+        journal,
+        |call| matches!(call, Call::Create { ids, .. } if ids.contains(id)),
+    );
+    let waits: Vec<Instant> = journal[start..]
+        .iter()
+        .filter_map(|call| match call {
+            Call::Wait { deadline, .. } => Some(*deadline),
+            _ => None,
+        })
+        .collect();
+    *waits.iter().max().unwrap() - waits[0]
 }
 
 #[test]
@@ -1159,12 +1179,7 @@ fn setup_runs_once_and_the_repeats_start_from_its_snapshots_by_levels() {
     }
     assert_eq!(services(&journal), expected);
     let made = created(&journal);
-    let db_setup = &made[0].1;
-    let db_snapshot = journal.iter().find_map(|call| match call {
-        Call::Snapshot { id, snapshot } if id == db_setup => snapshot.clone(),
-        _ => None,
-    });
-    let db_snapshot = db_snapshot.expect("the setup snapshot of db");
+    let db_snapshot = snapshot_of(&journal, &made[0].1);
     for (index, output) in raw.head.iter().enumerate() {
         let vms = &made[3 + 4 * index..][..4];
         let (db, _) = &vms[0];
@@ -1235,9 +1250,7 @@ fn with_before_the_repeats_take_turns_and_the_harness_is_the_same() {
     // Each `db` of a repeat starts from the setup snapshot of its own version.
     let made = created(&journal);
     let side_of = |launch: &Launch| {
-        let folder = out_of(launch).unwrap().parent().unwrap();
-        let name = folder.file_name().unwrap();
-        if name.ends_with("before") {
+        if phase_of(launch).ends_with("before") {
             Side::Before
         } else {
             Side::Head
@@ -1247,13 +1260,7 @@ fn with_before_the_repeats_take_turns_and_the_harness_is_the_same() {
     let mut setup = Vec::new();
     for (launch, id) in dbs {
         match &launch.seed {
-            None => {
-                let snapshot = journal.iter().find_map(|call| match call {
-                    Call::Snapshot { id: of, snapshot } if of == id => snapshot.clone(),
-                    _ => None,
-                });
-                setup.push((side_of(launch), snapshot.unwrap()));
-            }
+            None => setup.push((side_of(launch), snapshot_of(&journal, id))),
             Some(Seed::Snapshot(seed)) => {
                 let own = setup.iter().find(|(side, _)| *side == side_of(launch));
                 assert_eq!(Some(seed), own.map(|(_, snapshot)| snapshot));
@@ -1396,19 +1403,8 @@ fn a_failure_of_the_head_in_a_repeat_ends_the_run_with_what_it_collected() {
     assert_eq!(head, [(1, 30 * SECOND), (2, (300 - 2) * SECOND)]);
     let journal = fake.journal();
     let db = &created(&journal)[3 + 4].1;
-    let start = index_of(
-        &journal,
-        |call| matches!(call, Call::Create { ids, .. } if ids.contains(db)),
-    );
-    let waits: Vec<Instant> = journal[start..]
-        .iter()
-        .filter_map(|call| match call {
-            Call::Wait { deadline, .. } => Some(*deadline),
-            _ => None,
-        })
-        .collect();
     // The first wait ends a chunk of 1 s after the start, the last one at the deadline.
-    assert_eq!(*waits.iter().max().unwrap() - waits[0], 299 * SECOND);
+    assert_eq!(waited(&journal, db), 299 * SECOND);
     assert_clean(&fake, &case.left());
 }
 
@@ -1431,7 +1427,7 @@ fn every_repeat_ends_with_the_stop_of_each_long_running_service_dependents_first
     let made = created(&journal);
     let name = |id: &SandboxId| {
         let (launch, _) = made.iter().find(|(_, made)| made == id).unwrap();
-        format!("{}-{}", launch.service, launch.replica)
+        vm(launch)
     };
     let stops: Vec<(usize, String)> = journal
         .iter()
@@ -1458,19 +1454,9 @@ fn every_repeat_ends_with_the_stop_of_each_long_running_service_dependents_first
         );
         assert!(cut < stops[0].0, "repeat {}", repeat + 1);
     }
-    let text = fs::read_to_string(case.run_dir().join("repeat-2-head/metrics.json")).unwrap();
-    let metrics: serde_json::Value = serde_json::from_str(&text).unwrap();
-    let stopped: Vec<(&str, bool)> = metrics
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|instance| {
-            let service = instance["service"].as_str().unwrap();
-            (service, !instance["stopped"].is_null())
-        })
-        .collect();
+    let metrics = metrics_in(&case.run_dir().join("repeat-2-head"));
     assert_eq!(
-        stopped,
+        stopped(&metrics),
         [("db", true), ("api", true), ("api", true), ("load", false)]
     );
     assert_clean(&fake, &case.left());
@@ -1492,20 +1478,11 @@ fn everything_made_is_destroyed_on_every_path() {
             with("api", sick)
         },
         |case| {
-            let mut rules = example_rules();
             let dies = Script {
                 exit: Some((1, SECOND)),
                 ..stops(SECOND)
             };
-            rules.insert(
-                0,
-                Rule {
-                    service: "api".into(),
-                    tree: Some(case.tar(Side::Before)),
-                    script: dies,
-                },
-            );
-            rules
+            on_before(case, example_rules(), "api", dies)
         },
     ];
     // What each keeps, by the folder of the repeat the snapshot came from.
@@ -1532,10 +1509,7 @@ fn everything_made_is_destroyed_on_every_path() {
 }
 
 fn logs_in(dir: &Utf8Path) -> BTreeSet<String> {
-    let names = fs::read_dir(dir).unwrap().map(|entry| {
-        let name = entry.unwrap().file_name();
-        name.into_string().unwrap()
-    });
+    let names = names_in(dir).into_iter();
     names.filter(|name| name.ends_with(".log")).collect()
 }
 
@@ -1692,8 +1666,7 @@ fn execs(journal: &[Call]) -> Vec<(usize, Utf8PathBuf, String)> {
     for (index, call) in journal.iter().enumerate() {
         if let Call::Exec { id, stdout, .. } = call {
             let (launch, _) = made.iter().find(|(_, made)| made == id).unwrap();
-            let vm = format!("{}-{}", launch.service, launch.replica);
-            execs.push((index, stdout.clone(), vm));
+            execs.push((index, stdout.clone(), vm(launch)));
         }
     }
     execs
@@ -1827,8 +1800,8 @@ fn the_cut_reads_every_instance_before_the_first_probe() {
             let logs = cut
                 .iter()
                 .any(|call| matches!(call, Call::Logs(of) if of == id));
-            assert!(metrics && logs, "{}-{}", launch.service, launch.replica);
-            read.push(format!("{}-{}", launch.service, launch.replica));
+            assert!(metrics && logs, "{}", vm(launch));
+            read.push(vm(launch));
         }
         cuts.push(read);
     }
@@ -1852,18 +1825,13 @@ fn the_cut_reads_every_instance_before_the_first_probe() {
     };
     for output in &raw.head {
         let dir = output.out_dir.parent().unwrap();
-        let text = fs::read_to_string(dir.join("metrics.json")).unwrap();
-        let metrics: serde_json::Value = serde_json::from_str(&text).unwrap();
-        let written = metrics.as_array().unwrap();
-        for (instance, written) in output.instances.iter().zip(written) {
+        for (instance, written) in output.instances.iter().zip(metrics_in(dir)) {
             assert_eq!(instance.log_cut, first_line(&instance.log), "{dir}");
             assert_eq!(written["logCut"], instance.log_cut);
         }
     }
     let setup = case.run_dir().join("setup-head");
-    let text = fs::read_to_string(setup.join("metrics.json")).unwrap();
-    let metrics: serde_json::Value = serde_json::from_str(&text).unwrap();
-    for written in metrics.as_array().unwrap() {
+    for written in metrics_in(&setup) {
         let vm = format!(
             "{}-{}",
             written["service"].as_str().unwrap(),
@@ -1955,10 +1923,7 @@ fn a_probe_that_times_out_or_exits_nonzero_is_what_it_saw() {
 
     // An `on-failure` probe past its deadline is still an output of the failure.
     let case = Case::new(EXAMPLE);
-    let mut rules = with("db", db);
-    rules.retain(|rule| rule.service != "load");
-    rules.push(rule("load", exits(4, SECOND)));
-    let saw = fake(rules);
+    let saw = fake(replaced(with("db", db), "load", exits(4, SECOND)));
     let failed = app_failure(case.run(&saw, &case.versions(false)));
     let last = case.run_dir().join("repeat-1-head/out/probe.last.jsonl");
     assert_eq!(failed.failure.probes, [last]);
@@ -2017,8 +1982,8 @@ const CPU_PROFILE: &str = r#"{"nodes":[{"id":1,"callFrame":{"functionName":"(roo
 /// One coverage chunk of the same process: three calls of `order`.
 const COVERAGE_CHUNK: &str = r#"[{"url":"file:///w/app/dist/main.js","functions":[{"functionName":"order","ranges":[{"count":3}],"line":4,"column":15}]}]"#;
 
-/// `example_rules` with an `api` whose one Node process leaves `files` in `/stand/profile`.
-fn chunks(files: &[(&str, &str)]) -> Vec<Rule> {
+/// `rules` with an `api` whose one Node process leaves `files` in `/stand/profile`.
+fn chunks(rules: Vec<Rule>, files: &[(&str, &str)]) -> Vec<Rule> {
     let mut writes = vec![("/stand/profile/1.start.json".to_owned(), b"{}".to_vec())];
     for (name, text) in files {
         writes.push((format!("/stand/profile/{name}"), text.as_bytes().to_vec()));
@@ -2027,7 +1992,7 @@ fn chunks(files: &[(&str, &str)]) -> Vec<Rule> {
         writes,
         ..stops(100 * Duration::from_millis(1))
     };
-    with("api", api)
+    replaced(rules, "api", api)
 }
 
 /// The host folder of the read-only `/stand/preload` bind of `launch`, and whether it has the
@@ -2205,11 +2170,7 @@ fn the_chunks_come_out_before_destroy_and_an_empty_folder_is_no_profile() {
     let cases = [example_rules(), with("load", exits(3, SECOND))];
     for rules in cases {
         let case = Case::new(EXAMPLE);
-        let load = rules.iter().find(|rule| rule.service == "load").unwrap();
-        let mut rules = chunks(&[("1.0.cpuprofile", CPU_PROFILE)]);
-        rules.retain(|rule| rule.service != "load");
-        rules.push(load.clone());
-        let fake = crate::fake(rules);
+        let fake = crate::fake(chunks(rules, &[("1.0.cpuprofile", CPU_PROFILE)]));
         let head = match case.run(&fake, &case.versions(false)) {
             Ok(raw) => raw.head,
             Err(RunError::App(failed)) => failed.raw.head,
@@ -2252,7 +2213,7 @@ fn the_chunks_come_out_before_destroy_and_an_empty_folder_is_no_profile() {
     ];
     for (file, phase) in cases {
         let case = Case::new(EXAMPLE);
-        let fake = crate::fake(chunks(&[(file, "{")]));
+        let fake = crate::fake(chunks(example_rules(), &[(file, "{")]));
         let result = case.run(&fake, &case.versions(false));
         assert!(
             matches!(
@@ -2274,7 +2235,10 @@ fn the_chunks_come_out_before_destroy_and_an_empty_folder_is_no_profile() {
 #[test]
 fn the_coverage_repeat_runs_once_for_the_head_with_its_longer_timeout() {
     let case = Case::new(EXAMPLE);
-    let fake = fake(chunks(&[("1.0.coverage.json", COVERAGE_CHUNK)]));
+    let fake = fake(chunks(
+        example_rules(),
+        &[("1.0.coverage.json", COVERAGE_CHUNK)],
+    ));
     let raw = case.run(&fake, &case.versions(true)).unwrap();
     assert_eq!(
         raw.head.len(),
@@ -2302,16 +2266,13 @@ fn the_coverage_repeat_runs_once_for_the_head_with_its_longer_timeout() {
     let made = created(&journal);
     let coverage = case.run_dir().join("coverage");
     let last = &made[made.len() - 4..];
-    let names: Vec<String> = last
-        .iter()
-        .map(|(launch, _)| format!("{}-{}", launch.service, launch.replica))
-        .collect();
+    let names: Vec<String> = last.iter().map(|(launch, _)| vm(launch)).collect();
     assert_eq!(names, ["db-1", "api-1", "api-2", "load-1"]);
     assert_eq!(out_of(&last[3].0), Some(coverage.join("out").as_path()));
     let (db, version) = setup_snapshots(&case, &journal, Side::Head);
     for ((launch, _), seed) in last[..3].iter().zip([&db, &version, &version]) {
         let restores = matches!(&launch.seed, Some(Seed::Snapshot(id)) if id == seed);
-        assert!(restores, "{}-{}", launch.service, launch.replica);
+        assert!(restores, "{}", vm(launch));
     }
     let folders = workload_folders(&case, &journal);
     assert_eq!(
@@ -2343,19 +2304,8 @@ fn the_coverage_repeat_runs_once_for_the_head_with_its_longer_timeout() {
     assert!(matches!(raw.coverage, Some(CoverageOutcome::Failed(_))));
     let journal = fake.journal();
     let db = &created(&journal)[3 + 4 * 3].1;
-    let start = index_of(
-        &journal,
-        |call| matches!(call, Call::Create { ids, .. } if ids.contains(db)),
-    );
-    let waits: Vec<Instant> = journal[start..]
-        .iter()
-        .filter_map(|call| match call {
-            Call::Wait { deadline, .. } => Some(*deadline),
-            _ => None,
-        })
-        .collect();
     // The first wait ends a chunk of 1 s after the start, the last one at the deadline.
-    assert_eq!(*waits.iter().max().unwrap() - waits[0], (450 - 1) * SECOND);
+    assert_eq!(waited(&journal, db), (450 - 1) * SECOND);
     assert_clean(&fake, &case.left());
 }
 
@@ -2364,7 +2314,7 @@ fn a_coverage_repeat_past_one_and_a_half_timeout_is_a_fact_and_the_run_passes() 
     // The workload of the coverage repeat never ends; `api` leaves a coverage chunk the host could
     // not read, and a failed coverage repeat reads none.
     let case = Case::new(EXAMPLE);
-    let fake = fake(chunks(&[("1.0.coverage.json", "[")]));
+    let fake = fake(chunks(example_rules(), &[("1.0.coverage.json", "[")]));
     let sandbox = Hooked {
         hang: Some(("load", 2 * 3 + 1)),
         ..Hooked::new(&fake)
@@ -2598,7 +2548,7 @@ fn a_hit_starts_no_setup_vm_and_holds_after_the_run_folder_that_built_it_is_gone
     // run, `api` from the version snapshot.
     for vms in created(later).chunks(4) {
         let (db, _) = &vms[0];
-        let folder = out_of(db).unwrap().parent().unwrap().file_name().unwrap();
+        let folder = phase_of(db);
         let (setup, version) = &seeds[usize::from(!folder.ends_with("before"))];
         assert!(
             matches!(&db.seed, Some(Seed::Snapshot(id)) if id == setup),
@@ -2756,14 +2706,8 @@ fn kept_from(case: &Case, journal: &[Call]) -> Vec<[String; 3]> {
             _ => None,
         });
         let (launch, _) = made.iter().find(|(_, made)| Some(made) == vm).unwrap();
-        let folder = out_of(launch)
-            .unwrap()
-            .parent()
-            .unwrap()
-            .file_name()
-            .unwrap();
         let text = |key: &str| kept[key].as_str().unwrap().to_owned();
-        [text("side"), text("service"), folder.to_owned()]
+        [text("side"), text("service"), phase_of(launch).to_owned()]
     });
     entries.collect()
 }

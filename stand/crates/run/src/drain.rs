@@ -118,9 +118,7 @@ pub(crate) fn write_metrics(
             log_cut: cut.log,
         })
         .collect();
-    let path = dir.join("metrics.json");
-    let bytes = serde_json::to_vec_pretty(&instances).expect("metrics serialize");
-    fs::write(&path, bytes).map_err(StandFault::io(&path))
+    crate::write_json(&dir.join("metrics.json"), &instances)
 }
 
 /// Logs, the profile chunks of a profiled member, then `destroy`, member by member: on an error

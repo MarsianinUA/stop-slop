@@ -151,13 +151,19 @@ fn a_harness_source_is_in_the_folder_of_the_stand_file() {
 }
 
 #[test]
-fn a_harness_bind_is_read_only_and_a_volume_is_not() {
+fn a_harness_bind_is_a_read_only_folder_and_a_volume_is_not_read_only() {
     assert_refused(&[
         (
             "harness-writable",
             "services.load.volumes[0]",
             4,
             "write `.:/harness:ro`",
+        ),
+        (
+            "harness-file",
+            "services.load.volumes[0]",
+            4,
+            "`./load.js` is not a folder",
         ),
         (
             "volume-read-only",

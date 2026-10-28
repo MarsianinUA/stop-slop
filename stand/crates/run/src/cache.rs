@@ -4,13 +4,11 @@
 
 use std::collections::BTreeMap;
 use std::fs;
-use std::io;
 
 use camino::Utf8Path;
 use report::{ProbeRan, SetupSide};
 use sandbox::{ExecOutcome, SnapshotId};
 use serde::{Deserialize, Serialize};
-use spec::Stand;
 
 use crate::StandFault;
 use crate::launch::Seeds;
@@ -64,29 +62,21 @@ pub(crate) fn write(entry: &Utf8Path, seeds: &Seeds, setup: &SetupSide) -> Resul
             .expect("a probe writes a file")
             .to_owned(),
     });
-    let volumes = seeds.volumes.iter();
     let file = EntryFile {
         version: seeds.version.clone(),
-        volumes: volumes
-            .map(|(service, snapshot)| (service.as_str().to_owned(), snapshot.clone()))
-            .collect(),
+        volumes: seeds.volumes.clone(),
         sizes: setup.sizes.clone(),
         probes: probes.collect(),
     };
-    let path = entry.join(ENTRY);
     let temporary = entry.join(format!("{ENTRY}.tmp"));
-    let bytes = serde_json::to_vec_pretty(&file).expect("an entry serializes");
-    fs::write(&temporary, bytes).map_err(StandFault::io(&temporary))?;
+    crate::write_json(&temporary, &file)?;
+    let path = entry.join(ENTRY);
     fs::rename(&temporary, &path).map_err(StandFault::io(&path))
 }
 
 /// A hit: what the repeats start from, and the outputs of the setup that built the entry, its
 /// `out/` copied into `out_dir`, so the run folder stays whole after the entry goes.
-pub(crate) fn hit(
-    stand: &Stand,
-    entry: &Utf8Path,
-    out_dir: &Utf8Path,
-) -> Result<(Seeds, SetupSide), StandFault> {
+pub(crate) fn hit(entry: &Utf8Path, out_dir: &Utf8Path) -> Result<(Seeds, SetupSide), StandFault> {
     let path = entry.join(ENTRY);
     let file = read(entry)?.ok_or_else(|| {
         StandFault::bad(
@@ -95,12 +85,6 @@ pub(crate) fn hit(
         )
     })?;
     copy_dir(&entry.join(OUT), out_dir)?;
-    let mut volumes = BTreeMap::new();
-    for (service, snapshot) in file.volumes {
-        let name = stand.services.keys().find(|name| name.as_str() == service);
-        let name = name.ok_or_else(|| StandFault::bad(&path, format!("no service `{service}`")))?;
-        volumes.insert(name.clone(), snapshot);
-    }
     let probes = file.probes.into_iter().map(|probe| ProbeRan {
         name: probe.name,
         outcome: probe.outcome,
@@ -108,7 +92,7 @@ pub(crate) fn hit(
     });
     let seeds = Seeds {
         version: file.version,
-        volumes,
+        volumes: file.volumes,
     };
     let setup = SetupSide {
         sizes: file.sizes,
@@ -119,14 +103,7 @@ pub(crate) fn hit(
 }
 
 fn read(entry: &Utf8Path) -> Result<Option<EntryFile>, StandFault> {
-    let path = entry.join(ENTRY);
-    match fs::read(&path) {
-        Ok(bytes) => serde_json::from_slice(&bytes)
-            .map(Some)
-            .map_err(|error| StandFault::bad(&path, error)),
-        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
-        Err(error) => Err(StandFault::io(&path)(error)),
-    }
+    crate::read_json(&entry.join(ENTRY))
 }
 
 /// The whole of `/stand/out` of setup: `.err` and `.status` lie beside each probe output, and a

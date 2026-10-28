@@ -407,6 +407,14 @@ fn mount(item: &Field, dir: &Utf8Path, volumes: &BTreeSet<String>) -> Result<Mou
                  there, and the recipe would change after its seal"
             )));
         }
+        // `sandbox` binds folders only: the adapter and the `Fake` refuse any other host path at
+        // `create`, and `inspect` takes it for a gone folder.
+        if !path.is_dir() {
+            return Err(item.invalid(format!(
+                "`{source}` is not a folder, and a harness bind is one: bind the folder of the \
+                 recipe that holds it"
+            )));
+        }
         if !read_only {
             return Err(item.invalid(format!(
                 "`{text}` lets the service write into the recipe, and the next run would find it \

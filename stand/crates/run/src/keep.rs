@@ -11,11 +11,11 @@ use sandbox::{
     ExecOutcome, ImageRef, Launch, Mount, Outbound, Sandbox, Seed, SnapshotId, VolumeName, Waitable,
 };
 use serde::{Deserialize, Serialize};
-use spec::ServiceKind;
+use spec::{Healthcheck, ServiceKind};
 
 use crate::drain;
 use crate::launch::OUT;
-use crate::ready::{self, Fleet, Halt, Health, Start};
+use crate::ready::{self, Fleet, Halt, Start};
 use crate::{Cancel, InspectError, Inspected, Side, StandFault};
 
 const KEPT: &str = "kept.json";
@@ -84,7 +84,7 @@ struct KeptHealth {
 }
 
 impl KeptLaunch {
-    fn of(launch: &Launch, health: Option<&Health>) -> KeptLaunch {
+    fn of(launch: &Launch, health: Option<&Healthcheck>) -> KeptLaunch {
         let mounts = launch.mounts.iter().map(|mount| match mount {
             Mount::Bind {
                 host,
@@ -128,39 +128,32 @@ impl KeptLaunch {
     /// The kept snapshot with every mount of the kept repeat, since a restore needs each bind path
     /// (plan, row 87), and `/stand/out` on `out`; no peers, no published ports, no network.
     fn restore(&self, service: &str, snapshot: &SnapshotId, out: &Utf8Path) -> Launch {
-        let mounts = self.mounts.iter().map(|mount| match mount {
-            KeptMount::Bind { guest, .. } if guest == OUT => Mount::Bind {
-                host: out.to_owned(),
-                guest: guest.clone(),
-                read_only: false,
-            },
+        let mounts = self.mounts.iter().filter_map(|mount| match mount {
+            KeptMount::Bind { guest, .. } if guest == OUT => None,
             KeptMount::Bind {
                 host,
                 guest,
                 read_only,
-            } => Mount::Bind {
+            } => Some(Mount::Bind {
                 host: host.clone(),
                 guest: guest.clone(),
                 read_only: *read_only,
-            },
-            KeptMount::Volume { name, guest } => Mount::Volume {
+            }),
+            KeptMount::Volume { name, guest } => Some(Mount::Volume {
                 name: VolumeName::new(name),
                 guest: guest.clone(),
-            },
-            KeptMount::Scratch { guest } => Mount::Scratch {
+            }),
+            KeptMount::Scratch { guest } => Some(Mount::Scratch {
                 guest: guest.clone(),
-            },
+            }),
         });
         let mut mounts: Vec<Mount> = mounts.collect();
-        // A service without a probe had no `/stand/out`; the `argv` of `inspect` writes there.
-        let has_out = |mount: &Mount| matches!(mount, Mount::Bind { guest, .. } if guest == OUT);
-        if !mounts.iter().any(has_out) {
-            mounts.push(Mount::Bind {
-                host: out.to_owned(),
-                guest: OUT.to_owned(),
-                read_only: false,
-            });
-        }
+        // A service without a probe had none; the stdout of `argv` goes there.
+        mounts.push(Mount::Bind {
+            host: out.to_owned(),
+            guest: OUT.to_owned(),
+            read_only: false,
+        });
         Launch {
             service: service.to_owned(),
             replica: 1,
@@ -182,8 +175,8 @@ impl KeptLaunch {
         }
     }
 
-    fn health(&self) -> Option<Health> {
-        self.health.as_ref().map(|health| Health {
+    fn health(&self) -> Option<Healthcheck> {
+        self.health.as_ref().map(|health| Healthcheck {
             test: health.test.clone(),
             interval: Duration::from_millis(health.interval_ms),
             timeout: Duration::from_millis(health.timeout_ms),
@@ -239,18 +232,11 @@ pub(crate) fn write(run_dir: &Utf8Path, kept: &[Kept]) -> Result<(), StandFault>
     if kept.is_empty() {
         return Ok(());
     }
-    let path = run_dir.join(KEPT);
-    let bytes = serde_json::to_vec_pretty(kept).expect("kept snapshots serialize");
-    fs::write(&path, bytes).map_err(StandFault::io(&path))
+    crate::write_json(&run_dir.join(KEPT), &kept)
 }
 
 fn read(run_dir: &Utf8Path) -> Result<Vec<Kept>, StandFault> {
-    let path = run_dir.join(KEPT);
-    match fs::read(&path) {
-        Ok(bytes) => serde_json::from_slice(&bytes).map_err(|error| StandFault::bad(&path, error)),
-        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(Vec::new()),
-        Err(error) => Err(StandFault::io(&path)(error)),
-    }
+    Ok(crate::read_json(&run_dir.join(KEPT))?.unwrap_or_default())
 }
 
 /// Restores the kept snapshot of `service` on `side` from `run_dir/kept.json` into a VM without

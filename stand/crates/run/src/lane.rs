@@ -22,7 +22,7 @@ use spec::{Condition, ServiceKind, ServiceName, Stand, Tap};
 use crate::drain;
 use crate::keep::{self, Kept};
 use crate::launch::{self, Frame, Seeds};
-use crate::ready::{Fleet, Halt, Member};
+use crate::ready::{Fleet, Halt};
 use crate::{
     Cancel, Failed, RunError, SetupCache, Side, StandFault, Version, Versions, cache, probes, span,
 };
@@ -63,7 +63,6 @@ enum Kind {
     Coverage,
 }
 
-/// A repeat that ran to its end, or failed with `failure`.
 struct Repeated {
     output: RepeatOutput,
     failure: Option<Failure>,
@@ -85,9 +84,9 @@ struct Ctx<'r, S> {
     kept: Vec<Kept>,
 }
 
-pub(crate) fn run<S: Sandbox>(
+pub fn run(
     stand: &Stand,
-    sandbox: &S,
+    sandbox: &impl Sandbox,
     versions: &Versions,
     run_dir: &Utf8Path,
     cancel: &Cancel,
@@ -102,7 +101,8 @@ pub(crate) fn run<S: Sandbox>(
     let end = ctx.end();
     let raw = match result {
         Err(RunError::App(mut failed)) => {
-            failed.kept = ctx.kept_services(Side::Head);
+            let head = ctx.kept.iter().filter(|kept| kept.side == Side::Head);
+            failed.kept = head.map(|kept| kept.service.clone()).collect();
             return Err(RunError::App(failed));
         }
         result => result?,
@@ -222,7 +222,7 @@ fn set_up<S: Sandbox>(
     let outputs = Vec::new();
     let entry = match &version.setup {
         SetupCache::Hit(entry) => {
-            let (seeds, setup) = cache::hit(ctx.stand, entry, &out).map_err(fault)?;
+            let (seeds, setup) = cache::hit(entry, &out).map_err(fault)?;
             return Ok((setup, Lane::Ready { seeds, outputs }));
         }
         SetupCache::Build(entry) => entry,
@@ -401,15 +401,16 @@ fn finish_setup<S: Sandbox>(
         let (own, snapshot) = drain::snapshot(sandbox, &member.id).map_err(StandFault::Sandbox)?;
         ctx.loose.push(snapshot.clone());
         sizes.extend(own);
-        seeds.volumes.insert(service_name(stand, member), snapshot);
+        seeds
+            .volumes
+            .insert(member.launch.service.clone(), snapshot);
     }
     drain::write_metrics(dir, fleet, &cut, &stopped)?;
     drain::drain(sandbox, fleet, dir)?;
     Ok((probes, sizes))
 }
 
-/// A failed setup: the cut, the `on-failure` probes, the clean stop, the drain; the snapshots it
-/// took go at once.
+/// A failed setup ends as a failed repeat does; the snapshots it took go at once.
 fn fail_setup<S: Sandbox>(
     ctx: &mut Ctx<S>,
     fleet: &mut Fleet,
@@ -417,23 +418,16 @@ fn fail_setup<S: Sandbox>(
     dir: &Utf8Path,
     out: &Utf8Path,
 ) -> Result<Vec<ProbeRan>, StandFault> {
-    let sandbox = ctx.sandbox;
-    let cut = drain::cut(sandbox, fleet).map_err(StandFault::Sandbox)?;
-    let probes =
-        probes::run(sandbox, ctx.stand, fleet, Tap::OnFailure, out).map_err(StandFault::Sandbox)?;
-    let stopped = drain::stop(sandbox, fleet).map_err(StandFault::Sandbox)?;
-    drain::write_metrics(dir, fleet, &cut, &stopped)?;
-    drain::drain(sandbox, fleet, dir)?;
+    let ended = end_phase(ctx, fleet, Some(Tap::OnFailure), None, dir, out)?;
     for snapshot in seeds.snapshots() {
-        sandbox
+        ctx.sandbox
             .drop_snapshot(snapshot)
             .map_err(StandFault::Sandbox)?;
         ctx.loose.retain(|loose| loose != snapshot);
     }
-    Ok(probes)
+    Ok(ended.probes)
 }
 
-/// Repeat `repeat` of `lane`, unless it already failed; a failed repeat turns it `Failed`.
 fn measure<S: Sandbox>(
     ctx: &mut Ctx<S>,
     side: Side,
@@ -543,7 +537,7 @@ fn run_repeat<S: Sandbox>(
         Kind::Measured(repeat) if failing.is_some() || repeat == stand.repeat.get() => Some(side),
         _ => None,
     };
-    let mut ended = end_repeat(ctx, &mut fleet, tap, keeps, &dir, &out)
+    let mut ended = end_phase(ctx, &mut fleet, tap, keeps, &dir, &out)
         .map_err(|fault| torn(ctx.sandbox, &mut fleet, &dir, Stop::Fault(phase, fault)))?;
     let read = profiles(&dir, kind, failing.is_some(), &mut ended);
     let calls = read.map_err(|fault| Stop::Fault(phase, fault))?;
@@ -601,8 +595,9 @@ struct Ended {
     profiled: Vec<usize>,
 }
 
-/// `keeps`: the side whose end-of-run snapshots this repeat takes.
-fn end_repeat<S: Sandbox>(
+/// The end of a repeat or of a failed setup. `keeps`: the side whose end-of-run snapshots this
+/// repeat takes.
+fn end_phase<S: Sandbox>(
     ctx: &mut Ctx<S>,
     fleet: &mut Fleet,
     tap: Option<Tap>,
@@ -726,15 +721,6 @@ fn torn(sandbox: &impl Sandbox, fleet: &mut Fleet, dir: &Utf8Path, stop: Stop) -
     stop
 }
 
-fn service_name(stand: &Stand, member: &Member) -> ServiceName {
-    let names = stand.services.keys();
-    let mut names = names.filter(|name| name.as_str() == member.launch.service);
-    names
-        .next()
-        .expect("every member is a service of the stand")
-        .clone()
-}
-
 impl<'r, S: Sandbox> Ctx<'r, S> {
     fn new(
         stand: &'r Stand,
@@ -775,11 +761,5 @@ impl<'r, S: Sandbox> Ctx<'r, S> {
             }
         }
         written.and(dropped)
-    }
-
-    /// The services of `side` whose end-of-run snapshot `kept.json` lists.
-    fn kept_services(&self, side: Side) -> Vec<String> {
-        let kept = self.kept.iter().filter(|kept| kept.side == side);
-        kept.map(|kept| kept.service.clone()).collect()
     }
 }

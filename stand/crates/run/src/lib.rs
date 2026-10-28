@@ -3,6 +3,7 @@
 //! run folder, and gets back `report::Raw`.
 
 use std::fmt;
+use std::fs;
 use std::io;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -11,7 +12,8 @@ use std::time::Duration;
 use camino::{Utf8Path, Utf8PathBuf};
 use profile::ProfileError;
 use report::{Failure, Phase, Raw};
-use sandbox::{ExecOutcome, Sandbox, SandboxError};
+use sandbox::{ExecOutcome, SandboxError};
+use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use spec::Stand;
 
@@ -25,6 +27,7 @@ mod ready;
 
 pub use cache::cached_ids;
 pub use keep::{Kept, KeptLaunch, inspect, kept_ids};
+pub use lane::run;
 
 /// Over the sum of the timeouts in `span`: readiness, stops, drains and snapshots between them.
 const SPAN_MARGIN: Duration = Duration::from_secs(10 * 60);
@@ -32,16 +35,6 @@ const SPAN_MARGIN: Duration = Duration::from_secs(10 * 60);
 /// `span` on the defaults of `spec` (setup 10m, timeout 5m, `repeat` 3, no extras), for commands
 /// that wait for the lock without a readable stand file.
 pub const DEFAULT_SPAN: Duration = Duration::from_secs(60 * 60);
-
-pub fn run(
-    stand: &Stand,
-    sandbox: &impl Sandbox,
-    versions: &Versions,
-    run_dir: &Utf8Path,
-    cancel: &Cancel,
-) -> Result<Raw, RunError> {
-    lane::run(stand, sandbox, versions, run_dir, cancel)
-}
 
 /// `max_duration` of every VM and the lock-wait limit of `cli`: a whole run with `--before`, the
 /// coverage, fault and second-pass repeats included, plus the margin.
@@ -185,6 +178,22 @@ impl StandFault {
             source: io::Error::new(io::ErrorKind::InvalidData, message.to_string()),
         }
     }
+}
+
+/// A file `run` wrote; `None` when it is not there.
+fn read_json<T: DeserializeOwned>(path: &Utf8Path) -> Result<Option<T>, StandFault> {
+    match fs::read(path) {
+        Ok(bytes) => serde_json::from_slice(&bytes)
+            .map(Some)
+            .map_err(|error| StandFault::bad(path, error)),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(StandFault::io(path)(error)),
+    }
+}
+
+fn write_json(path: &Utf8Path, value: &impl Serialize) -> Result<(), StandFault> {
+    let bytes = serde_json::to_vec_pretty(value).expect("the files of `run` serialize");
+    fs::write(path, bytes).map_err(StandFault::io(path))
 }
 
 #[derive(Debug, thiserror::Error)]
