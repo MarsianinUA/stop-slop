@@ -1,11 +1,11 @@
-use std::fmt::Write as _;
+use std::fmt::{Display, Write as _};
 use std::io::{self, Write as _};
 
 use engine::{Finding, RuleState};
 use kit::serde::Serialize;
 use kit::{Files, FindingKind, RuleKind, Ruleset, Source};
 use repo::RepoError;
-use scope::{Base, BaseReason, SkipReason};
+use scope::{BaseReason, SkipReason};
 use state::IgnoreEntry;
 
 use crate::check::Checked;
@@ -43,11 +43,21 @@ struct RuleJson {
 #[derive(Serialize)]
 #[serde(crate = "kit::serde", rename_all = "camelCase")]
 struct CheckJson<'c> {
+    pr: Option<PrJson<'c>>,
     base: Option<BaseJson<'c>>,
     files: Vec<&'c str>,
     skipped: Vec<SkippedJson<'c>>,
     findings: Vec<FindingJson<'c>>,
     fixed: Vec<FixedJson<'c>>,
+}
+
+#[derive(Serialize)]
+#[serde(crate = "kit::serde", rename_all = "camelCase")]
+struct PrJson<'c> {
+    number: u32,
+    head: &'c str,
+    base: &'c str,
+    title: &'c str,
 }
 
 #[derive(Serialize)]
@@ -149,9 +159,15 @@ pub(crate) fn rules_json(states: &[RuleState], layout: JsonLayout) -> String {
 
 pub(crate) fn check_json(checked: &Checked, layout: JsonLayout) -> String {
     let report = CheckJson {
+        pr: checked.pr.as_ref().map(|pr| PrJson {
+            number: pr.number,
+            head: &pr.head,
+            base: &pr.base,
+            title: &pr.title,
+        }),
         base: checked.base.as_ref().map(|base| BaseJson {
             reference: &base.reference,
-            sha: sha7(base),
+            sha: sha7(&base.oid),
             reason: base_reason(base.reason),
         }),
         files: checked.files.iter().map(|path| path.as_str()).collect(),
@@ -196,9 +212,12 @@ pub(crate) fn check_json(checked: &Checked, layout: JsonLayout) -> String {
 pub(crate) fn check_text(checked: &Checked) -> String {
     let mut text = String::new();
     // `write!` to a `String` does not fail.
+    if let Some(pr) = &checked.pr {
+        let _ = writeln!(text, "pr {} {} into {}", pr.number, sha7(&pr.head), pr.base);
+    }
     if let Some(base) = &checked.base {
-        let reason = base_reason(base.reason);
-        let _ = writeln!(text, "base {} {} ({reason})", base.reference, sha7(base));
+        let (sha, reason) = (sha7(&base.oid), base_reason(base.reason));
+        let _ = writeln!(text, "base {} {sha} ({reason})", base.reference);
     }
     for skipped in &checked.skipped {
         let reason = skip_reason(skipped.reason);
@@ -303,8 +322,8 @@ fn json_text(value: &impl Serialize, layout: JsonLayout) -> String {
     json
 }
 
-fn sha7(base: &Base) -> String {
-    let mut sha = base.oid.to_string();
+fn sha7(oid: impl Display) -> String {
+    let mut sha = oid.to_string();
     sha.truncate(7);
     sha
 }

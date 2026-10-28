@@ -54,6 +54,9 @@ pub(crate) struct CheckArgs {
     /// Checks every file of the repository.
     #[arg(long)]
     pub(crate) all: bool,
+    /// Fetches this pull request and checks its head against `origin/<base>`.
+    #[arg(long, conflicts_with_all = ["base", "rev", "files", "all", "fix"])]
+    pub(crate) pr: Option<u32>,
     /// Applies the fixes of the rules that have one, then checks the files again.
     #[arg(long)]
     pub(crate) fix: bool,

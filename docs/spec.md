@@ -15,7 +15,7 @@ Why a tool of its own and not rules in the project's linter:
 1. **The program `stop-slop`**, in Rust, on the [oxc](https://github.com/oxc-project/oxc) parser, the same one oxlint uses.
    - It finds violations and applies the fixes that keep the code's behavior.
    - It reads syntax and scopes only. It has no TypeScript type checker, which keeps it fast and limits what a rule can know.
-   - It makes no network calls of its own. It runs `git`, and `gh` to look up the base of a pull request.
+   - It makes no network calls of its own. It runs `git`, and `gh` to look up pull requests.
 2. **The skill** in `skill/`, for a coding agent. The agent runs the program, judges the findings, fixes what the program cannot, and writes review comments.
 3. **The agent hook.** It checks a file right after the agent edits it, in repositories where you ran `stop-slop enable`.
 
@@ -187,6 +187,7 @@ Flags of `check`:
 | `--rev <ref>` | Reads the files from git at this revision instead of the disk, for reviews. Needs `--base` and does not go with `--fix`. |
 | `--files <path>...` | Checks only these files, absolute or relative to the current folder. A folder is an error. |
 | `--all` | Checks every tracked or untracked file of the repository that git does not ignore. For measurements and one-off cleanups. |
+| `--pr <n>` | For reviews. Fetches the head of pull request `<n>` into `refs/stop-slop/pr-<n>` and its base into `origin/<base>`, then checks the head against `origin/<base>`, reading the files from git. When the fetched head is not the one `gh` names, the PR moved meanwhile, and `check` exits with 2. Does not go with `--base`, `--rev`, `--files`, `--all` or `--fix`. |
 | `--fix` | Applies the safe fixes, writes the files, then checks them again. |
 | `--json` | Prints one line of JSON for an agent. |
 | `--pretty` | Indents the JSON by 2 spaces, for a person who saves it to a file and reads it. Needs `--json`. |
@@ -195,7 +196,7 @@ Exit codes:
 
 - `0`: nothing found;
 - `1`: `check` found something, of any kind;
-- `2`: the program refused its input: a bad flag, a bad `config.toml` or `ignore.json`, an unknown base or revision, a path of `--files` that does not exist, is a folder or lies outside the repository, a `package.json` or `tsconfig.json` that does not parse, a fingerprint `ignore` does not find, or a run outside a git repository;
+- `2`: the program refused its input: a bad flag, a bad `config.toml` or `ignore.json`, an unknown base or revision, a path of `--files` that does not exist, is a folder or lies outside the repository, a `package.json` or `tsconfig.json` that does not parse, a fingerprint `ignore` does not find, a run outside a git repository, `--pr` without `gh` or for a pull request `gh` does not find, or a pull request that moved while `--pr` fetched it;
 - `3`: the program itself broke: git failed in a way the program does not expect or did not start, or reading or writing a file failed;
 - `130`: Ctrl+C stopped it.
 
@@ -212,12 +213,13 @@ fixed src/markets/markets.service.ts node-protocol x1
 src/markets/markets.service.ts:4:12 no-any `any` turns off type checking for this value, so mistakes pass silently. Use a precise type, or `unknown` and narrow it.
 ```
 
-A finding is `file:line:column rule message`. Lines and columns start at 1, and columns count characters.
+A finding is `file:line:column rule message`. Lines and columns start at 1, and columns count characters. With `--pr`, a first line such as `pr 123 9f2c4e1 into dev` names the pull request, its head and its base.
 
 ### JSON output of `check`
 
 ```json
 {
+  "pr": null,
   "base": { "ref": "origin/feat/markets-cache", "sha": "a1b2c3d", "reason": "pr" },
   "files": ["src/modules/markets/markets.service.ts"],
   "skipped": [{ "file": "src/a.ts", "reason": "already-in-base" }],
@@ -239,7 +241,8 @@ A finding is `file:line:column rule message`. Lines and columns start at 1, and 
 
 The program prints it on one line, because indents cost an agent tokens. `--pretty` indents it by 2 spaces for a person. I laid out the example here by hand.
 
-- `base` has `ref`, a 7-character `sha` and `reason`, which is `flag`, `pr`, `ancestor` or `default`. It is `null` for `--files` and `--all`, and then every `inHunk` is `null` as well.
+- `pr` is `null` without `--pr`. With it, `pr` has the `number` of the pull request, its full `head` sha, its `base` branch without `origin/` and its `title`.
+- `base` has `ref`, a 7-character `sha` and `reason`, which is `flag`, `pr`, `ancestor` or `default`. With `--pr` it is `origin/<base>` with `reason` `pr`. It is `null` for `--files` and `--all`, and then every `inHunk` is `null` as well.
 - `files` lists the files the program checked, and `skipped` the ones it left out and why.
 - `findings` go in order of file, line, column and rule.
   - `kind` is `error` when the rule is sure, `candidate` for a heuristic the agent judges, and `parse-error` when the file did not parse, so no rule ran on it. A `parse-error` finding has `parse-error` as its `rule` too.
@@ -248,7 +251,7 @@ The program prints it on one line, because indents cost an agent tokens. `--pret
   - `fingerprint`: see [Exceptions](#exceptions).
 - `fixed` counts the fixes `--fix` applied, per rule and file.
 
-`skill/SKILL.md` lists the top-level fields, the fields of `base` and those of a finding. A test holds that list to this output both ways, so a field added or dropped on one side fails it.
+`skill/SKILL.md` lists the top-level fields and the fields of `pr`, `base` and a finding. A test holds that list to this output both ways, so a field added or dropped on one side fails it.
 
 On exit 2 and 3, `check --json` prints one line instead, even with `--pretty`, and so does `rules --json`:
 
@@ -256,7 +259,7 @@ On exit 2 and 3, `check --json` prints one line instead, even with `--pretty`, a
 {"failure": {"phase": "base", "cause": "base `dev` is not a commit"}, "next": ["stop-slop check --base <ref> --json"]}
 ```
 
-- `phase` names the step that failed: `args` (the flags), `repo` (git, the disk, the repository and `--rev`), `base`, `files` (a path of `--files`), `project` (`package.json` and `tsconfig.json`), `config` (a rule, option or group that `config.toml` names), `state` (the marker, `ignore.json` and a `config.toml` that does not parse) or `fingerprint`.
+- `phase` names the step that failed: `args` (the flags), `repo` (git, the disk, the repository and `--rev`), `base`, `pr` (`gh` and a pull request that moved, under `--pr`), `files` (a path of `--files`), `project` (`package.json` and `tsconfig.json`), `config` (a rule, option or group that `config.toml` names), `state` (the marker, `ignore.json` and a `config.toml` that does not parse) or `fingerprint`.
 - `cause` is the error of stderr on one line.
 - `next` holds the commands of the `next:` lines and is empty when no command helps.
 
@@ -513,7 +516,7 @@ Each part is its own crate, so the compiler holds the boundaries between them, a
 ## Install
 
 - Windows, Linux or macOS, with git 2.41 or newer, because the ancestor search needs `for-each-ref %(ahead-behind)`.
-- `gh`, signed in, for the base of a pull request and for reviews. Without it `check` still works and skips that step.
+- `gh`, signed in, for the base of a pull request and for reviews. Without it `check` still works and skips that step, but `check --pr` exits with 2.
 - Rust 1.97 or newer.
 
 ```sh
