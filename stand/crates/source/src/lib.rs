@@ -1,8 +1,8 @@
-//! The work tree as a git tree, the stand's snapshot of it and the tree "before". Nothing here
-//! touches the index or the files of the work tree.
+//! The work tree as a git tree, the stand's snapshot of it, the tree "before" and trees as tar.
+//! Nothing here touches the index or the files of the work tree.
 
 use std::fmt;
-use std::io;
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -12,6 +12,7 @@ use sha2::{Digest, Sha256};
 
 use crate::index::TempIndex;
 
+mod archive;
 mod index;
 
 /// Refs live in the common dir, which every worktree of a repo shares: one ref per worktree key.
@@ -100,6 +101,12 @@ pub fn before(worktree: &Worktree, before: &Before) -> Result<Resolved, SourceEr
         tree,
         taken_at,
     })
+}
+
+/// The tar of `tree` from its git objects: modes, the executable bit, symlinks as symlinks; no
+/// `export-ignore` or `export-subst`, unlike `git archive`.
+pub fn archive(worktree: &Worktree, tree: &Tree, out: &mut dyn Write) -> Result<(), SourceError> {
+    archive::write(&worktree.git(), tree, out)
 }
 
 /// Paths from the root that differ between the trees, added and removed ones included:
@@ -208,6 +215,9 @@ pub enum SourceError {
     NoMergeBase(String),
     #[error(transparent)]
     Git(#[from] GitError),
+    /// `out` of `archive` failed; only its owner knows its path.
+    #[error("cannot write the tar: {0}")]
+    Write(#[source] io::Error),
     #[error("{path}: {source}")]
     Io {
         path: Utf8PathBuf,

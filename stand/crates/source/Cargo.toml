@@ -9,6 +9,7 @@ publish = false
 camino.workspace = true
 gitcmd = { path = "../../../shared/gitcmd" }
 sha2.workspace = true
+tar.workspace = true
 thiserror.workspace = true
 
 [dev-dependencies]

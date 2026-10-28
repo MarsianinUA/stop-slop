@@ -1,11 +1,13 @@
 use std::collections::BTreeMap;
 use std::fs;
-use std::path::Path;
+use std::io::Read;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use camino::{Utf8Path, Utf8PathBuf};
 use gitcmd::Git;
-use source::{Before, SourceError, Worktree};
+use source::{Before, SourceError, Tree, Worktree};
+use tar::EntryType;
 use testkit::TempRepo;
 
 fn utf8(path: &Path) -> &Utf8Path {
@@ -40,31 +42,178 @@ fn state(t: &TempRepo) -> State {
             "--ignored",
             "--untracked-files=all",
         ]),
-        files: files(t.path()),
+        files: walk(t.path())
+            .into_iter()
+            .map(|(name, path)| (name, fs::read(path).unwrap()))
+            .collect(),
     }
 }
 
-fn files(root: &Path) -> BTreeMap<String, Vec<u8>> {
-    let mut files = BTreeMap::new();
+/// Files and links under `root` but `.git`, by their `/`-separated paths; links are not followed.
+fn walk(root: &Path) -> BTreeMap<String, PathBuf> {
+    let mut found = BTreeMap::new();
     let mut folders = vec![root.to_owned()];
     while let Some(folder) = folders.pop() {
         for entry in fs::read_dir(&folder).unwrap() {
-            let path = entry.unwrap().path();
-            if path.is_dir() {
-                if path.file_name().unwrap() != ".git" {
+            let entry = entry.unwrap();
+            let path = entry.path();
+            if entry.file_type().unwrap().is_dir() {
+                if entry.file_name() != ".git" {
                     folders.push(path);
                 }
             } else {
                 let name = path.strip_prefix(root).unwrap().to_string_lossy();
-                files.insert(name.replace('\\', "/"), fs::read(&path).unwrap());
+                found.insert(name.replace('\\', "/"), path);
             }
         }
     }
-    files
+    found
 }
 
-fn show(t: &TempRepo, tree: &source::Tree, path: &str) -> String {
-    t.git(&["show", &format!("{tree}:{path}")])
+fn archive(worktree: &Worktree, tree: &Tree) -> Vec<u8> {
+    let mut tar = Vec::new();
+    source::archive(worktree, tree, &mut tar).unwrap();
+    tar
+}
+
+#[derive(Debug, PartialEq)]
+enum Unpacked {
+    File { mode: u32, bytes: Vec<u8> },
+    Link(Vec<u8>),
+}
+
+/// The entries of a tar by path, read with the `tar` crate. Anything but files and links fails.
+fn unpack(tar: &[u8]) -> BTreeMap<String, Unpacked> {
+    let mut archive = tar::Archive::new(tar);
+    let mut unpacked = BTreeMap::new();
+    for entry in archive.entries().unwrap() {
+        let mut entry = entry.unwrap();
+        let path = String::from_utf8(entry.path_bytes().into_owned()).unwrap();
+        let mode = entry.header().mode().unwrap();
+        let value = match entry.header().entry_type() {
+            EntryType::Regular => {
+                let mut bytes = Vec::new();
+                entry.read_to_end(&mut bytes).unwrap();
+                Unpacked::File { mode, bytes }
+            }
+            EntryType::Symlink => Unpacked::Link(entry.link_name_bytes().unwrap().into_owned()),
+            other => panic!("{path}: {other:?}"),
+        };
+        unpacked.insert(path, value);
+    }
+    unpacked
+}
+
+fn file(mode: u32, text: &str) -> Unpacked {
+    Unpacked::File {
+        mode,
+        bytes: text.as_bytes().to_vec(),
+    }
+}
+
+/// Path to the mode and oid of its blob, as `ls-tree` lists a tree.
+type Listing = BTreeMap<String, (String, String)>;
+
+fn listed(t: &TempRepo, tree: &Tree) -> Listing {
+    let out = t.git(&["ls-tree", "-r", "-z", &tree.to_string()]);
+    out.split('\0')
+        .filter(|record| !record.is_empty())
+        .map(|record| {
+            let (fields, path) = record.split_once('\t').unwrap();
+            let fields: Vec<&str> = fields.split(' ').collect();
+            (
+                path.to_owned(),
+                (fields[0].to_owned(), fields[2].to_owned()),
+            )
+        })
+        .collect()
+}
+
+/// The entries of a tar listed as git would list them: `hash-object --stdin` hashes the bytes as
+/// they are, without filters.
+fn as_listed(t: &TempRepo, unpacked: &BTreeMap<String, Unpacked>) -> Listing {
+    unpacked
+        .iter()
+        .map(|(path, value)| {
+            let (mode, bytes) = match value {
+                Unpacked::File { mode: 0o755, bytes } => ("100755", bytes),
+                Unpacked::File { mode: 0o644, bytes } => ("100644", bytes),
+                Unpacked::File { mode, .. } => panic!("{path}: mode {mode:o}"),
+                Unpacked::Link(target) => ("120000", target),
+            };
+            (path.clone(), (mode.to_owned(), hash(t, bytes)))
+        })
+        .collect()
+}
+
+fn hash(t: &TempRepo, bytes: &[u8]) -> String {
+    let out = Git::at(t.path())
+        .run_with_input(&["hash-object", "--stdin"], bytes)
+        .unwrap();
+    String::from_utf8(out).unwrap().trim_end().to_owned()
+}
+
+/// On unix a real link. On Windows the repo has `core.symlinks=false` and the link is a file
+/// holding its target, as a checkout without the privilege for links leaves it; git still keeps
+/// it as a link.
+fn symlink(t: &TempRepo, target: &str, link: &str) {
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(target, t.path().join(link)).unwrap();
+    #[cfg(windows)]
+    {
+        t.git(&["config", "core.symlinks", "false"]);
+        t.write(link, target);
+        let oid = t.git(&["hash-object", "-w", link]);
+        let entry = format!("120000,{oid},{link}");
+        t.git(&["update-index", "--add", "--cacheinfo", &entry]);
+    }
+}
+
+/// On Windows `core.fileMode` is false: the bit lives only in the index.
+fn executable(t: &TempRepo, path: &str) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let full = t.path().join(path);
+        fs::set_permissions(full, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    #[cfg(windows)]
+    t.git(&["add", "--chmod=+x", path]);
+}
+
+/// What the system `tar` extracts, listed as git would list it: an extractor other than the
+/// writer's own crate.
+#[cfg(unix)]
+fn extracted(t: &TempRepo, tar: &[u8]) -> Listing {
+    use std::io::Write;
+    use std::os::unix::ffi::OsStrExt;
+    use std::os::unix::fs::PermissionsExt;
+    use std::process::{Command, Stdio};
+
+    let dir = tempfile::tempdir().unwrap();
+    let mut child = Command::new("tar")
+        .args(["-x", "-f", "-", "-C"])
+        .arg(dir.path())
+        .stdin(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child.stdin.take().unwrap().write_all(tar).unwrap();
+    assert!(child.wait().unwrap().success());
+    walk(dir.path())
+        .into_iter()
+        .map(|(name, path)| {
+            let meta = fs::symlink_metadata(&path).unwrap();
+            let (mode, bytes) = if meta.file_type().is_symlink() {
+                let target = fs::read_link(&path).unwrap();
+                ("120000", target.as_os_str().as_bytes().to_vec())
+            } else if meta.permissions().mode() & 0o111 != 0 {
+                ("100755", fs::read(&path).unwrap())
+            } else {
+                ("100644", fs::read(&path).unwrap())
+            };
+            (name, (mode.to_owned(), hash(t, &bytes)))
+        })
+        .collect()
 }
 
 #[test]
@@ -84,6 +233,7 @@ fn a_snapshot_takes_the_files_on_disk_and_no_call_changes_the_repo() {
 
     let worktree = open(&t);
     let tree = source::snapshot(&worktree).unwrap();
+    let tar = archive(&worktree, &tree);
     source::pin(&worktree, &tree, at(1_800_000_000)).unwrap();
     source::before(&worktree, &Before::Session).unwrap();
     let committed = source::before(&worktree, &Before::Ref("main".to_owned())).unwrap();
@@ -91,14 +241,64 @@ fn a_snapshot_takes_the_files_on_disk_and_no_call_changes_the_repo() {
     source::forget(&worktree).unwrap();
 
     assert_eq!(state(&t), before);
-    assert_eq!(show(&t, &tree, "edited.txt"), "two");
-    assert_eq!(show(&t, &tree, "staged.txt"), "on disk");
-    assert_eq!(show(&t, &tree, "new/untracked.txt"), "new");
-    let paths = t.git(&["ls-tree", "-r", "--name-only", &tree.to_string()]);
+    let unpacked = unpack(&tar);
+    let expected = BTreeMap::from([
+        (".gitignore".to_owned(), file(0o644, "*.log\n")),
+        ("edited.txt".to_owned(), file(0o644, "two\n")),
+        ("new/untracked.txt".to_owned(), file(0o644, "new\n")),
+        ("staged.txt".to_owned(), file(0o644, "on disk\n")),
+    ]);
+    assert_eq!(unpacked, expected);
+}
+
+#[test]
+fn archive_keeps_what_git_archive_drops_and_unpacks_to_the_blobs_of_the_tree() {
+    let t = TempRepo::new();
+    let long = format!("{}/file.txt", ["a-folder-with-a-long-name"; 4].join("/"));
+    t.write(
+        ".gitattributes",
+        "skip.txt export-ignore\nsubst.txt export-subst\n",
+    )
+    .write("skip.txt", "kept\n")
+    .write("subst.txt", "$Format:%H$\n")
+    .write("crlf.txt", "one\r\ntwo\r\n")
+    .write("run.sh", "#!/bin/sh\necho run\n")
+    .write("target.txt", "target\n")
+    .write(&long, "deep\n");
+    symlink(&t, "target.txt", "link");
+    symlink(&t, &long, "long-link");
+    executable(&t, "run.sh");
+    t.commit("first");
+    let worktree = open(&t);
+    let tree = source::snapshot(&worktree).unwrap();
+    assert_eq!(tree.to_string(), t.git(&["rev-parse", "HEAD^{tree}"]));
+
+    let tar = archive(&worktree, &tree);
+    let unpacked = unpack(&tar);
+    assert_eq!(as_listed(&t, &unpacked), listed(&t, &tree));
+    assert_eq!(unpacked["skip.txt"], file(0o644, "kept\n"));
+    assert_eq!(unpacked["subst.txt"], file(0o644, "$Format:%H$\n"));
+    assert_eq!(unpacked["crlf.txt"], file(0o644, "one\r\ntwo\r\n"));
+    assert_eq!(unpacked["run.sh"], file(0o755, "#!/bin/sh\necho run\n"));
+    assert_eq!(unpacked["link"], Unpacked::Link(b"target.txt".to_vec()));
     assert_eq!(
-        paths,
-        ".gitignore\nedited.txt\nnew/untracked.txt\nstaged.txt"
+        unpacked["long-link"],
+        Unpacked::Link(long.as_bytes().to_vec())
     );
+    assert_eq!(unpacked[&long], file(0o644, "deep\n"));
+    #[cfg(unix)]
+    assert_eq!(extracted(&t, &tar), listed(&t, &tree));
+}
+
+#[test]
+fn archive_writes_the_bytes_git_stores_not_the_line_ends_on_disk() {
+    let t = TempRepo::new();
+    t.git(&["config", "core.autocrlf", "true"]);
+    t.write("text.txt", "one\r\ntwo\r\n").commit("first");
+    let worktree = open(&t);
+    let tree = source::snapshot(&worktree).unwrap();
+    let unpacked = unpack(&archive(&worktree, &tree));
+    assert_eq!(unpacked["text.txt"], file(0o644, "one\ntwo\n"));
 }
 
 #[test]
