@@ -65,6 +65,7 @@ jobs:
       - run: cargo test --locked --workspace
       # The root cases of guest (the probe's privilege drop, FITRIM on a loop-mounted ext4) skipped
       # above; here they run as root, where a skip fails, and the count shows the filter matched both.
+      # `--workspace` rather than `-p guest` keeps the features of the build above, so nothing is rebuilt.
       - name: Run the root cases of guest under sudo
         if: runner.os == 'Linux'
         shell: bash
@@ -72,7 +73,7 @@ jobs:
           CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUNNER: sudo -E
           STAND_GUEST_ROOT_REQUIRED: 1
         run: |
-          cargo test --locked -p guest --test guest -- --exact \
+          cargo test --locked --workspace --test guest -- --exact \
             process::exec_under_root_takes_the_probe_group_and_the_user \
             trim::trim_under_root_frees_the_blocks_of_deleted_files | tee "$RUNNER_TEMP/root.log"
           grep -q ' 2 passed;' "$RUNNER_TEMP/root.log"

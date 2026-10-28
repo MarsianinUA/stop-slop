@@ -1,17 +1,22 @@
 //! `stand-guest net`: the forwarder's entry. Under `Redirect` (in a guest) one listener takes every
 //! TCP connection a netfilter REDIRECT rule sends it, and `SO_ORIGINAL_DST` names the target the
 //! client meant. Under `Direct` (host tests, no root) a listener binds each route's `address:port`.
-//! The relay is the same; only how a connection arrives and how its target is found differ.
+//! The relay is the same; only how a connection arrives and where the address it dialed comes
+//! from differ.
 
-use std::net::{SocketAddr, TcpListener};
+use std::net::{SocketAddrV4, TcpListener, TcpStream};
 use std::process::ExitCode;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
+use std::time::Duration;
 
 use guest::{Entry, Route, Routes};
 
 use crate::relay::Relay;
+
+/// A lasting accept error such as `EMFILE` comes back at once until a socket closes.
+const ACCEPT_RETRY: Duration = Duration::from_millis(10);
 
 static TERM: AtomicBool = AtomicBool::new(false);
 
@@ -61,9 +66,9 @@ fn start_redirect(relay: &Arc<Relay>, routes: &Routes) -> Result<(), String> {
     crate::nf::install(port, &addresses)
         .map_err(|error| format!("install the netfilter rules: {error}"))?;
     let relay = Arc::clone(relay);
-    thread::spawn(move || {
-        for client in listener.incoming().flatten() {
-            relay.serve_redirected(client);
+    accept_each(listener, move |client| {
+        if let Some(dialed) = crate::nf::original_dst(&client) {
+            relay.serve(dialed, client);
         }
     });
     Ok(())
@@ -74,18 +79,24 @@ fn start_redirect(_: &Arc<Relay>, _: &Routes) -> Result<(), String> {
     Err("--redirect needs netfilter, which only Linux has; on this host use --direct".into())
 }
 
-/// The listener of `routes[i]` serves target `i`.
 fn start_direct(relay: &Arc<Relay>, routes: &[Route]) -> Result<(), String> {
-    for (index, route) in routes.iter().enumerate() {
-        let address = SocketAddr::from((route.address, route.port));
+    for route in routes {
+        let address = SocketAddrV4::new(route.address, route.port);
         let listener =
             TcpListener::bind(address).map_err(|error| format!("bind {address}: {error}"))?;
         let relay = Arc::clone(relay);
-        thread::spawn(move || {
-            for client in listener.incoming().flatten() {
-                relay.serve(index, client);
-            }
-        });
+        accept_each(listener, move |client| relay.serve(address, client));
     }
     Ok(())
+}
+
+fn accept_each(listener: TcpListener, mut serve: impl FnMut(TcpStream) + Send + 'static) {
+    thread::spawn(move || {
+        loop {
+            match listener.accept() {
+                Ok((client, _)) => serve(client),
+                Err(_) => thread::sleep(ACCEPT_RETRY),
+            }
+        }
+    });
 }

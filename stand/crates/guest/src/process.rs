@@ -123,19 +123,16 @@ pub fn exec(args: &ExecArgs) -> ExitCode {
         Err(error) => return not_started(WHO, &args.argv[0], &error),
     };
     let pid = child.id() as libc::pid_t;
-    let deadline = Instant::now() + args.deadline;
-    loop {
-        if let Some(exit) = child.try_wait().expect("wait for the command") {
-            kill_group(pid);
-            return ExitCode::from(shell_code(exit));
-        }
-        let now = Instant::now();
-        if now >= deadline {
-            kill_group(pid);
+    let exited = poll(Instant::now() + args.deadline, || {
+        child.try_wait().expect("wait for the command")
+    });
+    kill_group(pid);
+    match exited {
+        Some(exit) => ExitCode::from(shell_code(exit)),
+        None => {
             let _ = child.wait();
-            return ExitCode::from(124);
+            ExitCode::from(124)
         }
-        thread::sleep(POLL.min(deadline - now));
     }
 }
 
@@ -225,31 +222,30 @@ fn kill_group(pgid: libc::pid_t) {
 
 /// `run` reaps the command as soon as it exits, so a pid with no process means it exited.
 fn gone_by(pid: libc::pid_t, deadline: Instant) -> bool {
-    loop {
-        if send(pid, 0).is_err_and(|error| error.raw_os_error() == Some(libc::ESRCH)) {
-            return true;
-        }
-        let now = Instant::now();
-        if now >= deadline {
-            return false;
-        }
-        thread::sleep(POLL.min(deadline - now));
-    }
+    poll(deadline, || {
+        send(pid, 0)
+            .is_err_and(|error| error.raw_os_error() == Some(libc::ESRCH))
+            .then_some(())
+    })
+    .is_some()
 }
 
 /// `None` when `run` records no code by `deadline`: the command outlived the kill, or `run` is gone.
 fn recorded_code(path: &Path, deadline: Instant) -> Option<i32> {
+    poll(deadline, || read_status(path).ok()?.code)
+}
+
+/// `check` every `POLL` until it gives a value, or `None` once `deadline` has passed.
+fn poll<T>(deadline: Instant, mut check: impl FnMut() -> Option<T>) -> Option<T> {
     loop {
-        if let Ok(Status {
-            code: Some(code), ..
-        }) = read_status(path)
-        {
-            return Some(code);
+        if let Some(value) = check() {
+            return Some(value);
         }
-        if Instant::now() >= deadline {
+        let now = Instant::now();
+        if now >= deadline {
             return None;
         }
-        thread::sleep(POLL);
+        thread::sleep(POLL.min(deadline - now));
     }
 }
 

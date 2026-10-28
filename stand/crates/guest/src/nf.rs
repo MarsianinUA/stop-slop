@@ -106,8 +106,6 @@ pub fn install(forwarder_port: u16, addresses: &[Ipv4Addr]) -> io::Result<()> {
 
 /// Where a connection was going before the REDIRECT rule turned it to the forwarder.
 pub fn original_dst(stream: &TcpStream) -> Option<SocketAddrV4> {
-    // 80 at `SOL_IP`; `libc` has no constant for it.
-    const SO_ORIGINAL_DST: libc::c_int = 80;
     let mut address: libc::sockaddr_in = unsafe { mem::zeroed() };
     let mut len = mem::size_of::<libc::sockaddr_in>() as libc::socklen_t;
     // SAFETY: the kernel writes at most `len` bytes into `address`.
@@ -115,7 +113,7 @@ pub fn original_dst(stream: &TcpStream) -> Option<SocketAddrV4> {
         libc::getsockopt(
             stream.as_raw_fd(),
             libc::SOL_IP,
-            SO_ORIGINAL_DST,
+            libc::SO_ORIGINAL_DST,
             (&raw mut address).cast(),
             &mut len,
         )

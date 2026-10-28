@@ -19,9 +19,7 @@ struct FstrimRange {
     minlen: u64,
 }
 
-/// `_IOWR('X', 121, struct fstrim_range)`, the same on x86_64 and aarch64. `Ioctl` is `c_int` on
-/// musl and `c_ulong` on gnu; the cast keeps the bits on both.
-const FITRIM: libc::Ioctl = 0xC018_5879u32 as libc::Ioctl;
+const FITRIM: libc::Ioctl = libc::_IOWR::<FstrimRange>(b'X' as u32, 121);
 
 pub fn run(args: &TrimArgs) -> ExitCode {
     let mut code = ExitCode::SUCCESS;

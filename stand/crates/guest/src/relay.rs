@@ -4,9 +4,7 @@
 
 use std::fs;
 use std::io::{ErrorKind, Read, Write};
-#[cfg(target_os = "linux")]
-use std::net::{Ipv4Addr, SocketAddrV4};
-use std::net::{Shutdown, TcpStream, ToSocketAddrs};
+use std::net::{IpAddr, Ipv4Addr, Shutdown, SocketAddr, SocketAddrV4, TcpStream, ToSocketAddrs};
 use std::os::fd::AsRawFd;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
@@ -27,6 +25,8 @@ const FAULT_EVERY: Duration = Duration::from_millis(100);
 /// Shared by every accept thread, the fault watcher and the counters writer.
 pub struct Relay {
     upstream_host: String,
+    /// Kept from the first lookup that resolves, so a connection pays no lookup of its own.
+    upstream_ips: OnceLock<Vec<IpAddr>>,
     targets: Vec<Target>,
     unexposed: Vec<Unexposed>,
     changed: AtomicBool,
@@ -35,8 +35,7 @@ pub struct Relay {
 /// One exposed `name:port`.
 struct Target {
     target: String,
-    /// The route's `address:port`, which `SO_ORIGINAL_DST` gives back under `Redirect`.
-    #[cfg(target_os = "linux")]
+    /// The route's `address:port`, the one a client of this target dials.
     at: SocketAddrV4,
     upstream: Vec<u16>,
     next: AtomicUsize,
@@ -71,7 +70,6 @@ struct Counts {
 
 struct Unexposed {
     name: String,
-    #[cfg(target_os = "linux")]
     address: Ipv4Addr,
     attempts: AtomicU64,
 }
@@ -89,13 +87,12 @@ struct Piped {
 }
 
 impl Relay {
-    /// Target `i` is `routes[i]`.
+    /// The counters list the targets in the order of `routes`.
     pub fn new(upstream_host: &str, routes: &[Route], unexposed: &[UnexposedName]) -> Arc<Relay> {
         let targets = routes
             .iter()
             .map(|route| Target {
                 target: format!("{}:{}", route.name, route.port),
-                #[cfg(target_os = "linux")]
                 at: SocketAddrV4::new(route.address, route.port),
                 upstream: route.upstream.clone(),
                 next: AtomicUsize::new(0),
@@ -107,13 +104,13 @@ impl Relay {
             .iter()
             .map(|name| Unexposed {
                 name: name.name.clone(),
-                #[cfg(target_os = "linux")]
                 address: name.address,
                 attempts: AtomicU64::new(0),
             })
             .collect();
         Arc::new(Relay {
             upstream_host: upstream_host.to_owned(),
+            upstream_ips: OnceLock::new(),
             targets,
             unexposed,
             // The file exists from the start, so a guest nobody connected from still has counters.
@@ -121,21 +118,12 @@ impl Relay {
         })
     }
 
-    /// Relays a connection that reached target `index`, in its own thread.
-    pub fn serve(self: &Arc<Relay>, index: usize, client: TcpStream) {
-        let relay = Arc::clone(self);
-        thread::spawn(move || relay.relay(&relay.targets[index], client));
-    }
-
-    /// A connection the REDIRECT rule turned here goes to the target the client dialed. A dial to
-    /// a name without `expose` is counted and closed, one to no target at all just closed.
-    #[cfg(target_os = "linux")]
-    pub fn serve_redirected(self: &Arc<Relay>, client: TcpStream) {
-        let Some(dialed) = crate::nf::original_dst(&client) else {
-            return;
-        };
+    /// Relays a connection, in its own thread, to the target at the address its client dialed. A
+    /// dial to a name without `expose` is counted and closed, one to no target at all just closed.
+    pub fn serve(self: &Arc<Relay>, dialed: SocketAddrV4, client: TcpStream) {
         if let Some(index) = self.targets.iter().position(|target| target.at == dialed) {
-            self.serve(index, client);
+            let relay = Arc::clone(self);
+            thread::spawn(move || relay.relay(&relay.targets[index], client));
         } else if let Some(name) = self
             .unexposed
             .iter()
@@ -258,15 +246,28 @@ impl Relay {
 
     /// The next replica in turn; one that refuses passes the connection to the one after it.
     fn connect(&self, target: &Target) -> Option<TcpStream> {
+        let ips = self.upstream_ips()?;
         let start = target.next.fetch_add(1, Ordering::Relaxed);
         let count = target.upstream.len();
         (0..count).find_map(|step| {
             let port = target.upstream[start.wrapping_add(step) % count];
-            let addresses = (self.upstream_host.as_str(), port).to_socket_addrs().ok()?;
-            addresses
-                .into_iter()
-                .find_map(|address| TcpStream::connect_timeout(&address, CONNECT_TIMEOUT).ok())
+            ips.iter().find_map(|&ip| {
+                TcpStream::connect_timeout(&SocketAddr::new(ip, port), CONNECT_TIMEOUT).ok()
+            })
         })
+    }
+
+    /// `None` while `upstream_host` does not resolve; the next connection looks it up again.
+    fn upstream_ips(&self) -> Option<&[IpAddr]> {
+        if let Some(ips) = self.upstream_ips.get() {
+            return Some(ips);
+        }
+        let ips: Vec<IpAddr> = (self.upstream_host.as_str(), 0)
+            .to_socket_addrs()
+            .ok()?
+            .map(|address| address.ip())
+            .collect();
+        (!ips.is_empty()).then(|| self.upstream_ips.get_or_init(|| ips).as_slice())
     }
 
     fn pipe(
@@ -310,6 +311,7 @@ impl Relay {
 
     fn sniff(&self, counts: &Counts, sniff: &Mutex<HttpSniff>, dir: Dir, bytes: &[u8]) {
         let mut sniff = sniff.lock().expect("sniff lock");
+        let was_http = sniff.is_http();
         let statuses = match dir {
             Dir::Out => {
                 sniff.feed_request(bytes);
@@ -317,7 +319,8 @@ impl Relay {
             }
             Dir::In => sniff.feed_response(bytes),
         };
-        if sniff.is_http() {
+        // The target's lock, shared by its connections, only when there is something to add.
+        if sniff.is_http() && (!was_http || !statuses.is_empty()) {
             let mut http = counts.http.lock().expect("http lock");
             let classes = http.get_or_insert([0; 5]);
             for status in statuses {

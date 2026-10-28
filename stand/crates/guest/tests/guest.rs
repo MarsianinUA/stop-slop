@@ -15,6 +15,24 @@ use guest::{
 use serde_json::json;
 
 const BIN: &str = env!("CARGO_BIN_EXE_stand-guest");
+#[cfg(unix)]
+const LONG: Duration = Duration::from_secs(10);
+
+#[cfg(unix)]
+fn guest(command: &Command) -> std::process::Command {
+    let mut process = std::process::Command::new(BIN);
+    process.args(command.to_args());
+    process
+}
+
+#[cfg(unix)]
+fn until(what: &str, mut done: impl FnMut() -> bool) {
+    let deadline = std::time::Instant::now() + LONG;
+    while !done() {
+        assert!(std::time::Instant::now() < deadline, "{what} never came");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
 
 #[test]
 fn argument_round_trip_for_every_subcommand() {
@@ -177,49 +195,47 @@ mod forwarder {
     use std::io::{self, ErrorKind, Read, Write};
     use std::net::{Shutdown, TcpListener, TcpStream};
     use std::path::Path;
-    use std::process::{Child, Command as Process};
+    use std::process::Child;
     use std::thread;
     use std::time::Instant;
 
     use super::*;
 
     const LOOPBACK: Ipv4Addr = Ipv4Addr::LOCALHOST;
-    const LONG: Duration = Duration::from_secs(10);
+
+    /// A loopback listener on a free port, handed to `serve` in a thread of its own.
+    fn listen(serve: impl FnOnce(TcpListener) + Send + 'static) -> u16 {
+        let listener = TcpListener::bind((LOOPBACK, 0)).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        thread::spawn(move || serve(listener));
+        port
+    }
 
     /// Reads each request to its end, writes `reply` and closes.
     fn upstream(reply: &'static [u8]) -> u16 {
-        let listener = TcpListener::bind((LOOPBACK, 0)).unwrap();
-        let port = listener.local_addr().unwrap().port();
-        thread::spawn(move || {
+        listen(move |listener| {
             for mut stream in listener.incoming().flatten() {
                 thread::spawn(move || {
                     let _ = stream.read_to_end(&mut Vec::new());
                     let _ = stream.write_all(reply);
                 });
             }
-        });
-        port
+        })
     }
 
     /// Writes back what it reads until the client closes, so a connection stays open between
     /// exchanges.
     fn echo_upstream() -> u16 {
-        let listener = TcpListener::bind((LOOPBACK, 0)).unwrap();
-        let port = listener.local_addr().unwrap().port();
-        thread::spawn(move || {
+        listen(|listener| {
             for stream in listener.incoming().flatten() {
                 thread::spawn(move || io::copy(&mut &stream, &mut &stream));
             }
-        });
-        port
+        })
     }
 
     /// Closes each connection at once, before any reply.
     fn closing_upstream() -> u16 {
-        let listener = TcpListener::bind((LOOPBACK, 0)).unwrap();
-        let port = listener.local_addr().unwrap().port();
-        thread::spawn(move || listener.incoming().for_each(drop));
-        port
+        listen(|listener| listener.incoming().for_each(drop))
     }
 
     fn free_port() -> u16 {
@@ -274,7 +290,7 @@ mod forwarder {
                     counters: counters.clone(),
                     fault: fault.clone(),
                 });
-                let mut child = Process::new(BIN).args(command.to_args()).spawn().unwrap();
+                let mut child = guest(&command).spawn().unwrap();
                 if bound(&mut child, &counters) {
                     return Forwarder {
                         child,
@@ -328,7 +344,7 @@ mod forwarder {
 
         /// Every read of the file must parse whole.
         fn counters_until(&self, done: impl Fn(&Counters) -> bool) -> Counters {
-            let deadline = Instant::now() + Duration::from_secs(10);
+            let deadline = Instant::now() + LONG;
             let mut last = None;
             while Instant::now() < deadline {
                 if let Ok(text) = std::fs::read_to_string(&self.counters) {
@@ -346,7 +362,7 @@ mod forwarder {
 
     /// Whether `net` wrote its first counters, rather than exit.
     fn bound(child: &mut Child, counters: &Path) -> bool {
-        let deadline = Instant::now() + Duration::from_secs(10);
+        let deadline = Instant::now() + LONG;
         while Instant::now() < deadline {
             if counters.exists() {
                 return true;
@@ -507,6 +523,7 @@ mod forwarder {
         let fwd = Forwarder::start(vec![route("db", &[echo_upstream()])]);
 
         fwd.switch(0, FaultSwitchMode::Slow { delay_ms: DELAY_MS });
+        // The watcher reads the file every 100 ms, so the switch takes effect a moment later.
         until("the delay", || fwd.first_byte(0) >= delay);
         assert!(fwd.first_byte(0) >= delay);
         assert_eq!(fwd.request(0, b"ping"), b"ping");
@@ -523,15 +540,6 @@ mod forwarder {
             "{read:?}"
         );
     }
-
-    /// The fault watcher reads its file every 100 ms, so a switch takes effect a moment later.
-    fn until(what: &str, mut done: impl FnMut() -> bool) {
-        let deadline = Instant::now() + LONG;
-        while !done() {
-            assert!(Instant::now() < deadline, "{what} never came");
-            thread::sleep(Duration::from_millis(10));
-        }
-    }
 }
 
 #[cfg(unix)]
@@ -539,12 +547,9 @@ mod process {
     use std::fs;
     use std::path::Path;
     use std::process::{Child, Command as Process};
-    use std::thread;
     use std::time::Instant;
 
     use super::*;
-
-    const LONG: Duration = Duration::from_secs(10);
 
     #[test]
     fn run_exits_with_the_code_of_the_command_and_its_group_ends_with_it() {
@@ -654,12 +659,6 @@ mod process {
         }
     }
 
-    fn guest(command: &Command) -> Process {
-        let mut process = Process::new(BIN);
-        process.args(command.to_args());
-        process
-    }
-
     /// `sh -c <script>` with `$1`, `$2`... set to `args`.
     fn sh(script: &str, args: &[&Path]) -> Vec<String> {
         let shell = ["sh", "-c", script, "sh"].map(String::from);
@@ -716,24 +715,14 @@ mod process {
     }
 
     fn wait_for(path: &Path) {
-        let deadline = Instant::now() + LONG;
-        while !path.exists() {
-            assert!(
-                Instant::now() < deadline,
-                "{} never appeared",
-                path.display()
-            );
-            thread::sleep(Duration::from_millis(10));
-        }
+        until(&path.display().to_string(), || path.exists());
     }
 
     /// Init reaps the killed children, so they may stay in the group a moment as zombies.
     fn assert_group_ends(pgid: libc::pid_t) {
-        let deadline = Instant::now() + LONG;
-        while unsafe { libc::killpg(pgid, 0) } == 0 {
-            assert!(Instant::now() < deadline, "group {pgid} still runs");
-            thread::sleep(Duration::from_millis(10));
-        }
+        until(&format!("the end of group {pgid}"), || unsafe {
+            libc::killpg(pgid, 0) != 0
+        });
     }
 }
 
@@ -800,8 +789,7 @@ mod trim {
 
     fn trim(mounts: &[&Path]) -> Output {
         let mounts = mounts.iter().map(|mount| mount.to_path_buf()).collect();
-        let command = Command::Trim(TrimArgs { mounts });
-        Process::new(BIN).args(command.to_args()).output().unwrap()
+        guest(&Command::Trim(TrimArgs { mounts })).output().unwrap()
     }
 
     /// Mounted from a sparse image, so a discard on it gives the image's blocks back.

@@ -291,15 +291,9 @@ impl Flags {
     }
 
     fn entry(&mut self) -> Result<Entry, GuestError> {
-        let words = std::mem::take(&mut self.words);
-        match words
-            .iter()
-            .map(String::as_str)
-            .collect::<Vec<_>>()
-            .as_slice()
-        {
-            ["--redirect"] => Ok(Entry::Redirect),
-            ["--direct"] => Ok(Entry::Direct),
+        match std::mem::take(&mut self.words).as_slice() {
+            [word] if word == "--redirect" => Ok(Entry::Redirect),
+            [word] if word == "--direct" => Ok(Entry::Direct),
             _ => Err(GuestError::args("net needs one of --redirect and --direct")),
         }
     }
