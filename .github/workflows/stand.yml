@@ -69,6 +69,17 @@ jobs:
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
           echo STAND_GUEST_NF_REQUIRED=1 >> "$GITHUB_ENV"
       - run: cargo test --locked --workspace
+      # The root case of `run` starts the test's stand-guest as another user, who must pass through
+      # every folder above it; the runner's home is not open to other users.
+      - name: Let other users reach the test build
+        if: runner.os == 'Linux'
+        run: |
+          dir="$PWD/target/debug"
+          while [ "$dir" != / ]; do
+            if [ -O "$dir" ]; then chmod o+x "$dir"; fi
+            dir=$(dirname "$dir")
+          done
+          namei -l "$PWD/target/debug/stand-guest"
       # The root cases of guest (the probe's privilege drop, a service's stdio of another user, FITRIM
       # on a loop-mounted ext4) skipped above; here they run as root, where a skip fails, and the
       # count shows the filter matched each.
