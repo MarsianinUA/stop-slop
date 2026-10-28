@@ -194,9 +194,13 @@ fn mount_owners(
             )));
         }
         if let Some(owner) = owners.insert(volume.clone(), name.clone()) {
+            let by = if owner == *name {
+                "twice".to_owned()
+            } else {
+                format!("by `{}` too", owner.as_str())
+            };
             return Err(at.invalid(format!(
-                "`{volume}` is mounted by `{}` too: a volume is the disk of one service",
-                owner.as_str()
+                "`{volume}` is mounted {by}: a volume is the disk of one service, mounted once"
             )));
         }
         if service.replicas.get() > 1 {

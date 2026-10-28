@@ -13,7 +13,10 @@ use crate::{
 /// The smallest `X` of `+X%` and `-X%`: a smaller shift is within noise, which `none` says.
 const MIN_CHANGE: u16 = 5;
 
-/// `none`, `+X%`, `-X%`, `down`, `unknown`; X a whole percent from 5.
+/// The largest `X` of `-X%`: a measure cannot fall by more than all of it.
+const MAX_FALL: u16 = 100;
+
+/// `none`, `+X%`, `-X%`, `down`, `unknown`; X a whole percent from 5, at most 100 in `-X%`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Change {
     None,
@@ -47,6 +50,11 @@ impl Change {
         let x = digits.parse::<u16>().unwrap_or(u16::MAX);
         if x < MIN_CHANGE {
             return Err(refused("X is below 5, a shift within noise"));
+        }
+        if text.starts_with('-') && x > MAX_FALL {
+            return Err(refused(
+                "X is above 100, and a measure falls by 100% at most",
+            ));
         }
         let percent = units::percent(x).ok_or_else(|| refused("X is above 1000"))?;
         Ok(change(percent))

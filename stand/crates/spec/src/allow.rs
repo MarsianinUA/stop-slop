@@ -22,6 +22,7 @@ use Shape::{Items, Keys, Names, Open, Value};
 const ROOT: Shape = Open(&[
     ("services", Names(&SERVICE)),
     ("volumes", Names(&VOLUME)),
+    ("name", Value),
     ("x-stand", X_STAND),
 ]);
 

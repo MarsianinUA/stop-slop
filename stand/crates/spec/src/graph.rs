@@ -44,18 +44,18 @@ fn waits(
     let mut waited: BTreeMap<&ServiceName, (&ServiceName, Condition)> = BTreeMap::new();
     for (name, service) in services {
         for (dependency, &condition) in &service.depends_on {
-            let at = dependency_field(root, name, dependency);
+            let at = || dependency_field(root, name, dependency);
             let Some(target) = services.get(dependency) else {
-                return Err(at.invalid(format!("no service `{}`", dependency.as_str())));
+                return Err(at().invalid(format!("no service `{}`", dependency.as_str())));
             };
             if dependency == workload {
-                return Err(at.invalid(format!(
+                return Err(at().invalid(format!(
                     "nothing waits for the workload `{}`: a repeat ends when it exits",
                     workload.as_str()
                 )));
             }
             if condition == Condition::Healthy && target.healthcheck.is_none() {
-                return Err(at.invalid(format!(
+                return Err(at().invalid(format!(
                     "`{}` has no `healthcheck` to be healthy by",
                     dependency.as_str()
                 )));
@@ -66,7 +66,7 @@ fn waits(
                 }
                 Entry::Occupied(entry) if entry.get().1 != condition => {
                     let (first, other) = *entry.get();
-                    return Err(at.invalid(format!(
+                    return Err(at().invalid(format!(
                         "`{}` waits for `{}` until {}, and `{}` until {}: a service is either \
                          setup or long-running, so all wait for it the same way",
                         name.as_str(),

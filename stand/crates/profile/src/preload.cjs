@@ -2,11 +2,11 @@
 // The stand starts a Node service with the variables of `node_env` (`env.rs`):
 // NODE_OPTIONS="--require <this file>", so it runs in every Node process and worker thread of
 // the service; STOP_SLOP_PROFILE_DIR, the folder of the chunks; STOP_SLOP_PROFILE_MODE, `cpu`
-// for CPU profiles or `coverage` for the calls of each function. What it writes is read by
-// `read.rs`. The program must run as it would without it: no signal listeners, no
-// `process.setSourceMapsEnabled` (it rewrites `Error.stack`), and no error of the preload
-// reaches the program. The one exception: its `exit` listener counts toward the program's
-// limit, so a program with exactly 10 `exit` listeners of its own gets a
+// for CPU profiles or `coverage` for the calls of each function. `read.rs` describes what it
+// writes, and `read.rs` and `coverage.rs` read it. The program must run as it would without
+// it: no signal listeners, no `process.setSourceMapsEnabled` (it rewrites `Error.stack`), and
+// no error of the preload reaches the program. The one exception: its `exit` listener counts
+// toward the program's limit, so a program with exactly 10 `exit` listeners of its own gets a
 // MaxListenersExceededWarning.
 
 const dir = process.env.STOP_SLOP_PROFILE_DIR;
@@ -119,6 +119,12 @@ function start(dir, coverage) {
         script.functions.some((fn) => fn.ranges[0].count > 0) &&
         place(script),
     );
+    // jest compiles each module again for every test file, each time a new script that never
+    // comes back: kept, their line starts would pile up for the whole run.
+    const taken = new Set(scripts.map((script) => script.scriptId));
+    for (const scriptId of lineStarts.keys()) {
+      if (!taken.has(scriptId)) lineStarts.delete(scriptId);
+    }
     return { kind: 'coverage.json', value: scripts, urls: scripts.map((script) => script.url) };
   }
 

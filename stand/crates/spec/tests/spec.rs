@@ -572,6 +572,12 @@ fn a_volume_is_the_disk_of_one_service_with_one_replica() {
             "mounted by `db` too",
         ),
         (
+            "volume-twice",
+            "services.db.volumes[1]",
+            4,
+            "`data` is mounted twice",
+        ),
+        (
             "volume-replicas",
             "services.db.deploy.replicas",
             7,
@@ -738,6 +744,12 @@ fn expect_reads_changes_without_quotes_and_holds_them_to_the_policy() {
             "wider than `max_tolerance`",
         ),
         (
+            "cost-fall-over-100",
+            "x-stand.expect.cost[0].change",
+            9,
+            "X is above 100",
+        ),
+        (
             "cost-empty-reason",
             "x-stand.expect.cost[0].reason",
             9,
@@ -750,8 +762,14 @@ fn expect_reads_changes_without_quotes_and_holds_them_to_the_policy() {
             "`x-stand.second_pass: true`",
         ),
     ]);
-    // A wider policy takes what the default one refuses.
+    // A wider policy takes what the default one refuses, but no policy a fall past 100%.
     load(&fixture("cost-wide"), &Policy::new(Some(50)).unwrap()).unwrap();
+    let widest = Policy::new(Some(1000)).unwrap();
+    let Err(SpecError::Invalid { message, .. }) = load(&fixture("cost-fall-over-100"), &widest)
+    else {
+        panic!("a fall past 100% is not refused");
+    };
+    assert!(message.contains("X is above 100"), "{message}");
 }
 
 #[test]
@@ -761,7 +779,10 @@ fn change_and_policy_read_the_grammar_of_expect_and_accept() {
         Ok(Change::DownTo(percent)) => format!("down to {}", percent.get()),
         other => format!("{other:?}"),
     };
-    assert_eq!(["+5%", "-1000%"].map(percent), ["up to 5", "down to 1000"]);
+    assert_eq!(
+        ["+5%", "+1000%", "-100%"].map(percent),
+        ["up to 5", "up to 1000", "down to 100"]
+    );
     for text in [
         "up to +10%",
         "10%",
@@ -769,6 +790,7 @@ fn change_and_policy_read_the_grammar_of_expect_and_accept() {
         "+4%",
         "+10.5%",
         "+1001%",
+        "-101%",
         "None",
         "",
     ] {
