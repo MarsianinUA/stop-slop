@@ -892,3 +892,214 @@ fn write_tree(path: &Utf8Path) {
     tar.append_link(&mut link, "link", "run.sh").unwrap();
     tar.finish().unwrap();
 }
+
+/// The shared cases on `Microsandbox`, and the cases only a real guest shows. Run with
+/// `STOP_SLOP_STAND_LIVE=1` (and `STOP_SLOP_STAND_GUEST=<musl build>` before the pin)
+/// `cargo test --locked -p sandbox --features microsandbox --test contract -- --test-threads=1`:
+/// one case at a time, since `leftovers` sees the whole namespace.
+#[cfg(feature = "microsandbox")]
+mod live {
+    use std::io::Write as _;
+    use std::sync::OnceLock;
+    use std::time::{Duration, Instant};
+
+    use camino::Utf8PathBuf;
+    use sandbox::{ImageRef, Launch, Microsandbox, Sandbox, SandboxId};
+
+    use super::{ALPINE, EXIT, NGINX, NODE, launch, sh, wait_exit};
+
+    const POSTGRES: &str = "postgres:17-alpine";
+
+    fn live() -> Option<&'static Microsandbox> {
+        if std::env::var("STOP_SLOP_STAND_LIVE").as_deref() != Ok("1") {
+            return None;
+        }
+        static LIVE: OnceLock<Microsandbox> = OnceLock::new();
+        Some(LIVE.get_or_init(|| {
+            let _ = std::fs::remove_file(home().join("notes.txt"));
+            let sandbox = Microsandbox::new(&home()).expect("the adapter");
+            let pulled = sandbox.pull(&images(&[NODE, POSTGRES, NGINX]));
+            pulled.expect("pull the images of the live set");
+            sweep(&sandbox);
+            sandbox
+        }))
+    }
+
+    /// One home for every live run, kept between runs, so the runtime and the images download
+    /// once. On Linux and macOS it is under `/tmp`: the SDK keeps Unix sockets under its home, and
+    /// the per-user temp folder of macOS is too deep for `sun_path`.
+    fn home() -> Utf8PathBuf {
+        if cfg!(unix) {
+            Utf8PathBuf::from("/tmp/stop-slop-stand-live")
+        } else {
+            let temp = Utf8PathBuf::from_path_buf(std::env::temp_dir()).unwrap();
+            temp.join("stop-slop-stand-live")
+        }
+    }
+
+    /// What a crashed run or a panicked case left.
+    fn sweep(sandbox: &Microsandbox) {
+        let left = sandbox.leftovers().expect("leftovers");
+        for id in &left.sandboxes {
+            sandbox.destroy(id).expect("destroy a leftover");
+        }
+        for snapshot in &left.snapshots {
+            sandbox
+                .drop_snapshot(snapshot)
+                .expect("drop a leftover snapshot");
+        }
+    }
+
+    /// One live case: a sweep when it panics, and at its end the check that it left nothing.
+    struct Case {
+        sandbox: &'static Microsandbox,
+    }
+
+    impl Case {
+        fn start() -> Option<Case> {
+            live().map(|sandbox| Case { sandbox })
+        }
+
+        fn finish(self, created: &[SandboxId]) {
+            for id in created {
+                self.sandbox.destroy(id).unwrap();
+            }
+            let left = self.sandbox.leftovers().unwrap();
+            assert!(
+                left.sandboxes.is_empty() && left.snapshots.is_empty(),
+                "left behind: {left:?}"
+            );
+        }
+
+        fn create(&self, batch: Vec<Launch>) -> Vec<SandboxId> {
+            self.sandbox.create(&batch).expect("create")
+        }
+
+        fn log(&self, id: &SandboxId) -> String {
+            String::from_utf8_lossy(&self.sandbox.logs(id).unwrap()).into_owned()
+        }
+
+        fn until_logged(&self, id: &SandboxId, line: &str) {
+            let deadline = Instant::now() + EXIT;
+            while !self.log(id).lines().any(|logged| logged == line) {
+                assert!(Instant::now() < deadline, "no `{line}` in the log of {id}");
+                std::thread::sleep(Duration::from_millis(100));
+            }
+        }
+    }
+
+    impl Drop for Case {
+        fn drop(&mut self) {
+            if std::thread::panicking() {
+                sweep(self.sandbox);
+            }
+        }
+    }
+
+    fn images(names: &[&str]) -> Vec<ImageRef> {
+        names.iter().map(|name| ImageRef::new(*name)).collect()
+    }
+
+    /// Lines for the PR description, beside the live home.
+    fn note(line: &str) {
+        let path = home().join("notes.txt");
+        let mut file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+            .unwrap();
+        let (os, arch) = (std::env::consts::OS, std::env::consts::ARCH);
+        writeln!(file, "{os} {arch}: {line}").unwrap();
+    }
+
+    macro_rules! shared {
+        ($($case:ident),* $(,)?) => {$(
+            #[test]
+            fn $case() {
+                let Some(case) = Case::start() else { return };
+                super::$case(case.sandbox);
+                case.finish(&[]);
+            }
+        )*};
+    }
+
+    shared!(
+        create_batch_and_wait,
+        logs_and_metrics_until_destroy,
+        pull_of_an_unknown_image_is_not_found,
+        pull_gives_digests_in_order,
+    );
+
+    /// Row 88, a stop rule of T-11: without a digest the setup cache key cannot see a new image
+    /// under the same tag.
+    #[test]
+    fn live_pull_gives_a_digest_per_image_and_the_guest_version() {
+        let Some(case) = Case::start() else { return };
+        let pulled = case.sandbox.pull(&images(&[NODE, POSTGRES])).unwrap();
+        let names: Vec<&str> = pulled
+            .digests
+            .iter()
+            .map(|(image, _)| image.as_str())
+            .collect();
+        assert_eq!(names, [NODE, POSTGRES]);
+        let digests = pulled.digests.iter().map(|(_, digest)| digest);
+        assert!(
+            digests.clone().all(|digest| digest.starts_with("sha256:")),
+            "{pulled:?}"
+        );
+        let dev = std::env::var_os("STOP_SLOP_STAND_GUEST").is_some();
+        assert_eq!(pulled.guest.starts_with("dev-"), dev, "{pulled:?}");
+        note(&format!(
+            "pull: {:?}, guest {}",
+            pulled.digests, pulled.guest
+        ));
+        case.finish(&[]);
+    }
+
+    /// Row 72, a stop rule of T-11: the signal of `stand-guest stop` must reach the service, also a
+    /// `SIGQUIT` (the stop signal of nginx images). An ignored signal survives `exec`, so no command
+    /// of the service may start with one. Each service logs `ready` once its trap is set, the clean
+    /// one on stderr and after the signals ignored or blocked in `run`, as the agent starts it, and
+    /// in a command of the service; not in the shell itself, since busybox `sh` ignores `SIGQUIT` on
+    /// its own and blocks every signal while it waits for a child.
+    #[test]
+    fn live_stop_signals_the_service_and_kills_it_at_grace() {
+        let Some(case) = Case::start() else { return };
+        let mut clean = launch("clean", ALPINE);
+        clean.command = sh(
+            "awk '/^Sig(Ign|Blk)/ {print \"run\", $0}' /proc/$PPID/status; \
+             awk '/^Sig(Ign|Blk)/ {print \"service\", $0}' /proc/self/status; \
+             trap 'exit 0' TERM; echo ready >&2; while true; do sleep 0.1; done",
+        );
+        let mut quitter = launch("quitter", ALPINE);
+        quitter.command = sh("trap 'exit 0' QUIT; echo ready; while true; do sleep 0.1; done");
+        quitter.stop_signal = "SIGQUIT".into();
+        let mut stubborn = launch("stubborn", ALPINE);
+        stubborn.command = sh("trap '' TERM; echo ready; while true; do sleep 0.1; done");
+        stubborn.stop_grace = Duration::from_secs(2);
+        let ids = case.create(vec![clean, quitter, stubborn]);
+        for id in &ids {
+            case.until_logged(id, "ready");
+        }
+        let log = case.log(&ids[0]);
+        let signals: Vec<&str> = log.lines().filter(|line| line.contains(" Sig")).collect();
+        note(&format!("signals ignored and blocked: {signals:?}"));
+        let ignored = "service SigIgn:\t0000000000000000";
+        assert!(signals.contains(&ignored), "{signals:?}");
+
+        for id in &ids[..2] {
+            let stopped = case.sandbox.stop(id).unwrap();
+            let fast = stopped.after < Duration::from_secs(2);
+            assert!(!stopped.killed && fast, "{id}: {stopped:?}");
+            assert_eq!(wait_exit(case.sandbox, id), Some(0), "{id}: the trap ran");
+        }
+        let killed = case.sandbox.stop(&ids[2]).unwrap();
+        let at_grace = Duration::from_millis(1900)..Duration::from_secs(4);
+        assert!(
+            killed.killed && at_grace.contains(&killed.after),
+            "{killed:?}"
+        );
+        assert_eq!(wait_exit(case.sandbox, &ids[2]), Some(128 + 9));
+        case.finish(&ids);
+    }
+}

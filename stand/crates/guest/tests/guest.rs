@@ -77,11 +77,11 @@ fn argument_round_trip_for_every_subcommand() {
             fault: "fault.json".into(),
         }),
         Command::Run(RunArgs {
-            status: "/stand/net/status.json".into(),
+            status: "/stand/run/status.json".into(),
             command: vec!["node".into(), "server.js".into()],
         }),
         Command::Stop(StopArgs {
-            status: "/stand/net/status.json".into(),
+            status: "/stand/run/status.json".into(),
             signal: "SIGTERM".into(),
             grace: Duration::from_millis(10_000),
         }),

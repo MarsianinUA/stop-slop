@@ -1,6 +1,7 @@
 //! What the sandbox adapter and `stand-guest` exchange: the subcommand arguments, the files of
-//! `/stand/net` and the status of an `exec`. The adapter writes the arguments and `FaultSwitch` and
-//! reads `Counters`, `StopReport` and `ExecStatus`; the binary does the opposite.
+//! `/stand/net`, the status of `run` and of an `exec`. The adapter writes the arguments and
+//! `FaultSwitch` and reads `Counters`, `RunStatus`, `StopReport` and `ExecStatus`; the binary does the
+//! opposite.
 
 use std::fs;
 use std::io::{self, Write};
@@ -98,7 +99,7 @@ pub struct TrimArgs {
 
 impl Command {
     /// The arguments after the binary's path, for example
-    /// `stop --status /stand/net/status.json --signal SIGTERM --grace 10000`.
+    /// `stop --status /stand/run/status.json --signal SIGTERM --grace 10000`.
     pub fn to_args(&self) -> Vec<String> {
         let mut args = Args::default();
         match self {
@@ -428,6 +429,25 @@ impl FaultSwitch {
     pub fn parse(text: &str) -> Result<FaultSwitch, GuestError> {
         serde_json::from_str(text)
             .map_err(|error| GuestError::File(format!("fault switch: {error}")))
+    }
+}
+
+/// The status file of `stand-guest run`, written when the command starts and again with its shell code
+/// when it ends. `run` exits with that code too, but its own failure is also 125, so the adapter takes
+/// the code of a service only from this file.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RunStatus {
+    pub pid: i32,
+    pub pgid: i32,
+    pub code: Option<i32>,
+    /// Milliseconds since the Unix epoch.
+    pub exited_at: Option<u64>,
+}
+
+impl RunStatus {
+    pub fn parse(text: &str) -> Result<RunStatus, GuestError> {
+        serde_json::from_str(text).map_err(|error| GuestError::File(format!("run status: {error}")))
     }
 }
 

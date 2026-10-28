@@ -1,5 +1,6 @@
 //! The port to the VMs of a stand run. `run` and `cli` see only the trait and these types: no
-//! Compose types (`spec`) and no SDK. The adapters sit behind features: `fake` for tests.
+//! Compose types (`spec`) and no SDK. The adapters sit behind features: `fake` for tests,
+//! `microsandbox` for real VMs.
 
 use std::collections::BTreeMap;
 use std::fmt;
@@ -13,6 +14,14 @@ mod fake;
 
 #[cfg(feature = "fake")]
 pub use fake::{Call, Fake, Rule, Scenario, Script};
+
+// The module shares its name with the SDK crate: a bare `microsandbox::` path is ambiguous here,
+// so the re-export goes through `self::`, and the module names the SDK `::microsandbox`.
+#[cfg(feature = "microsandbox")]
+mod microsandbox;
+
+#[cfg(feature = "microsandbox")]
+pub use self::microsandbox::Microsandbox;
 
 pub trait Sandbox {
     /// Virtual in `Fake`: it moves only in `wait`.
@@ -152,7 +161,7 @@ macro_rules! name {
 
         impl $name {
             // A build without an adapter has no caller of the adapters' constructors.
-            #[cfg_attr(not(feature = "fake"), allow(dead_code))]
+            #[cfg_attr(not(any(feature = "fake", feature = "microsandbox")), allow(dead_code))]
             $new fn new(id: impl Into<String>) -> $name {
                 $name(id.into())
             }

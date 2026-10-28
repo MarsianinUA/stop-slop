@@ -7,11 +7,24 @@ publish = false
 
 [features]
 fake = []
+# Only `cli` turns it on (T-14); until then the live tests pass `--features sandbox/microsandbox`.
+microsandbox = [
+    "dep:guest",
+    "dep:microsandbox",
+    "dep:reqwest",
+    "dep:sha2",
+    "dep:tokio",
+]
 
 [dependencies]
 camino.workspace = true
 serde.workspace = true
 thiserror.workspace = true
+guest = { path = "../guest", optional = true }
+microsandbox = { workspace = true, optional = true }
+reqwest = { workspace = true, optional = true }
+sha2 = { workspace = true, optional = true }
+tokio = { workspace = true, optional = true }
 
 [dev-dependencies]
 sandbox = { path = ".", features = ["fake"] }

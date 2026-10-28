@@ -14,25 +14,13 @@ use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use guest::{
-    ExecArgs, ExecEnd, ExecStatus, PROBE_GID, RunArgs, StopArgs, StopReport, signal_number,
+    ExecArgs, ExecEnd, ExecStatus, PROBE_GID, RunArgs, RunStatus, StopArgs, StopReport,
+    signal_number,
 };
-use serde::{Deserialize, Serialize};
 
 const POLL: Duration = Duration::from_millis(5);
 /// How long `stop` waits for `run` to record the code once the command is gone or killed.
 const CODE_WAIT: Duration = Duration::from_secs(2);
-
-/// The status file. `run` writes the pid and the group when the command starts, and its
-/// `shell_code` and the time when it ends.
-#[derive(Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct Status {
-    pid: libc::pid_t,
-    pgid: libc::pid_t,
-    code: Option<i32>,
-    /// Milliseconds since the Unix epoch.
-    exited_at: Option<u64>,
-}
 
 pub fn run(args: &RunArgs) -> ExitCode {
     const WHO: &str = "stand-guest run";
@@ -41,7 +29,7 @@ pub fn run(args: &RunArgs) -> ExitCode {
         Err(error) => return not_started(WHO, &args.command[0], &error),
     };
     let pid = child.id() as libc::pid_t;
-    let mut status = Status {
+    let mut status = RunStatus {
         pid,
         pgid: pid,
         code: None,
@@ -329,7 +317,7 @@ fn report(report: StopReport) -> ExitCode {
 }
 
 /// Through a temporary file, so `stop` never reads a part.
-fn write_status(path: &Path, status: &Status) -> io::Result<()> {
+fn write_status(path: &Path, status: &RunStatus) -> io::Result<()> {
     let mut tmp = path.as_os_str().to_owned();
     tmp.push(".tmp");
     let text = serde_json::to_string(status).expect("a status serializes");
@@ -337,10 +325,10 @@ fn write_status(path: &Path, status: &Status) -> io::Result<()> {
     fs::rename(&tmp, path)
 }
 
-fn read_status(path: &Path) -> Result<Status, String> {
+fn read_status(path: &Path) -> Result<RunStatus, String> {
     let text =
         fs::read_to_string(path).map_err(|error| format!("read {}: {error}", path.display()))?;
-    let status: Status = serde_json::from_str(&text)
+    let status: RunStatus = serde_json::from_str(&text)
         .map_err(|error| format!("parse {}: {error}", path.display()))?;
     // The service's user can write the file, and `kill` and `killpg` read 0, -1 and 1 as whole
     // sets of processes, which a root `stop` would reach.
