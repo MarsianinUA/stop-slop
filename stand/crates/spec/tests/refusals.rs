@@ -43,6 +43,49 @@ fn a_volume_name_keeps_to_the_rule_of_docker() {
 }
 
 #[test]
+fn a_name_is_one_file_name_on_every_host() {
+    assert_refused(&[
+        (
+            "name-case",
+            "services.Api",
+            5,
+            "`Api` differs from `api` only in case",
+        ),
+        (
+            "probe-case",
+            "x-stand.probes.Rows",
+            15,
+            "`Rows` differs from `rows` only in case",
+        ),
+        (
+            "volume-case",
+            "volumes.PGData",
+            12,
+            "`PGData` differs from `pgdata` only in case",
+        ),
+        (
+            "name-device",
+            "services.aux",
+            2,
+            "`aux` is a device name on Windows",
+        ),
+        (
+            "volume-device",
+            "volumes.nul.data",
+            10,
+            "`nul.data` is a device name on Windows",
+        ),
+    ]);
+    let dir = tempfile::tempdir().unwrap();
+    let file = Utf8Path::from_path(dir.path())
+        .unwrap()
+        .join("compose.yaml");
+    let example = fs::read_to_string(fixture("example")).unwrap();
+    fs::write(&file, example.replace("pgdata", "nul-data")).unwrap();
+    load(&file, &Policy::new(None).unwrap()).unwrap();
+}
+
+#[test]
 fn a_setup_service_and_the_workload_have_one_replica() {
     assert_refused(&[
         (

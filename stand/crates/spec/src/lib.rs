@@ -280,8 +280,9 @@ pub enum Mount {
     },
 }
 
-/// `[a-zA-Z0-9][a-zA-Z0-9_-]*`, and not `stand` or `volume`, which measure names reserve
-/// (`stand.wall`, `volume:pgdata.bytes`).
+/// `[a-zA-Z0-9][a-zA-Z0-9_-]*`, not `stand` or `volume`, which measure names reserve
+/// (`stand.wall`, `volume:pgdata.bytes`), and not a device name of Windows (`aux`). No two
+/// differ only in case: each names files on the host.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ServiceName(String);
 

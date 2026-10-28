@@ -86,6 +86,7 @@ pub(crate) fn probes(
     let mut probes = BTreeMap::new();
     for (probe, field) in root.at("x-stand").at("probes").entries()? {
         let probe = ProbeName(name(&field, probe)?);
+        bind::unlike_in_case(&field, probe.as_str(), probes.keys().map(ProbeName::as_str))?;
         let within = required(&field, "in", "the long-running service the probe runs in")?;
         let service = service_named(services, &within)?;
         if let Some(kind) = short_lived(&services[&service]) {
