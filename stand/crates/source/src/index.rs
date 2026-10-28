@@ -1,6 +1,6 @@
 use std::env;
-use std::fs;
-use std::io::ErrorKind;
+use std::fs::{self, File};
+use std::io::{ErrorKind, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process;
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -37,12 +37,28 @@ impl TempIndex {
         };
         // Left by a git killed while it wrote an index of this name, it would stop every `add`.
         remove(&temp.lock())?;
-        match fs::read(&index) {
-            Ok(bytes) => fs::write(&temp.path, bytes).map_err(SourceError::io(&temp.path))?,
+        // Left by a killed process with the same pid, or put there by another user of a shared
+        // temp folder.
+        remove(&temp.path)?;
+        let mut original = match File::open(&index) {
+            Ok(original) => original,
             // Nothing was ever added: git starts an index of its own.
-            Err(error) if error.kind() == ErrorKind::NotFound => remove(&temp.path)?,
+            Err(error) if error.kind() == ErrorKind::NotFound => return Ok(temp),
             Err(source) => return Err(SourceError::io(&index)(source)),
-        }
+        };
+        let mut bytes = Vec::new();
+        let modified = original
+            .read_to_end(&mut bytes)
+            .and_then(|_| original.metadata()?.modified())
+            .map_err(SourceError::io(&index))?;
+        // Unlike `fs::write`, does not follow a link someone put at this name.
+        let mut copy = File::create_new(&temp.path).map_err(SourceError::io(&temp.path))?;
+        // Git hashes a file again when its entry is dated no earlier than the index file, as the
+        // file may have changed in the second the index was written. A copy dated now would take
+        // such a file for unchanged.
+        copy.write_all(&bytes)
+            .and_then(|()| copy.set_modified(modified))
+            .map_err(SourceError::io(&temp.path))?;
         Ok(temp)
     }
 

@@ -22,11 +22,13 @@ fn at(seconds: u64) -> SystemTime {
     UNIX_EPOCH + Duration::from_secs(seconds)
 }
 
-/// What no call may change: the index, `git status` and every file of the work tree.
+/// What no call may change: the index, `git status`, the refs but the one `pin` writes and
+/// `forget` removes, and every file of the work tree.
 #[derive(Debug, PartialEq)]
 struct State {
     index: Vec<u8>,
     status: String,
+    refs: String,
     files: BTreeMap<String, Vec<u8>>,
 }
 
@@ -42,6 +44,7 @@ fn state(t: &TempRepo) -> State {
             "--ignored",
             "--untracked-files=all",
         ]),
+        refs: t.git(&["for-each-ref", "--format=%(refname) %(objectname)"]),
         files: walk(t.path())
             .into_iter()
             .map(|(name, path)| (name, fs::read(path).unwrap()))
@@ -252,6 +255,33 @@ fn a_snapshot_takes_the_files_on_disk_and_no_call_changes_the_repo() {
 }
 
 #[test]
+fn a_snapshot_takes_a_file_edited_in_the_second_its_index_was_written() {
+    let t = TempRepo::new();
+    // Only the size and the mtime in seconds tell git that a file changed, on every OS.
+    t.git(&["config", "core.checkStat", "minimal"]);
+    let date = |path: &str| {
+        let file = fs::File::options()
+            .write(true)
+            .open(t.path().join(path))
+            .unwrap();
+        file.set_modified(at(1_600_000_000)).unwrap();
+    };
+    t.write("a.txt", "one\n");
+    date("a.txt");
+    t.git(&["add", "a.txt"]);
+    t.write("a.txt", "two\n");
+    date("a.txt");
+    // As if git wrote the index in that second too: the entry may be stale.
+    date(".git/index");
+
+    let tree = source::snapshot(&open(&t)).unwrap();
+    assert_eq!(
+        t.git(&["cat-file", "blob", &format!("{tree}:a.txt")]),
+        "two"
+    );
+}
+
+#[test]
 fn archive_keeps_what_git_archive_drops_and_unpacks_to_the_blobs_of_the_tree() {
     let t = TempRepo::new();
     let long = format!("{}/file.txt", ["a-folder-with-a-long-name"; 4].join("/"));
@@ -388,6 +418,12 @@ fn before_ref_gives_the_merge_base_and_its_commit_date() {
     assert!(
         matches!(&unrelated, Err(SourceError::NoMergeBase(name)) if name == "other"),
         "{unrelated:?}"
+    );
+    t.git(&["checkout", "-q", "--orphan", "unborn"]);
+    let unborn = source::before(&worktree, &Before::Ref("main".to_owned()));
+    assert!(
+        matches!(&unborn, Err(SourceError::NoMergeBase(name)) if name == "main"),
+        "{unborn:?}"
     );
 }
 

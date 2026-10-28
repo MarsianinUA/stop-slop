@@ -41,7 +41,9 @@ pub(crate) fn write(git: &Git, tree: &Tree, out: &mut dyn Write) -> Result<(), S
             .iter()
             .map(|entry| format!("{}\n", entry.oid))
             .collect();
-        let blobs = git.run_with_input(&["cat-file", "--batch"], requests.as_bytes())?;
+        // Without `--buffer` git flushes its output after every object.
+        let blobs =
+            git.run_with_input(&["cat-file", "--batch", "--buffer"], requests.as_bytes())?;
         let mut rest = blobs.as_slice();
         for entry in batch {
             let blob = next_blob(&mut rest, entry)?;
@@ -91,7 +93,6 @@ fn parse(listing: &[u8]) -> Result<Vec<Entry<'_>>, SourceError> {
     Ok(entries)
 }
 
-/// Runs of entries with up to `BATCH` bytes of blobs, in order.
 fn batches<'a, 'b>(entries: &'b [Entry<'a>]) -> Vec<&'b [Entry<'a>]> {
     let mut batches = Vec::new();
     let mut rest = entries;

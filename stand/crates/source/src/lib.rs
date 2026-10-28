@@ -47,15 +47,10 @@ pub fn snapshot(worktree: &Worktree) -> Result<Tree, SourceError> {
 /// A commit without parents over `tree`, dated `now`, and `refs/stop-slop/stand/before/<key>`
 /// on it.
 pub fn pin(worktree: &Worktree, tree: &Tree, now: SystemTime) -> Result<Pinned, SourceError> {
-    let git = worktree.git();
-    let reference = worktree.before_ref();
-    let replaced = git
-        .run_found(&["rev-parse", "--verify", "--quiet", &reference])?
-        .map(|out| Commit(text(out)));
     let seconds = now.duration_since(UNIX_EPOCH).unwrap_or_default().as_secs();
     let date = format!("@{seconds} +0000");
     let (name, email) = IDENTITY;
-    let dated = worktree
+    let git = worktree
         .git()
         .env("GIT_AUTHOR_NAME", name)
         .env("GIT_AUTHOR_EMAIL", email)
@@ -63,8 +58,10 @@ pub fn pin(worktree: &Worktree, tree: &Tree, now: SystemTime) -> Result<Pinned, 
         .env("GIT_COMMITTER_NAME", name)
         .env("GIT_COMMITTER_EMAIL", email)
         .env("GIT_COMMITTER_DATE", &date);
+    let reference = worktree.before_ref();
+    let replaced = find_commit(&git, &reference)?;
     // `commit-tree` signs when `commit.gpgSign` is set, and a snapshot must not ask for a key.
-    let out = dated.run(&[
+    let out = git.run(&[
         "commit-tree",
         "--no-gpg-sign",
         "-m",
@@ -88,9 +85,12 @@ pub fn before(worktree: &Worktree, before: &Before) -> Result<Resolved, SourceEr
         Before::Ref(name) => {
             let tip =
                 find_commit(&git, name)?.ok_or_else(|| SourceError::UnknownRef(name.clone()))?;
+            let no_base = || SourceError::NoMergeBase(name.clone());
+            // An unborn HEAD shares no commit either, and `merge-base` fails on it with 128.
+            let head = find_commit(&git, "HEAD")?.ok_or_else(no_base)?;
             let base = git
-                .run_found(&["merge-base", "HEAD", &tip.0])?
-                .ok_or_else(|| SourceError::NoMergeBase(name.clone()))?;
+                .run_found(&["merge-base", &head.0, &tip.0])?
+                .ok_or_else(no_base)?;
             Commit(text(base))
         }
     };
@@ -275,9 +275,9 @@ fn unexpected(command: &str) -> SourceError {
 }
 
 fn utf8(path: PathBuf) -> Result<Utf8PathBuf, SourceError> {
-    Utf8PathBuf::from_path_buf(path).map_err(|path| SourceError::Io {
-        path: path.to_string_lossy().into_owned().into(),
-        source: io::Error::new(io::ErrorKind::InvalidData, "the path is not UTF-8"),
+    Utf8PathBuf::from_path_buf(path).map_err(|path| {
+        let source = io::Error::new(io::ErrorKind::InvalidData, "the path is not UTF-8");
+        SourceError::io(&path)(source)
     })
 }
 
