@@ -70,8 +70,8 @@ jobs:
         if: runner.os == 'Linux'
         shell: bash
         env:
-          CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUNNER: sudo -E
-          STAND_GUEST_ROOT_REQUIRED: 1
+          # sudo on ubuntu-26.04 ignores -E, so the switch goes through env.
+          CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUNNER: sudo env STAND_GUEST_ROOT_REQUIRED=1
         run: |
           cargo test --locked --workspace --test guest -- --exact \
             process::exec_under_root_takes_the_probe_group_and_the_user \
