@@ -18,7 +18,7 @@ static TERM: AtomicBool = AtomicBool::new(false);
 pub fn run(routes: &Routes) -> ExitCode {
     let relay = Relay::new(&routes.upstream_host, &routes.routes, &routes.unexposed);
     let started = match routes.entry {
-        Entry::Redirect => start_redirect(),
+        Entry::Redirect => start_redirect(&relay, routes),
         Entry::Direct => start_direct(&relay, &routes.routes),
     };
     if let Err(message) = started {
@@ -39,8 +39,38 @@ extern "C" fn on_term(_: libc::c_int) {
     TERM.store(true, Ordering::Release);
 }
 
-fn start_redirect() -> Result<(), String> {
-    Err("--redirect is not built yet".into())
+/// The rules are in before `run` writes the first counters file, so once that file is there names
+/// reach the forwarder.
+#[cfg(target_os = "linux")]
+fn start_redirect(relay: &Arc<Relay>, routes: &Routes) -> Result<(), String> {
+    let listener = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+        .map_err(|error| format!("bind the forwarder: {error}"))?;
+    let port = listener
+        .local_addr()
+        .map_err(|error| format!("the forwarder's port: {error}"))?
+        .port();
+    let mut addresses: Vec<_> = routes
+        .routes
+        .iter()
+        .map(|route| route.address)
+        .chain(routes.unexposed.iter().map(|name| name.address))
+        .collect();
+    addresses.sort();
+    addresses.dedup();
+    crate::nf::install(port, &addresses)
+        .map_err(|error| format!("install the netfilter rules: {error}"))?;
+    let relay = Arc::clone(relay);
+    thread::spawn(move || {
+        for client in listener.incoming().flatten() {
+            relay.serve_redirected(client);
+        }
+    });
+    Ok(())
+}
+
+#[cfg(not(target_os = "linux"))]
+fn start_redirect(_: &Arc<Relay>, _: &Routes) -> Result<(), String> {
+    Err("--redirect needs netfilter, which only Linux has; on this host use --direct".into())
 }
 
 /// The listener of `routes[i]` serves target `i`.

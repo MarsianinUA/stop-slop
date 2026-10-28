@@ -3,6 +3,8 @@
 
 #[cfg(unix)]
 mod net;
+#[cfg(target_os = "linux")]
+mod nf;
 #[cfg(unix)]
 mod relay;
 #[cfg(unix)]

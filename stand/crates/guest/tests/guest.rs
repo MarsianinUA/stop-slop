@@ -176,6 +176,7 @@ fn the_binary_runs() {
 mod forwarder {
     use std::io::{Read, Write};
     use std::net::{Shutdown, TcpListener, TcpStream};
+    use std::path::Path;
     use std::process::{Child, Command as Process};
     use std::thread;
     use std::time::Instant;
@@ -215,6 +216,14 @@ mod forwarder {
             .port()
     }
 
+    /// A port nothing listens on. The client end of a connection holds it, so while the returned
+    /// sockets live no other socket can take it, as one could take a port from `free_port`.
+    fn refusing_port() -> (u16, (TcpListener, TcpStream)) {
+        let listener = TcpListener::bind((LOOPBACK, 0)).unwrap();
+        let held = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        (held.local_addr().unwrap().port(), (listener, held))
+    }
+
     fn route(name: &str, upstream: &[u16]) -> Route {
         Route {
             name: name.into(),
@@ -232,28 +241,35 @@ mod forwarder {
     }
 
     impl Forwarder {
-        /// Returns once the first counters file is there, which `net` writes after binding.
-        fn start(routes: Vec<Route>) -> Forwarder {
+        /// Returns once the first counters file is there, which `net` writes after binding. Another
+        /// socket can take a port from `free_port` before `net` binds it; `net` then exits and
+        /// starts again on new ports.
+        fn start(mut routes: Vec<Route>) -> Forwarder {
             let temp = tempfile::tempdir().unwrap();
             let counters = temp.path().join("counters.json");
-            let ports = routes.iter().map(|route| route.port).collect();
-            let command = Command::Net(Routes {
-                upstream_host: LOOPBACK.to_string(),
-                entry: Entry::Direct,
-                routes,
-                unexposed: vec![],
-                counters: counters.clone(),
-                fault: temp.path().join("fault.json"),
-            });
-            let child = Process::new(BIN).args(command.to_args()).spawn().unwrap();
-            let forwarder = Forwarder {
-                child,
-                counters,
-                ports,
-                _temp: temp,
-            };
-            forwarder.counters_until(|_| true);
-            forwarder
+            for _ in 0..5 {
+                let command = Command::Net(Routes {
+                    upstream_host: LOOPBACK.to_string(),
+                    entry: Entry::Direct,
+                    routes: routes.clone(),
+                    unexposed: vec![],
+                    counters: counters.clone(),
+                    fault: temp.path().join("fault.json"),
+                });
+                let mut child = Process::new(BIN).args(command.to_args()).spawn().unwrap();
+                if bound(&mut child, &counters) {
+                    return Forwarder {
+                        child,
+                        counters,
+                        ports: routes.iter().map(|route| route.port).collect(),
+                        _temp: temp,
+                    };
+                }
+                for route in &mut routes {
+                    route.port = free_port();
+                }
+            }
+            panic!("net exited five times before it bound its ports");
         }
 
         fn connect(&self, target: usize) -> TcpStream {
@@ -287,6 +303,21 @@ mod forwarder {
             }
             panic!("the counters never got there; the last ones: {last:?}");
         }
+    }
+
+    /// Whether `net` wrote its first counters, rather than exit.
+    fn bound(child: &mut Child, counters: &Path) -> bool {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while Instant::now() < deadline {
+            if counters.exists() {
+                return true;
+            }
+            if child.try_wait().unwrap().is_some() {
+                return false;
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+        panic!("net neither wrote its counters nor exited");
     }
 
     impl Drop for Forwarder {
@@ -371,8 +402,9 @@ mod forwarder {
 
     #[test]
     fn a_target_that_refuses_or_closes_first_counts_a_drop() {
+        let (refusing, _held) = refusing_port();
         let fwd = Forwarder::start(vec![
-            route("refused", &[free_port()]),
+            route("refused", &[refusing]),
             route("closing", &[closing_upstream()]),
             route("quiet", &[upstream(b"")]),
         ]);

@@ -2,6 +2,8 @@
 //! the upstream host ports, and its bytes are counted as they pass.
 
 use std::io::{ErrorKind, Read, Write};
+#[cfg(target_os = "linux")]
+use std::net::{Ipv4Addr, SocketAddrV4};
 use std::net::{Shutdown, TcpStream, ToSocketAddrs};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
@@ -27,6 +29,9 @@ pub struct Relay {
 /// One exposed `name:port`.
 struct Target {
     target: String,
+    /// The route's `address:port`, which `SO_ORIGINAL_DST` gives back under `Redirect`.
+    #[cfg(target_os = "linux")]
+    at: SocketAddrV4,
     upstream: Vec<u16>,
     next: AtomicUsize,
     counts: Counts,
@@ -44,6 +49,8 @@ struct Counts {
 
 struct Unexposed {
     name: String,
+    #[cfg(target_os = "linux")]
+    address: Ipv4Addr,
     attempts: AtomicU64,
 }
 
@@ -66,6 +73,8 @@ impl Relay {
             .iter()
             .map(|route| Target {
                 target: format!("{}:{}", route.name, route.port),
+                #[cfg(target_os = "linux")]
+                at: SocketAddrV4::new(route.address, route.port),
                 upstream: route.upstream.clone(),
                 next: AtomicUsize::new(0),
                 counts: Counts::default(),
@@ -75,6 +84,8 @@ impl Relay {
             .iter()
             .map(|name| Unexposed {
                 name: name.name.clone(),
+                #[cfg(target_os = "linux")]
+                address: name.address,
                 attempts: AtomicU64::new(0),
             })
             .collect();
@@ -91,6 +102,25 @@ impl Relay {
     pub fn serve(self: &Arc<Relay>, index: usize, client: TcpStream) {
         let relay = Arc::clone(self);
         thread::spawn(move || relay.relay(&relay.targets[index], client));
+    }
+
+    /// A connection the REDIRECT rule turned here goes to the target the client dialed. A dial to
+    /// a name without `expose` is counted and closed, one to no target at all just closed.
+    #[cfg(target_os = "linux")]
+    pub fn serve_redirected(self: &Arc<Relay>, client: TcpStream) {
+        let Some(dialed) = crate::nf::original_dst(&client) else {
+            return;
+        };
+        if let Some(index) = self.targets.iter().position(|target| target.at == dialed) {
+            self.serve(index, client);
+        } else if let Some(name) = self
+            .unexposed
+            .iter()
+            .find(|name| name.address == *dialed.ip())
+        {
+            name.attempts.fetch_add(1, Ordering::Relaxed);
+            self.mark();
+        }
     }
 
     /// Rewrites `path` on change, at most once per `COUNTERS_EVERY`, until `stop` is set; a change

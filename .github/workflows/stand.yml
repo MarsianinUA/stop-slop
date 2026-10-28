@@ -49,4 +49,11 @@ jobs:
           node-version: 22
       - run: cargo fmt --check
       - run: cargo clippy --locked --workspace --all-targets -- -D warnings
+      # Ubuntu 24.04 gives an unprivileged user namespace no capabilities, so the netfilter tests
+      # of guest could only skip; with them allowed, a namespace that still fails is a failure.
+      - name: Let the netfilter tests run in their own namespaces
+        if: runner.os == 'Linux'
+        run: |
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          echo STAND_GUEST_NF_REQUIRED=1 >> "$GITHUB_ENV"
       - run: cargo test --locked --workspace
