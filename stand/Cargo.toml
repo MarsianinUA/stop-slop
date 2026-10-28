@@ -19,3 +19,4 @@ shlex = "2"
 sysinfo = { version = "0.39", default-features = false, features = ["disk", "system"] }
 tempfile = "3"
 thiserror = "2"
+toml = "1"
