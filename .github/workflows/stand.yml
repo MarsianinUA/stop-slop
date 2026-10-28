@@ -63,8 +63,9 @@ jobs:
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
           echo STAND_GUEST_NF_REQUIRED=1 >> "$GITHUB_ENV"
       - run: cargo test --locked --workspace
-      # The root cases of guest (the probe's privilege drop, FITRIM on a loop-mounted ext4) skipped
-      # above; here they run as root, where a skip fails, and the count shows the filter matched both.
+      # The root cases of guest (the probe's privilege drop, a service's stdio of another user, FITRIM
+      # on a loop-mounted ext4) skipped above; here they run as root, where a skip fails, and the
+      # count shows the filter matched each.
       # `--workspace` rather than `-p guest` keeps the features of the build above, so nothing is rebuilt.
       - name: Run the root cases of guest under sudo
         if: runner.os == 'Linux'
@@ -75,5 +76,6 @@ jobs:
         run: |
           cargo test --locked --workspace --test guest -- --exact \
             process::exec_under_root_takes_the_probe_group_and_the_user \
+            process::run_gives_a_command_of_another_user_stdio_it_can_reopen \
             trim::trim_under_root_frees_the_blocks_of_deleted_files | tee "$RUNNER_TEMP/root.log"
-          grep -q ' 2 passed;' "$RUNNER_TEMP/root.log"
+          grep -q ' 3 passed;' "$RUNNER_TEMP/root.log"

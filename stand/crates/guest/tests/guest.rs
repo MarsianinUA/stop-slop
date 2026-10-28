@@ -810,6 +810,36 @@ mod process {
         assert!(!ExecStatus::path(&out).exists());
     }
 
+    /// In a guest the agent's pipes are root's, open to root only, and the service runs as the
+    /// image's user; the pipes of the test are root's here.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn run_gives_a_command_of_another_user_stdio_it_can_reopen() {
+        use std::os::unix::fs::PermissionsExt;
+        use std::os::unix::process::CommandExt;
+
+        if unsafe { libc::geteuid() } != 0 {
+            return skip_root_case(
+                "run_gives_a_command_of_another_user_stdio_it_can_reopen",
+                "not root",
+            );
+        }
+        let temp = tempfile::tempdir().unwrap();
+        fs::set_permissions(temp.path(), fs::Permissions::from_mode(0o777)).unwrap();
+        let status = temp.path().join("status.json");
+        let script = "echo out > /dev/stdout && echo err > /dev/stderr";
+        let output = guest(&run(&status, script, &[]))
+            .uid(4321)
+            .gid(4321)
+            .output()
+            .unwrap();
+        let said = [output.stdout, output.stderr].map(|bytes| String::from_utf8(bytes).unwrap());
+        assert_eq!(
+            (output.status.code(), said),
+            (Some(0), ["out\n".to_owned(), "err\n".to_owned()])
+        );
+    }
+
     /// `sh -c <script>` with `$1`, `$2`... set to `args`.
     fn sh(script: &str, args: &[&Path]) -> Vec<String> {
         let shell = ["sh", "-c", script, "sh"].map(String::from);

@@ -6,10 +6,11 @@
 //! a container's processes end with its main one.
 
 use std::fs::{self, File};
-use std::io::{self, Write};
+use std::io::{self, Read, Write};
 use std::os::unix::process::{CommandExt, ExitStatusExt};
 use std::path::Path;
 use std::process::{Command as Process, ExitCode, ExitStatus, Stdio};
+use std::sync::mpsc::{self, Receiver};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -21,13 +22,27 @@ use guest::{
 const POLL: Duration = Duration::from_millis(5);
 /// How long `stop` waits for `run` to record the code once the command is gone or killed.
 const CODE_WAIT: Duration = Duration::from_secs(2);
+/// How long `run` passes on what its command wrote after it ended.
+const DRAIN: Duration = Duration::from_secs(1);
 
 pub fn run(args: &RunArgs) -> ExitCode {
     const WHO: &str = "stand-guest run";
-    let mut child = match command(&args.command).process_group(0).spawn() {
+    // The agent's pipes are root's and open to root only, so a command of another user could not
+    // reopen its stdout or stderr by name, as nginx opens `/dev/stderr` for its log. Docker gives
+    // the container's user its stdio; here pipes of this process's user carry it.
+    let spawned = command(&args.command)
+        .process_group(0)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn();
+    let mut child = match spawned {
         Ok(child) => child,
         Err(error) => return not_started(WHO, &args.command[0], &error),
     };
+    let relays = [
+        child.stdout.take().map(|out| relay(out, io::stdout())),
+        child.stderr.take().map(|err| relay(err, io::stderr())),
+    ];
     let pid = child.id() as libc::pid_t;
     let mut status = RunStatus {
         pid,
@@ -49,7 +64,38 @@ pub fn run(args: &RunArgs) -> ExitCode {
     if let Err(error) = write_status(&args.status, &status) {
         eprintln!("{WHO}: write {}: {error}", args.status.display());
     }
+    // The group is gone, so the pipes end once drained, unless a process that left the group
+    // still holds one: the service has ended all the same.
+    let drained_by = Instant::now() + DRAIN;
+    for relay in relays.into_iter().flatten() {
+        let _ = relay.recv_timeout(drained_by.saturating_duration_since(Instant::now()));
+    }
     ExitCode::from(code)
+}
+
+/// Copies `from` into `to` until its end, and tells when it got there. Once `to` refuses a write,
+/// the rest is read and dropped, so the command never blocks on a full pipe.
+fn relay(
+    mut from: impl Read + Send + 'static,
+    mut to: impl Write + Send + 'static,
+) -> Receiver<()> {
+    let (done, finished) = mpsc::channel();
+    thread::spawn(move || {
+        let mut buf = [0; 8192];
+        let mut passing = true;
+        loop {
+            match from.read(&mut buf) {
+                Ok(0) => break,
+                Ok(n) => {
+                    passing = passing && to.write_all(&buf[..n]).and_then(|()| to.flush()).is_ok()
+                }
+                Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
+                Err(_) => break,
+            }
+        }
+        let _ = done.send(());
+    });
+    finished
 }
 
 pub fn stop(args: &StopArgs) -> ExitCode {

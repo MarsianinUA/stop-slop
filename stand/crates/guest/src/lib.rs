@@ -62,7 +62,8 @@ pub struct UnexposedName {
     pub address: Ipv4Addr,
 }
 
-/// `stand-guest run`: runs the command in its own process group, as the user of the exec; exits with its code.
+/// `stand-guest run`: runs the command in its own process group, as the user of the exec, its stdout and
+/// stderr through pipes of that user, which it passes on; exits with its code.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RunArgs {
     pub status: PathBuf,
