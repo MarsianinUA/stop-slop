@@ -1,4 +1,4 @@
-//! Which `stand-guest` goes to `/stand/bin`.
+//! Which `stand-guest` goes to `/stand/bin`, and what its `net` counted.
 //!
 //! The pinned release by default, checked against its sha256; with `STOP_SLOP_STAND_GUEST` the file
 //! it names, never downloaded and never checked. The pin moves with each `guest-v*` tag (plan,
@@ -8,7 +8,7 @@ use camino::{Utf8Path, Utf8PathBuf};
 use sha2::{Digest, Sha256};
 
 use super::backend;
-use crate::SandboxError;
+use crate::{PortStats, SandboxError, Unexposed};
 
 /// In the guest, bound read-only from `Binary::dir`.
 pub(super) const DIR: &str = "/stand/bin";
@@ -136,6 +136,39 @@ fn executable(path: &Utf8Path) -> std::io::Result<()> {
 #[cfg(not(unix))]
 fn executable(_: &Utf8Path) -> std::io::Result<()> {
     Ok(())
+}
+
+/// What `net` counted so far. `net` writes the file before the service starts, so a missing one
+/// means it is broken.
+pub(super) fn traffic(
+    counters: &Utf8Path,
+) -> Result<(Vec<PortStats>, Vec<Unexposed>), SandboxError> {
+    let text = std::fs::read_to_string(counters)
+        .map_err(|error| guest_error(format!("{counters}: {error}")))?;
+    let counters = ::guest::Counters::parse(&text)
+        .map_err(|error| guest_error(format!("{counters}: {error}")))?;
+    let ports = counters
+        .targets
+        .into_iter()
+        .map(|target| PortStats {
+            target: target.target,
+            connections: target.connections,
+            open: target.open,
+            bytes_out: target.bytes_out,
+            bytes_in: target.bytes_in,
+            http: target.http,
+            drops: target.drops,
+        })
+        .collect();
+    let unexposed = counters
+        .unexposed
+        .into_iter()
+        .map(|count| Unexposed {
+            name: count.name,
+            attempts: count.attempts,
+        })
+        .collect();
+    Ok((ports, unexposed))
 }
 
 fn guest_error(message: String) -> SandboxError {

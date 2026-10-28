@@ -45,15 +45,16 @@ async fn create_once(
     created
 }
 
-/// `folder` is the adapter's folder of the VM, not a bind itself.
+/// `folder` is the adapter's folder of the VM, not a bind itself; `published` is (host, guest).
 pub(super) async fn fresh(
     name: &str,
     launch: &Launch,
+    published: &[(u16, u16)],
     folder: &Utf8Path,
     binary: &Binary,
 ) -> Result<msb::Sandbox, SandboxError> {
     let (cpus, memory, lifetime) = (cpus(launch)?, mib(launch.memory), secs(launch.max_duration));
-    let run = process::run_dir(folder);
+    let (run, net) = (process::run_dir(folder), network::net_dir(folder));
     create_with_retry(name, || {
         let mut builder = msb::Sandbox::builder(name)
             .image(launch.image.as_str())
@@ -65,7 +66,11 @@ pub(super) async fn fresh(
             .volume(super::guest::DIR, |m| {
                 m.bind(binary.dir.as_std_path()).readonly()
             })
-            .volume(process::RUN_DIR, |m| m.bind(run.as_std_path()));
+            .volume(process::RUN_DIR, |m| m.bind(run.as_std_path()))
+            .volume(network::NET_DIR, |m| m.bind(net.as_std_path()));
+        for &(host, guest) in published {
+            builder = builder.port(host, guest);
+        }
         for mount in &launch.mounts {
             if let Mount::Bind {
                 host,

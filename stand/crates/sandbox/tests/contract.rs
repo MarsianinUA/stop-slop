@@ -899,14 +899,20 @@ fn write_tree(path: &Utf8Path) {
 /// one case at a time, since `leftovers` sees the whole namespace.
 #[cfg(feature = "microsandbox")]
 mod live {
+    use std::fs;
     use std::io::Write as _;
     use std::sync::OnceLock;
+    use std::sync::atomic::{AtomicU32, Ordering};
     use std::time::{Duration, Instant};
 
-    use camino::Utf8PathBuf;
-    use sandbox::{ImageRef, Launch, Microsandbox, Sandbox, SandboxId};
+    use camino::{Utf8Path, Utf8PathBuf};
+    use sandbox::{
+        Exposed, ImageRef, Launch, Metrics, Microsandbox, Outbound, Peer, PortStats, Sandbox,
+        SandboxId, Waitable,
+    };
+    use tempfile::TempDir;
 
-    use super::{ALPINE, EXIT, NGINX, NODE, launch, sh, wait_exit};
+    use super::{ALPINE, EXIT, NGINX, NODE, argv, launch, out, sh, wait_exit};
 
     const POSTGRES: &str = "postgres:17-alpine";
 
@@ -950,14 +956,71 @@ mod live {
         }
     }
 
-    /// One live case: a sweep when it panics, and at its end the check that it left nothing.
+    /// One live case: a host folder for `/stand/out`, a sweep when it panics, and at its end the
+    /// check that it left nothing.
     struct Case {
         sandbox: &'static Microsandbox,
+        out: TempDir,
     }
 
     impl Case {
         fn start() -> Option<Case> {
-            live().map(|sandbox| Case { sandbox })
+            let sandbox = live()?;
+            let out = tempfile::tempdir().unwrap();
+            Some(Case { sandbox, out })
+        }
+
+        fn out(&self) -> &Utf8Path {
+            Utf8Path::from_path(self.out.path()).unwrap()
+        }
+
+        fn write(&self, name: &str, text: &str) {
+            fs::write(self.out().join(name), text).unwrap();
+        }
+
+        fn read(&self, name: &str) -> String {
+            super::read(&self.out().join(name))
+        }
+
+        /// As a healthcheck runs: the image's user, the env of the service, its network. The
+        /// VM needs `out` on `/stand/out`.
+        fn plain(&self, id: &SandboxId, script: &str) -> (Option<i32>, String) {
+            static NEXT: AtomicU32 = AtomicU32::new(0);
+            let name = format!("plain-{}.out", NEXT.fetch_add(1, Ordering::Relaxed));
+            let script = format!("({script}) > /stand/out/{name} 2>&1");
+            let exec = self
+                .sandbox
+                .exec_detached(id, &argv(&["sh", "-c", &script]));
+            let what = [Waitable::Exec(exec.unwrap())];
+            let exited = self.sandbox.wait(&what, Instant::now() + EXIT).unwrap();
+            let code = exited.expect("the exec ends").code;
+            (
+                code,
+                fs::read_to_string(self.out().join(name)).unwrap_or_default(),
+            )
+        }
+
+        fn until_passes(&self, id: &SandboxId, script: &str) {
+            let deadline = Instant::now() + EXIT;
+            while self.plain(id, script).0 != Some(0) {
+                assert!(Instant::now() < deadline, "`{script}` never passed in {id}");
+                std::thread::sleep(Duration::from_millis(250));
+            }
+        }
+
+        /// Once every connection `net` counted has closed. `net` rewrites its file at most every
+        /// 100 ms, so a read right after the client's exit may still miss its last connection.
+        fn settled(&self, id: &SandboxId) -> Metrics {
+            std::thread::sleep(Duration::from_millis(500));
+            let deadline = Instant::now() + Duration::from_secs(10);
+            loop {
+                let metrics = self.sandbox.metrics(id).unwrap();
+                if metrics.ports.iter().all(|port| port.open == 0) {
+                    return metrics;
+                }
+                assert!(Instant::now() < deadline, "still open: {:?}", metrics.ports);
+                std::thread::sleep(Duration::from_millis(100));
+            }
         }
 
         fn finish(self, created: &[SandboxId]) {
@@ -1101,5 +1164,242 @@ mod live {
         );
         assert_eq!(wait_exit(case.sandbox, &ids[2]), Some(128 + 9));
         case.finish(&ids);
+    }
+
+    fn peer(service: &str, replicas: u32, ports: &[u16]) -> Peer {
+        Peer {
+            service: service.into(),
+            replicas,
+            ports: ports.to_vec(),
+        }
+    }
+
+    fn target<'m>(metrics: &'m Metrics, target: &str) -> &'m PortStats {
+        let found = metrics.ports.iter().find(|port| port.target == target);
+        found.unwrap_or_else(|| panic!("no {target} in {:?}", metrics.ports))
+    }
+
+    /// Prints `ready` once both listen: HTTP on 8080 (the status from the path, the hostname as
+    /// the body), and on 9090 a line that waits for the client to close first, as the connections
+    /// that fill `max_inbound` do (spike net).
+    const SERVER: &str = r#"
+const http = require('http'), net = require('net'), os = require('os');
+let listening = 0;
+const up = () => { if (++listening === 2) console.log('ready'); };
+http.createServer((q, s) => { s.statusCode = Number(q.url.slice(1)) || 200; s.end(os.hostname()); })
+  .listen(8080, '0.0.0.0', up);
+net.createServer(c => { c.on('error', () => {}); c.write('raw\n'); c.on('end', () => c.end()); })
+  .listen(9090, '0.0.0.0', up);
+"#;
+
+    fn server(replica: u32, peers: &[Peer], out_dir: &Utf8Path) -> Launch {
+        let mut srv = launch("srv", NODE);
+        srv.replica = replica;
+        srv.command = Some(argv(&["node", "/stand/out/srv.js"]));
+        srv.ports = vec![Exposed(8080), Exposed(9090)];
+        srv.peers = peers.to_vec();
+        srv.mounts = vec![out(out_dir)];
+        srv
+    }
+
+    /// One line each: `<status> <body>` of two HTTP requests, the line of 9090, how a connection
+    /// to the name without `expose` went.
+    const CLIENT: &str = r#"
+const http = require('http'), net = require('net'), fs = require('fs');
+const get = p => new Promise(ok => http.get({ host: 'srv', port: 8080, path: p, agent: false }, r => {
+  let b = ''; r.on('data', d => b += d); r.on('end', () => ok(`${r.statusCode} ${b}`));
+}).on('error', e => ok(String(e))));
+const raw = () => new Promise(ok => { const c = net.connect(9090, 'srv'); let b = '';
+  c.on('data', d => { b += d; c.end(); }); c.on('close', () => ok(b.trim())); c.on('error', e => ok(String(e))); });
+const ghost = () => new Promise(ok => { const c = net.connect(1234, 'ghost');
+  c.on('connect', () => { c.destroy(); ok('connected'); }); c.on('error', e => ok(e.code)); });
+(async () => {
+  const lines = [await get('/200'), await get('/503'), await raw(), await ghost()];
+  fs.writeFileSync('/stand/out/result.txt', lines.join('\n') + '\n');
+})();
+"#;
+
+    #[test]
+    fn live_names_reach_peers_in_turn_and_the_relay_counts_them() {
+        let Some(case) = Case::start() else { return };
+        case.write("srv.js", SERVER);
+        case.write("client.js", CLIENT);
+        let peers = [
+            peer("srv", 2, &[8080, 9090]),
+            peer("ghost", 1, &[]),
+            peer("client", 1, &[]),
+        ];
+        let servers = (1..=2).map(|replica| server(replica, &peers, case.out()));
+        let mut ids = case.create(servers.collect());
+        for id in &ids {
+            case.until_logged(id, "ready");
+        }
+        let mut client = launch("client", NODE);
+        client.command = Some(argv(&["node", "/stand/out/client.js"]));
+        client.peers = peers.to_vec();
+        client.mounts = vec![out(case.out())];
+        let client = case.create(vec![client]).remove(0);
+        ids.push(client.clone());
+        assert_eq!(wait_exit(case.sandbox, &client), Some(0));
+
+        let result = case.read("result.txt");
+        let lines: Vec<&str> = result.lines().collect();
+        let [ok, failed, raw, _ghost] = lines.as_slice() else {
+            panic!("four lines: {result}");
+        };
+        let (ok, failed) = (ok.split_once(' '), failed.split_once(' '));
+        let (Some(("200", first)), Some(("503", second))) = (ok, failed) else {
+            panic!("{result}");
+        };
+        assert_ne!(
+            first, second,
+            "two connections go to the two replicas in turn"
+        );
+        assert_eq!(*raw, "raw");
+
+        let metrics = case.settled(&client);
+        let http = target(&metrics, "srv:8080");
+        assert_eq!((http.connections, http.http), (2, Some([0, 1, 0, 0, 1])));
+        assert!(http.bytes_out > 0 && http.bytes_in > 0, "{http:?}");
+        let line = target(&metrics, "srv:9090");
+        assert_eq!((line.connections, line.bytes_in, line.http), (1, 4, None));
+        let ghost = metrics.unexposed.iter().find(|name| name.name == "ghost");
+        assert_eq!(ghost.map(|ghost| ghost.attempts), Some(1), "{metrics:?}");
+        case.finish(&ids);
+    }
+
+    /// Also notes whether the guest has IPv6 beside `lo`: the probe chain of `net` covers IPv4
+    /// only until stage 5 of T-11.
+    #[test]
+    fn live_off_refuses_an_outside_address_at_once_and_public_reaches_it() {
+        let Some(case) = Case::start() else { return };
+        let mut off = launch("off", NODE);
+        off.command = sh("sleep 600");
+        off.mounts = vec![out(case.out())];
+        let mut public = off.clone();
+        public.service = "public".into();
+        public.outbound = Outbound::Public;
+        let ids = case.create(vec![off, public]);
+        let fetch = "node -e \"fetch('https://registry.npmjs.org/-/ping', \
+                     {signal: AbortSignal.timeout(8000)}).then(r => console.log('OK', r.status), \
+                     e => console.log('ERR', String(e.cause || e)))\"";
+        let started = Instant::now();
+        let (_, refused) = case.plain(&ids[0], fetch);
+        let fast = started.elapsed() < Duration::from_secs(5);
+        assert!(refused.starts_with("ERR") && fast, "{refused}");
+        let (_, answered) = case.plain(&ids[1], fetch);
+        assert!(answered.starts_with("OK 200"), "{answered}");
+
+        let (_, ipv6) = case.plain(&ids[0], "cat /proc/net/if_inet6 /proc/net/ipv6_route");
+        let off_lo: Vec<&str> = ipv6.lines().filter(|line| !line.ends_with(" lo")).collect();
+        note(&format!(
+            "ipv6 beside lo (addresses and routes): {off_lo:?}"
+        ));
+        case.finish(&ids);
+    }
+
+    fn postgres(service: &str, peers: &[Peer], out_dir: &Utf8Path) -> Launch {
+        let mut db = launch(service, POSTGRES);
+        db.env.insert("POSTGRES_PASSWORD".into(), "pw".into());
+        db.command = Some(argv(&[
+            "postgres",
+            "-c",
+            &format!("cluster_name={service}"),
+        ]));
+        db.ports = vec![Exposed(5432)];
+        db.peers = peers.to_vec();
+        db.mounts = vec![out(out_dir)];
+        db
+    }
+
+    /// A stop rule of T-11 (row 80), the first case on the Mac: each Postgres listens on
+    /// `0.0.0.0:5432`, and `db2:5432` from `db` must still reach `db2`, not `db`'s own Postgres.
+    #[test]
+    fn live_redirect_stands_beside_the_wildcard_listener_of_a_service() {
+        let Some(case) = Case::start() else { return };
+        let peers = [peer("db", 1, &[5432]), peer("db2", 1, &[5432])];
+        let dbs = ["db", "db2"].map(|service| postgres(service, &peers, case.out()));
+        let ids = case.create(dbs.to_vec());
+        for id in &ids {
+            case.until_passes(id, "pg_isready -h 127.0.0.1 -U postgres");
+        }
+        let ask = |host: &str| {
+            let sql = format!("PGPASSWORD=pw psql -h {host} -U postgres -tAc 'show cluster_name'");
+            let (code, out) = case.plain(&ids[0], &sql);
+            (code, out.trim().to_owned())
+        };
+        assert_eq!(ask("127.0.0.1"), (Some(0), "db".to_owned()));
+        assert_eq!(ask("db2"), (Some(0), "db2".to_owned()), "db2:5432 from db");
+        case.finish(&ids);
+    }
+
+    const BURST: &str = r#"
+const net = require('net');
+let started = 0;
+const one = () => new Promise(ok => { const c = net.connect(9090, 'srv');
+  c.on('data', () => c.end()); c.on('close', ok); c.on('error', ok); });
+const lane = async () => { while (started < 300) { started++; await one(); } };
+Promise.all(Array.from({ length: 32 }, lane));
+"#;
+
+    /// Row 39: 300 new connections, 32 at a time, to one sandbox pass its `max_inbound` of 256
+    /// (spike net: 44 refusals within a second). One at a time the count is not stable, so the
+    /// check is `>= 1`.
+    #[test]
+    fn live_a_burst_of_connections_hits_the_limit_of_256() {
+        let Some(case) = Case::start() else { return };
+        case.write("srv.js", SERVER);
+        case.write("burst.js", BURST);
+        let peers = [peer("srv", 1, &[8080, 9090]), peer("burst", 1, &[])];
+        let mut ids = case.create(vec![server(1, &peers, case.out())]);
+        case.until_logged(&ids[0], "ready");
+        let mut burst = launch("burst", NODE);
+        burst.command = Some(argv(&["node", "/stand/out/burst.js"]));
+        burst.peers = peers.to_vec();
+        burst.mounts = vec![out(case.out())];
+        let burst = case.create(vec![burst]).remove(0);
+        ids.push(burst.clone());
+        assert_eq!(wait_exit(case.sandbox, &burst), Some(0));
+        let metrics = case.settled(&burst);
+        let line = target(&metrics, "srv:9090");
+        note(&format!("burst of 300, 32 at a time: {line:?}"));
+        assert!(line.connections == 300 && line.drops >= 1, "{line:?}");
+        case.finish(&ids);
+    }
+
+    /// Orchestrator decision 8 of T-11: the service's user (101 in nginx-unprivileged) writes the
+    /// status file of `run` in `/stand/run`, but nothing in `/stand/net`, where root keeps the
+    /// counters and the fault switch; it reads the names.
+    #[test]
+    fn live_the_image_user_writes_run_but_not_net() {
+        let Some(case) = Case::start() else { return };
+        let mut web = launch("web", NGINX);
+        web.peers = vec![peer("web", 1, &[])];
+        web.command = sh("id -u; \
+             touch /stand/net/forged 2>/dev/null && echo 'net: created' || echo 'net: refused'; \
+             (echo forged > /stand/net/counters.json) 2>/dev/null \
+               && echo 'counters: written' || echo 'counters: refused'; \
+             touch /stand/run/mine && echo 'run: created' || echo 'run: refused'; \
+             grep -q ' web$' /etc/hosts && echo 'hosts: read' || echo 'hosts: unread'; \
+             stat -c 'net %u:%g %a' /stand/net");
+        let id = case.create(vec![web]).remove(0);
+        assert_eq!(wait_exit(case.sandbox, &id), Some(0));
+        let log = case.log(&id);
+        let lines: Vec<&str> = log.lines().collect();
+        note(&format!("the image user and the binds: {lines:?}"));
+        let expected = [
+            "101",
+            "net: refused",
+            "counters: refused",
+            "run: created",
+            "hosts: read",
+        ];
+        for line in expected {
+            assert!(lines.contains(&line), "no `{line}`: {lines:?}");
+        }
+        case.sandbox
+            .metrics(&id)
+            .expect("the counters are still net's");
+        case.finish(&[id]);
     }
 }

@@ -3,7 +3,8 @@
 //! The SDK is async; each port call blocks on a private runtime and runs its future as a task on a
 //! worker with a 16 MiB stack, since the SDK's futures overflow the 1 MiB main thread of a Windows
 //! debug build. `home` is microsandbox's own home (runtime, images, VMs, snapshots) and holds the
-//! adapter's `vm/<vm>/` (the host side of the VM's `/stand/run`) and `guest/<version>/` (`/stand/bin`).
+//! adapter's `vm/<vm>/` (the host side of the VM's `/stand/run` and `/stand/net`) and
+//! `guest/<version>/` (`/stand/bin`).
 
 mod guest;
 mod network;
@@ -50,6 +51,7 @@ struct Inner {
     local: OnceCell<Arc<msb::LocalBackend>>,
     installed: OnceCell<guest::Binary>,
     live: Mutex<BTreeMap<String, Arc<Live>>>,
+    ports: Mutex<network::Ports>,
     seq: AtomicU64,
 }
 
@@ -83,6 +85,7 @@ impl Microsandbox {
                 local: OnceCell::new(),
                 installed: OnceCell::new(),
                 live: Mutex::new(BTreeMap::new()),
+                ports: Mutex::new(network::Ports::default()),
                 seq: AtomicU64::new(0),
             }),
         })
@@ -329,12 +332,17 @@ impl Inner {
         for launch in &batch {
             built(launch)?;
         }
+        let wired = {
+            let mut ports = self.ports.lock().unwrap();
+            let wire = |launch: &Launch| network::wire(&mut ports, launch);
+            batch.iter().map(wire).collect::<Result<Vec<_>, _>>()?
+        };
         let binary = self.install().await?.clone();
         let mut tasks = tokio::task::JoinSet::new();
-        for (index, launch) in batch.into_iter().enumerate() {
+        for (index, (launch, wiring)) in batch.into_iter().zip(wired).enumerate() {
             let name = self.name("vm", &format!("{}-{}", launch.service, launch.replica));
             let (inner, binary) = (Arc::clone(self), binary.clone());
-            tasks.spawn(async move { (index, inner.start(name, launch, &binary).await) });
+            tasks.spawn(async move { (index, inner.start(name, launch, wiring, &binary).await) });
         }
         let mut started = Vec::new();
         let mut failure = None;
@@ -367,15 +375,19 @@ impl Inner {
             .collect())
     }
 
-    /// The VM, then the service under `stand-guest run`. Returns once the service's command runs.
+    /// The VM, its network, then the service under `stand-guest run`. Returns once the service's
+    /// command runs.
     async fn start(
         &self,
         name: String,
         launch: Launch,
+        wiring: network::Wiring,
         binary: &guest::Binary,
     ) -> Result<Live, SandboxError> {
         let folder = self.folder(&name);
         volumes::make_folder(&process::run_dir(&folder))?;
+        let net = network::net_dir(&folder);
+        std::fs::create_dir_all(&net).map_err(|error| backend(format!("{net}: {error}")))?;
         for mount in &launch.mounts {
             if let Mount::Bind {
                 host,
@@ -386,7 +398,7 @@ impl Inner {
                 volumes::open_to_every_user(host)?;
             }
         }
-        let vm = match volumes::fresh(&name, &launch, &folder, binary).await {
+        let vm = match volumes::fresh(&name, &launch, &wiring.published, &folder, binary).await {
             Ok(vm) => vm,
             Err(error) => {
                 remove_folder(&folder);
@@ -396,6 +408,7 @@ impl Inner {
         // The image's config is read once the VM is made, since its create pulls a missing image.
         let started = async {
             let image = process::image_defaults(&launch).await?;
+            network::start(&vm, &wiring, &folder).await?;
             let service = process::start_service(&vm, &launch, &image, &folder).await?;
             Ok((image, service))
         };
@@ -570,22 +583,21 @@ impl Live {
             .await?
             .map_err(backend)?;
         let peak = self.peak.fetch_max(now.memory_bytes, Ordering::Relaxed);
+        let (ports, unexposed) = guest::traffic(&network::counters(&self.folder))?;
         Ok(Metrics {
             cpu: Duration::from_nanos(now.vcpu_time_ns),
             memory_peak: peak.max(now.memory_bytes),
             memory_limit: now.memory_limit_bytes,
-            ..Metrics::default()
+            ports,
+            unexposed,
         })
     }
 }
 
-/// Stage 1 of T-11 boots a VM with binds only.
+/// Stage 2 of T-11 boots a VM with binds and its network only.
 fn built(launch: &Launch) -> Result<(), SandboxError> {
     if launch.seed.is_some() {
         return Err(not_built("a seed"));
-    }
-    if !launch.ports.is_empty() || !launch.peers.is_empty() {
-        return Err(not_built("names and ports"));
     }
     if launch
         .mounts
