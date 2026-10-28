@@ -1,10 +1,10 @@
-//! Values of Compose: CPUs, bytes and durations. Each takes the text and gives the message of a
-//! refusal; its field puts in the key and the line.
+//! Values of the file: CPUs, bytes, durations, counts and percents. A refusal is a message; the
+//! field the text came from puts in the key and the line.
 
 use std::num::NonZeroU32;
 use std::time::Duration;
 
-use crate::{Bytes, Cpus};
+use crate::{Bytes, Cpus, Percent};
 
 /// `"0.5"`, `0.5` or `2`: thousandths of a CPU, above 0.
 pub(crate) fn cpus(text: &str) -> Result<Cpus, String> {
@@ -75,6 +75,12 @@ pub(crate) fn count(text: &str) -> Result<NonZeroU32, String> {
         .then(|| text.parse::<NonZeroU32>().ok())
         .flatten()
         .ok_or_else(|| format!("`{text}` is not a whole number from 1"))
+}
+
+/// Whole percents from 1 to 1000.
+pub(crate) fn percent(value: u32) -> Option<Percent> {
+    let value = u16::try_from(value).ok()?;
+    (1..=1000).contains(&value).then_some(Percent(value))
 }
 
 /// Both parts are digits, and not both are empty: `2`, `0.5`, `.5`.

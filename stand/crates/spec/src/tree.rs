@@ -253,6 +253,14 @@ impl<'a> Field<'a> {
         self.items()?.iter().map(Field::string).collect()
     }
 
+    /// Only an unquoted `true` or `false`.
+    pub(crate) fn bool(&self) -> Result<bool, Invalid> {
+        match self.node.value {
+            Value::Bool(value) => Ok(value),
+            _ => Err(self.expected("`true` or `false`")),
+        }
+    }
+
     fn expected(&self, what: &str) -> Invalid {
         let found = match &self.node.value {
             Value::Null => "nothing".to_owned(),

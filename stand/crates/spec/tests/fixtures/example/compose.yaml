@@ -46,3 +46,15 @@ volumes: { pgdata: {} }
 x-stand:
   workload: load
   repeat: 3
+  probes:
+    orders:                       # the state below the app: rows of a table
+      in: db
+      at: after-workload
+      run: ["psql", "-U", "postgres", "-At", "-c", "select row_to_json(o) from orders o order by id"]
+      key: /id
+      ignore: [/updated_at]
+  expect:
+    cost:
+      - { measure: stand.wall, change: +10%, reason: "one more index lookup per order" }
+  # fault: { target: "db:5432", mode: down }     # opt-in
+  # second_pass: true                            # opt-in

@@ -3,8 +3,8 @@ use std::time::Duration;
 
 use camino::{Utf8Path, Utf8PathBuf};
 use spec::{
-    Condition, Demand, Mount, Outbound, Profiler, Service, ServiceKind, ServiceName, SpecError,
-    Stand, load,
+    Change, Condition, Demand, FaultMode, Mount, Outbound, Policy, PolicyError, Profiler, Service,
+    ServiceKind, ServiceName, SpecError, Stand, Tap, load,
 };
 
 /// `tests/fixtures/<case>/compose.yaml`. Every refusal has its own folder: a small file that is
@@ -16,8 +16,13 @@ fn fixture(case: &str) -> Utf8PathBuf {
         .join("compose.yaml")
 }
 
+/// With the default policy, `max_tolerance` 25.
+fn load_case(case: &str) -> Result<Stand, SpecError> {
+    load(&fixture(case), &Policy::new(None).unwrap())
+}
+
 fn stand(case: &str) -> Stand {
-    load(&fixture(case)).unwrap_or_else(|error| panic!("{case}: {error}"))
+    load_case(case).unwrap_or_else(|error| panic!("{case}: {error}"))
 }
 
 fn service<'a>(stand: &'a Stand, name: &str) -> &'a Service {
@@ -37,7 +42,7 @@ fn assert_refused(cases: &[(&str, &str, u32, &str)]) {
             line: refused_line,
             key: refused_key,
             message,
-        }) = load(&fixture(case))
+        }) = load_case(case)
         else {
             panic!("{case} is not refused as invalid");
         };
@@ -204,6 +209,25 @@ fn the_example_of_the_plan_reads_into_kinds_levels_defaults_and_the_prepare_serv
         let profile = (name == "api").then_some(Profiler::Node);
         assert_eq!(service.profile, profile, "{name}");
     }
+
+    let probes: Vec<&str> = stand.probes.keys().map(|name| name.as_str()).collect();
+    assert_eq!(probes, ["orders"]);
+    let orders = stand.probes.values().next().unwrap();
+    assert_eq!(
+        (orders.service.as_str(), orders.at),
+        ("db", Tap::AfterWorkload)
+    );
+    assert_eq!(orders.run[..3], ["psql", "-U", "postgres"]);
+    assert_eq!(orders.key.as_ref().map(|key| key.as_str()), Some("/id"));
+    let ignore: Vec<&str> = orders.ignore.iter().map(|path| path.as_str()).collect();
+    assert_eq!(ignore, ["/updated_at"]);
+    let [cost] = &stand.expect[..] else {
+        panic!("{:?}", stand.expect);
+    };
+    assert_eq!(cost.measure, "stand.wall");
+    assert!(matches!(cost.change, Change::UpTo(percent) if percent.get() == 10));
+    assert_eq!(cost.reason, "one more index lookup per order");
+    assert!(stand.fault.is_none() && stand.second_pass.is_none());
 }
 
 #[test]
@@ -551,8 +575,193 @@ fn the_graph_has_known_names_one_condition_per_service_and_no_cycle() {
 }
 
 #[test]
+fn a_probe_runs_in_a_long_running_service_and_after_setup_in_one_setup_starts() {
+    let stand = stand("probes");
+    let probes: Vec<String> = stand
+        .probes
+        .iter()
+        .map(|(name, probe)| {
+            let ignore: Vec<&str> = probe.ignore.iter().map(|path| path.as_str()).collect();
+            format!(
+                "{} in {} {:?} key {:?} ignore {ignore:?}",
+                name.as_str(),
+                probe.service.as_str(),
+                probe.at,
+                probe.key.as_ref().map(|key| key.as_str()),
+            )
+        })
+        .collect();
+    assert_eq!(
+        probes,
+        [
+            "logs in api OnFailure key None ignore []",
+            r#"rows in db AfterSetup key Some("") ignore ["/a~1b", "/items/0/sku"]"#,
+        ]
+    );
+    assert_refused(&[
+        (
+            "probe-in-workload",
+            "x-stand.probes.rows.in",
+            23,
+            "is the workload",
+        ),
+        (
+            "probe-in-setup",
+            "x-stand.probes.rows.in",
+            23,
+            "is a setup service",
+        ),
+        (
+            "probe-after-setup",
+            "x-stand.probes.rows.at",
+            24,
+            "does not run in setup",
+        ),
+        (
+            "probe-empty-run",
+            "x-stand.probes.rows.run",
+            25,
+            "an empty argv",
+        ),
+        (
+            "probe-bad-pointer",
+            "x-stand.probes.rows.key",
+            26,
+            "not a JSON pointer",
+        ),
+    ]);
+}
+
+#[test]
+fn expect_reads_changes_without_quotes_and_holds_them_to_the_policy() {
+    let stand = stand("expect-changes");
+    let costs: Vec<(&str, Change)> = stand
+        .expect
+        .iter()
+        .map(|cost| (cost.measure.as_str(), cost.change))
+        .collect();
+    assert_eq!(costs[0], ("stand.wall", Change::None));
+    assert!(matches!(costs[1], ("api.cpu", Change::UpTo(percent)) if percent.get() == 10));
+    assert!(matches!(costs[2], ("api.memory", Change::DownTo(percent)) if percent.get() == 10));
+    assert_eq!(
+        costs[3..],
+        [
+            ("api.shutdown", Change::Down),
+            ("api:3000.connections", Change::Unknown)
+        ]
+    );
+    let unchanged = &stand.second_pass.as_ref().unwrap().unchanged;
+    let unchanged: Vec<(&str, &str)> = unchanged
+        .iter()
+        .map(|file| (file.file.as_str(), file.reason.as_str()))
+        .collect();
+    assert_eq!(
+        unchanged,
+        [("probe.orders.jsonl", "a second pass sees the same orders")]
+    );
+
+    assert_refused(&[
+        (
+            "cost-below-5",
+            "x-stand.expect.cost[0].change",
+            9,
+            "X is below 5",
+        ),
+        (
+            "cost-wide",
+            "x-stand.expect.cost[0].change",
+            9,
+            "wider than `max_tolerance`",
+        ),
+        (
+            "cost-empty-reason",
+            "x-stand.expect.cost[0].reason",
+            9,
+            "empty",
+        ),
+        (
+            "unchanged-without-second-pass",
+            "x-stand.expect.unchanged",
+            8,
+            "`x-stand.second_pass: true`",
+        ),
+    ]);
+    // A wider policy takes what the default one refuses.
+    load(&fixture("cost-wide"), &Policy::new(Some(50)).unwrap()).unwrap();
+}
+
+#[test]
+fn change_and_policy_read_the_grammar_of_expect_and_accept() {
+    let percent = |text: &str| match Change::parse(text) {
+        Ok(Change::UpTo(percent)) => format!("up to {}", percent.get()),
+        Ok(Change::DownTo(percent)) => format!("down to {}", percent.get()),
+        other => format!("{other:?}"),
+    };
+    assert_eq!(["+5%", "-1000%"].map(percent), ["up to 5", "down to 1000"]);
+    for text in [
+        "up to +10%",
+        "10%",
+        "+10",
+        "+4%",
+        "+10.5%",
+        "+1001%",
+        "None",
+        "",
+    ] {
+        let error = Change::parse(text).unwrap_err();
+        assert!(error.to_string().ends_with("with X from 5"), "{error}");
+    }
+
+    let policy = Policy::new(None).unwrap();
+    assert_eq!(policy.max_tolerance.get(), 25);
+    let within = |text: &str| Change::parse(text).unwrap().within(&policy);
+    assert_eq!(
+        ["+25%", "-25%", "+26%", "-26%", "none", "down", "unknown"].map(within),
+        [true, true, false, false, true, true, true]
+    );
+    assert_eq!(Policy::new(Some(1000)).unwrap().max_tolerance.get(), 1000);
+    assert!(matches!(Policy::new(Some(0)), Err(PolicyError(0))));
+    assert!(matches!(Policy::new(Some(1001)), Err(PolicyError(1001))));
+}
+
+#[test]
+fn a_fault_targets_an_exposed_port_and_slow_has_a_delay() {
+    let down = stand("fault-down").fault.unwrap();
+    assert_eq!(
+        (
+            down.target.service.as_str(),
+            down.target.port.get(),
+            down.mode
+        ),
+        ("db", 5432, FaultMode::Down)
+    );
+    let slow = stand("fault-slow").fault.unwrap();
+    assert_eq!(slow.mode, FaultMode::Slow(Duration::from_secs(2)));
+    assert_refused(&[
+        (
+            "fault-unexposed",
+            "x-stand.fault.target",
+            12,
+            "does not expose `6379`",
+        ),
+        (
+            "fault-slow-without-delay",
+            "x-stand.fault.delay",
+            12,
+            "required",
+        ),
+        (
+            "fault-unknown-mode",
+            "x-stand.fault.mode",
+            12,
+            "`flaky` is not",
+        ),
+    ]);
+}
+
+#[test]
 fn an_error_names_the_file_line_and_key() {
-    let error = load(&fixture("unknown-key")).unwrap_err().to_string();
+    let error = load_case("unknown-key").unwrap_err().to_string();
     assert!(
         error.ends_with(
             "compose.yaml:9: services.load.deploy.resources.limits.pids: unknown key `pids`: \
@@ -564,7 +773,7 @@ fn an_error_names_the_file_line_and_key() {
 
 #[test]
 fn a_file_that_is_not_there_is_missing() {
-    let Err(SpecError::Missing(file)) = load(&fixture("no-such-case")) else {
+    let Err(SpecError::Missing(file)) = load_case("no-such-case") else {
         panic!("a file that is not there is not missing");
     };
     assert!(file.ends_with("no-such-case/compose.yaml"), "{file}");

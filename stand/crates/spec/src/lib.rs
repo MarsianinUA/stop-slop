@@ -13,11 +13,17 @@ mod bind;
 mod graph;
 mod tree;
 mod units;
+mod xstand;
+
+pub use xstand::{Change, ChangeError};
 
 /// The tree of the measured version in a guest; its version disk mounts at the parent, `/w`.
 pub const TREE: &str = "/w/app";
 
-pub fn load(path: &Utf8Path) -> Result<Stand, SpecError> {
+/// `max_tolerance` when `stand.toml` has none.
+const MAX_TOLERANCE: u16 = 25;
+
+pub fn load(path: &Utf8Path, policy: &Policy) -> Result<Stand, SpecError> {
     let file = camino::absolute_utf8(path).map_err(|source| SpecError::Io {
         file: path.to_owned(),
         source,
@@ -29,7 +35,7 @@ pub fn load(path: &Utf8Path) -> Result<Stand, SpecError> {
         }
         Err(source) => return Err(SpecError::Io { file, source }),
     };
-    read(&text, &file).map_err(|invalid| SpecError::Invalid {
+    read(&text, &file, policy).map_err(|invalid| SpecError::Invalid {
         file: file.clone(),
         line: invalid.line,
         key: invalid.key,
@@ -37,13 +43,17 @@ pub fn load(path: &Utf8Path) -> Result<Stand, SpecError> {
     })
 }
 
-fn read(text: &str, file: &Utf8Path) -> Result<Stand, Invalid> {
+fn read(text: &str, file: &Utf8Path, policy: &Policy) -> Result<Stand, Invalid> {
     let node = tree::parse(text)?;
     let root = Field::root(&node);
     allow::check(&root)?;
     let dir = file.parent().expect("a file that was read is in a folder");
     let mut bound = bind::stand(&root, dir)?;
     let graph = graph::of(&root, &mut bound.services, &bound.workload)?;
+    let probes = xstand::probes(&root, &bound.services)?;
+    let expect = xstand::expect(&root, policy)?;
+    let fault = xstand::fault(&root, &bound.services)?;
+    let second_pass = xstand::second_pass(&root)?;
     Ok(Stand {
         file: file.to_owned(),
         services: bound.services,
@@ -53,7 +63,27 @@ fn read(text: &str, file: &Utf8Path) -> Result<Stand, Invalid> {
         repeat: bound.repeat,
         setup_timeout: bound.setup_timeout,
         timeout: bound.timeout,
+        probes,
+        expect,
+        fault,
+        second_pass,
     })
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct Policy {
+    pub max_tolerance: Percent,
+}
+
+impl Policy {
+    /// `None` is 25; outside 1..=1000 is a `PolicyError`, which `cli` reports as the `ConfigError`
+    /// of `max_tolerance`.
+    pub fn new(max_tolerance: Option<u16>) -> Result<Policy, PolicyError> {
+        let max_tolerance = max_tolerance.unwrap_or(MAX_TOLERANCE);
+        units::percent(u32::from(max_tolerance))
+            .map(|max_tolerance| Policy { max_tolerance })
+            .ok_or(PolicyError(max_tolerance))
+    }
 }
 
 #[derive(Debug)]
@@ -71,6 +101,10 @@ pub struct Stand {
     pub repeat: Repeat,
     pub setup_timeout: Timeout,
     pub timeout: Timeout,
+    pub probes: BTreeMap<ProbeName, Probe>,
+    pub expect: Vec<Cost>,
+    pub fault: Option<Fault>,
+    pub second_pass: Option<SecondPass>,
 }
 
 impl Stand {
@@ -98,6 +132,63 @@ impl Stand {
 pub struct Demand {
     pub cpus: u32,
     pub memory: u64,
+}
+
+#[derive(Debug)]
+pub struct Probe {
+    /// A long-running service; for `AfterSetup` one that runs in setup.
+    pub service: ServiceName,
+    pub at: Tap,
+    pub run: Vec<String>,
+    pub key: Option<Pointer>,
+    pub ignore: Vec<Pointer>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Tap {
+    AfterSetup,
+    AfterWorkload,
+    OnFailure,
+}
+
+/// `measure` is `<subject>.<metric>`; `report` checks it against its measures (`unknown-expect`).
+#[derive(Debug, Clone)]
+pub struct Cost {
+    pub measure: String,
+    pub change: Change,
+    pub reason: String,
+}
+
+#[derive(Debug)]
+pub struct Fault {
+    pub target: Target,
+    pub mode: FaultMode,
+}
+
+/// A service and one of its `expose` ports.
+#[derive(Debug, Clone)]
+pub struct Target {
+    pub service: ServiceName,
+    pub port: Exposed,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FaultMode {
+    Down,
+    Slow(Duration),
+}
+
+/// `x-stand.second_pass: true`; `unchanged` comes from `x-stand.expect.unchanged`.
+#[derive(Debug)]
+pub struct SecondPass {
+    pub unchanged: Vec<Unchanged>,
+}
+
+/// A file of `/stand/out` or `probe.<name>.jsonl`.
+#[derive(Debug)]
+pub struct Unchanged {
+    pub file: String,
+    pub reason: String,
 }
 
 #[derive(Debug)]
@@ -187,6 +278,36 @@ impl ServiceName {
     }
 }
 
+/// As `ServiceName`.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct ProbeName(String);
+
+impl ProbeName {
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+/// RFC 6901: `""` or `/a/0/b`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Pointer(String);
+
+impl Pointer {
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+/// Whole percents, 1..=1000.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Percent(u16);
+
+impl Percent {
+    pub fn get(self) -> u16 {
+        self.0
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Exposed(u16);
 
@@ -261,6 +382,10 @@ pub enum SpecError {
         source: io::Error,
     },
 }
+
+#[derive(Debug, thiserror::Error)]
+#[error("{0} is outside 1-1000")]
+pub struct PolicyError(pub u16);
 
 /// A `SpecError::Invalid` before `load` puts in the file.
 #[derive(Debug)]

@@ -239,6 +239,23 @@ fn waits_for(
     false
 }
 
+/// The services that run in setup: the setup services and what they wait for, directly or
+/// through others.
+pub(crate) fn in_setup(services: &BTreeMap<ServiceName, Service>) -> BTreeSet<&ServiceName> {
+    let mut found = BTreeSet::new();
+    let mut next: Vec<&ServiceName> = services
+        .iter()
+        .filter(|(_, service)| service.kind == ServiceKind::Setup)
+        .map(|(name, _)| name)
+        .collect();
+    while let Some(name) = next.pop() {
+        if found.insert(name) {
+            next.extend(services[name].depends_on.keys());
+        }
+    }
+    found
+}
+
 fn service_field<'a>(root: &Field<'a>, name: &str) -> Field<'a> {
     root.at("services").at(name)
 }

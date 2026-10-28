@@ -13,10 +13,12 @@ enum Shape {
     },
     /// A mapping of names, such as services, each value of this shape.
     Names(&'static Shape),
+    /// A list, each item of this shape.
+    Items(&'static Shape),
     Value,
 }
 
-use Shape::{Keys, Names, Value};
+use Shape::{Items, Keys, Names, Value};
 
 const ROOT: Shape = Keys {
     keys: &[
@@ -101,7 +103,44 @@ const X_STAND: Shape = Keys {
         ("repeat", Value),
         ("setup_timeout", Value),
         ("timeout", Value),
+        ("probes", Names(&PROBE)),
+        (
+            "expect",
+            Keys {
+                keys: &[("cost", Items(&COST)), ("unchanged", Items(&UNCHANGED))],
+                extensions: false,
+            },
+        ),
+        (
+            "fault",
+            Keys {
+                keys: &[("target", Value), ("mode", Value), ("delay", Value)],
+                extensions: false,
+            },
+        ),
+        ("second_pass", Value),
     ],
+    extensions: false,
+};
+
+const PROBE: Shape = Keys {
+    keys: &[
+        ("in", Value),
+        ("at", Value),
+        ("run", Value),
+        ("key", Value),
+        ("ignore", Value),
+    ],
+    extensions: false,
+};
+
+const COST: Shape = Keys {
+    keys: &[("measure", Value), ("change", Value), ("reason", Value)],
+    extensions: false,
+};
+
+const UNCHANGED: Shape = Keys {
+    keys: &[("file", Value), ("reason", Value)],
     extensions: false,
 };
 
@@ -144,7 +183,13 @@ fn walk(field: &Field, shape: &Shape) -> Result<(), Invalid> {
             }
             Ok(())
         }
-        Names(_) | Keys { .. } => Ok(()),
+        Items(inner) if field.is_list() => {
+            for item in field.items()? {
+                walk(&item, inner)?;
+            }
+            Ok(())
+        }
+        Names(_) | Items(_) | Keys { .. } => Ok(()),
     }
 }
 

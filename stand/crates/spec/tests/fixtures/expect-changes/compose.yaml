@@ -1,0 +1,16 @@
+services:
+  load:
+    image: node:22
+    deploy: { resources: { limits: { cpus: "1", memory: 512m } } }
+x-stand:
+  workload: load
+  second_pass: true
+  expect:
+    cost:
+      - { measure: stand.wall, change: none, reason: "the same work" }
+      - { measure: api.cpu, change: +10%, reason: "one more lookup" }
+      - { measure: api.memory, change: -10%, reason: "a smaller cache" }
+      - { measure: api.shutdown, change: down, reason: "no drain wait" }
+      - { measure: "api:3000.connections", change: unknown, reason: "the pool decides" }
+    unchanged:
+      - { file: probe.orders.jsonl, reason: "a second pass sees the same orders" }

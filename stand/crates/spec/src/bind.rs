@@ -72,7 +72,7 @@ pub(crate) fn stand(root: &Field, dir: &Utf8Path) -> Result<Bound, Invalid> {
     })
 }
 
-/// A name of a service.
+/// A name of a service or a probe.
 pub(crate) fn name(field: &Field, name: &str) -> Result<String, Invalid> {
     let word = |byte: u8| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-';
     let message = if name.contains('.') {
