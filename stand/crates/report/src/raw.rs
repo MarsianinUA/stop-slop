@@ -26,7 +26,8 @@ pub struct Raw {
     pub setup: Setup,
     pub head: Vec<RepeatOutput>,
     pub before: Option<BeforeOutcome>,
-    /// `None` without a profiled service.
+    /// `None` without a profiled service, or without `Extra::Coverage` in the set: `make` then
+    /// copies the pool's.
     pub coverage: Option<CoverageOutcome>,
 }
 
@@ -188,6 +189,15 @@ impl Cause {
             _ => Cause::Error(text.to_owned()),
         }
     }
+}
+
+/// The repeats outside the stats: `run` runs those in its set, `Context.reused` names those
+/// copied from the pool (plan, row 89).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Extra {
+    Coverage,
+    Fault,
+    SecondPass,
 }
 
 impl Serialize for Cause {

@@ -9,7 +9,8 @@ use std::time::{Duration, Instant};
 use camino::{Utf8Path, Utf8PathBuf};
 use profile::ProfileError;
 use report::{
-    BeforeOutcome, Cause, CoverageOutcome, Failure, Phase, ProbeRan, ProfileOutcome, Raw, Role,
+    BeforeOutcome, Cause, CoverageOutcome, Extra, Failure, Phase, ProbeRan, ProfileOutcome, Raw,
+    Role,
 };
 use run::{Cancel, InspectError, RunError, SetupCache, Side, StandFault, Version, Versions};
 use sandbox::{
@@ -158,15 +159,31 @@ impl Case {
         }
     }
 
+    /// With every extra: what the stand asks for runs.
     fn run(&self, sandbox: &impl Sandbox, versions: &Versions) -> Result<Raw, RunError> {
+        self.run_with(sandbox, versions, &every_extra())
+    }
+
+    fn run_with(
+        &self,
+        sandbox: &impl Sandbox,
+        versions: &Versions,
+        extras: &BTreeSet<Extra>,
+    ) -> Result<Raw, RunError> {
+        let run_dir = self.run_dir();
         run::run(
             &self.stand,
             sandbox,
             versions,
-            &self.run_dir(),
+            extras,
+            &run_dir,
             &Cancel::new(),
         )
     }
+}
+
+fn every_extra() -> BTreeSet<Extra> {
+    BTreeSet::from([Extra::Coverage, Extra::Fault, Extra::SecondPass])
 }
 
 fn rule(service: &str, script: Script) -> Rule {
@@ -814,7 +831,8 @@ impl<'f> Hooked<'f> {
     }
 
     fn run(&self, case: &Case, versions: &Versions) -> Result<Raw, RunError> {
-        run::run(&case.stand, self, versions, &case.run_dir(), &self.cancel)
+        let (extras, run_dir) = (every_extra(), case.run_dir());
+        run::run(&case.stand, self, versions, &extras, &run_dir, &self.cancel)
     }
 }
 
@@ -3152,4 +3170,61 @@ fn inspect_of_a_service_that_exits_or_stays_unhealthy_did_not_start_and_cancel_d
         assert!(!later.iter().any(|call| matches!(call, Call::Exec { .. })));
         assert_left(&fake, &case.left());
     }
+}
+
+// --- the repeats outside the stats -------------------------------------------------------------
+
+/// `EXAMPLE` with the fault on `db:5432` and the second pass: the stand asks for every repeat
+/// outside the stats.
+fn every_repeat() -> String {
+    EXAMPLE.replace(
+        "  workload: load\n",
+        "  workload: load\n  fault: { target: \"db:5432\", mode: down }\n  second_pass: true\n",
+    )
+}
+
+/// The folder of each phase past the measured repeats that started the workload, in order.
+fn outside_folders(case: &Case, journal: &[Call]) -> Vec<String> {
+    let folders = workload_folders(case, journal).into_iter();
+    folders
+        .filter(|folder| !folder.starts_with("repeat-"))
+        .collect()
+}
+
+#[test]
+fn the_set_of_extras_runs_only_what_it_names_and_the_stand_asks_for() {
+    let span = run::span(&Case::new(&every_repeat()).stand);
+    let sets: [(&[Extra], &[&str]); 4] = [
+        (&[], &[]),
+        (&[Extra::Coverage], &["coverage"]),
+        (&[Extra::Fault, Extra::SecondPass], &[]),
+        (
+            &[Extra::Coverage, Extra::Fault, Extra::SecondPass],
+            &["coverage"],
+        ),
+    ];
+    for (set, folders) in sets {
+        let case = Case::new(&every_repeat());
+        let fake = fake(example_rules());
+        let extras: BTreeSet<Extra> = set.iter().copied().collect();
+        let raw = case.run_with(&fake, &case.versions(true), &extras).unwrap();
+        let journal = fake.journal();
+        assert_eq!(outside_folders(&case, &journal), folders, "{set:?}");
+        assert_eq!(raw.coverage.is_some(), set.contains(&Extra::Coverage));
+        assert!(matches!(&raw.before, Some(BeforeOutcome::Passed(before)) if before.len() == 3));
+        assert_eq!(raw.head.len(), 3);
+        // `span` is of the stand: the same for every set, the repeats it does not run included.
+        for (launch, _) in created(&journal) {
+            assert_eq!(launch.max_duration, span, "{set:?}");
+        }
+        assert_clean(&fake, &case.left());
+    }
+
+    // A stand that asks for none of them runs only the measured repeats, whatever the set says.
+    let case = Case::new(&EXAMPLE.replace("    x-stand: { profile: node }\n", ""));
+    let fake = fake(example_rules());
+    let raw = case.run(&fake, &case.versions(true)).unwrap();
+    assert!(raw.coverage.is_none());
+    assert!(outside_folders(&case, &fake.journal()).is_empty());
+    assert_clean(&fake, &case.left());
 }

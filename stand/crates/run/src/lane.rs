@@ -1,7 +1,7 @@
 //! The lane of each version (architecture plan, row 10) and the steps of one repeat. Each version
 //! is set up or taken from its cache entry, "before" first, then the measured repeats go in turns,
-//! "before" first, then the coverage repeat of the head. A failure of "before" stops its lane
-//! only; a failure of the head ends the run. Only one phase has VMs at a time, so no two live VMs
+//! "before" first, then the repeats outside the stats that the set of extras names (row 89). A
+//! failure of "before" stops its lane only; a failure of the head ends the run. Only one phase has VMs at a time, so no two live VMs
 //! share a service and a replica: the adapter keeps one host port per (service, replica, port)
 //! (plan T-11, decision 7).
 
@@ -13,8 +13,8 @@ use std::time::{Duration, Instant};
 use camino::{Utf8Path, Utf8PathBuf};
 use profile::{Called, Coverage, ProfileMode};
 use report::{
-    BeforeOutcome, Cause, CoverageOutcome, Failure, InstanceOutput, Phase, ProbeRan, ProbeRule,
-    Raw, RepeatOutput, Role, Setup, SetupSide,
+    BeforeOutcome, Cause, CoverageOutcome, Extra, Failure, InstanceOutput, Phase, ProbeRan,
+    ProbeRule, Raw, RepeatOutput, Role, Setup, SetupSide,
 };
 use sandbox::{Sandbox, SnapshotId};
 use spec::{Condition, ServiceKind, ServiceName, Stand, Tap};
@@ -73,6 +73,7 @@ struct Repeated {
 struct Ctx<'r, S> {
     stand: &'r Stand,
     sandbox: &'r S,
+    extras: &'r BTreeSet<Extra>,
     run_dir: &'r Utf8Path,
     cancel: &'r Cancel,
     span: Duration,
@@ -84,15 +85,19 @@ struct Ctx<'r, S> {
     kept: Vec<Kept>,
 }
 
+/// `Raw`, `Extra` and their types are `report`'s (plan, rows 85, 89); `run` fills them and keeps
+/// no copy. An extra the `Stand` does not ask for does not run even when `extras` lists it.
 pub fn run(
     stand: &Stand,
     sandbox: &impl Sandbox,
     versions: &Versions,
+    extras: &BTreeSet<Extra>,
     run_dir: &Utf8Path,
     cancel: &Cancel,
 ) -> Result<Raw, RunError> {
     // The preload goes before the first setup, in its phase.
-    let mut ctx = Ctx::new(stand, sandbox, run_dir, cancel).map_err(|fault| RunError::Stand {
+    let ctx = Ctx::new(stand, sandbox, extras, run_dir, cancel);
+    let mut ctx = ctx.map_err(|fault| RunError::Stand {
         phase: Phase::Setup,
         fault,
     })?;
@@ -130,11 +135,9 @@ fn lanes<S: Sandbox>(ctx: &mut Ctx<S>, versions: &Versions) -> Result<Raw, RunEr
         }
         measure(ctx, Side::Head, &versions.head, &mut head, repeat)?;
     }
-    let coverage = match &head {
-        Lane::Ready { seeds, .. } if launch::any_profiled(ctx.stand) => {
-            Some(coverage(ctx, &versions.head, seeds)?)
-        }
-        _ => None,
+    let outside = match &head {
+        Lane::Ready { seeds, .. } => outside(ctx, versions, seeds)?,
+        Lane::Failed { .. } => Outside::default(),
     };
     let (outputs, failure) = match head {
         Lane::Ready { outputs, .. } => (outputs, None),
@@ -146,7 +149,7 @@ fn lanes<S: Sandbox>(ctx: &mut Ctx<S>, versions: &Versions) -> Result<Raw, RunEr
         outputs,
         before_setup,
         before,
-        coverage,
+        outside,
     );
     match failure {
         None => Ok(raw),
@@ -165,7 +168,7 @@ fn raw(
     head: Vec<RepeatOutput>,
     before_setup: Option<SetupSide>,
     before: Option<Lane>,
-    coverage: Option<CoverageOutcome>,
+    outside: Outside,
 ) -> Raw {
     let harness: BTreeSet<String> = stand
         .services
@@ -203,8 +206,29 @@ fn raw(
             Lane::Ready { outputs, .. } => BeforeOutcome::Passed(outputs),
             Lane::Failed { failure, .. } => BeforeOutcome::Failed(failure),
         }),
-        coverage,
+        coverage: outside.coverage,
     }
+}
+
+/// The outcomes of the repeats outside the stats.
+#[derive(Default)]
+struct Outside {
+    coverage: Option<CoverageOutcome>,
+}
+
+/// After the measured repeats of a head that passed them, each repeat outside the stats that
+/// `extras` names and the stand asks for: the coverage repeat of the head.
+fn outside<S: Sandbox>(
+    ctx: &mut Ctx<S>,
+    versions: &Versions,
+    head: &Seeds,
+) -> Result<Outside, Stop> {
+    let coverage = if ctx.extras.contains(&Extra::Coverage) && launch::any_profiled(ctx.stand) {
+        Some(coverage(ctx, &versions.head, head)?)
+    } else {
+        None
+    };
+    Ok(Outside { coverage })
 }
 
 /// From the cache entry on a hit; else setup as without a cache, and its entry once it passed.
@@ -725,6 +749,7 @@ impl<'r, S: Sandbox> Ctx<'r, S> {
     fn new(
         stand: &'r Stand,
         sandbox: &'r S,
+        extras: &'r BTreeSet<Extra>,
         run_dir: &'r Utf8Path,
         cancel: &'r Cancel,
     ) -> Result<Ctx<'r, S>, StandFault> {
@@ -737,6 +762,7 @@ impl<'r, S: Sandbox> Ctx<'r, S> {
         Ok(Ctx {
             stand,
             sandbox,
+            extras,
             run_dir,
             cancel,
             span: span(stand),
