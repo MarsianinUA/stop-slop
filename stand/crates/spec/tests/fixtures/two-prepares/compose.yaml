@@ -1,0 +1,16 @@
+services:
+  install:
+    image: node:22
+    volumes: ["${STAND_REPO}:/w/app"]
+    deploy: { resources: { limits: { cpus: "1", memory: 512m } } }
+  compile:
+    image: node:22
+    volumes: ["${STAND_REPO}:/w/app"]
+    deploy: { resources: { limits: { cpus: "1", memory: 512m } } }
+  load:
+    image: node:22
+    depends_on:
+      install: { condition: service_completed_successfully }
+      compile: { condition: service_completed_successfully }
+    deploy: { resources: { limits: { cpus: "1", memory: 512m } } }
+x-stand: { workload: load }

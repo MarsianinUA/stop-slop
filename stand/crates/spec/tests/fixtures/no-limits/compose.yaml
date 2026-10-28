@@ -1,0 +1,4 @@
+services:
+  load:
+    image: node:22
+x-stand: { workload: load }

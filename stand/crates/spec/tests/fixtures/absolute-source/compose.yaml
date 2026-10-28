@@ -1,0 +1,8 @@
+services:
+  load:
+    image: node:22
+    volumes:
+      - ./harness:/harness
+      - /srv/data:/data
+    deploy: { resources: { limits: { cpus: "1", memory: 512m } } }
+x-stand: { workload: load }

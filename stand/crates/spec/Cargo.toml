@@ -1,0 +1,13 @@
+[package]
+name = "spec"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+camino.workspace = true
+humantime.workspace = true
+saphyr.workspace = true
+shlex.workspace = true
+thiserror.workspace = true

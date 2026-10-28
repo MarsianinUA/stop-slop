@@ -1,0 +1,18 @@
+services:
+  a:
+    image: node:22
+    depends_on: [b]
+    deploy: { resources: { limits: { cpus: "1", memory: 512m } } }
+  b:
+    image: node:22
+    depends_on: [c]
+    deploy: { resources: { limits: { cpus: "1", memory: 512m } } }
+  c:
+    image: node:22
+    depends_on: [a]
+    deploy: { resources: { limits: { cpus: "1", memory: 512m } } }
+  load:
+    image: node:22
+    depends_on: [a]
+    deploy: { resources: { limits: { cpus: "1", memory: 512m } } }
+x-stand: { workload: load }
