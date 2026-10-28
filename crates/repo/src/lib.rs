@@ -68,6 +68,8 @@ pub enum RepoError {
     OutsideRepo(PathBuf),
     #[error("`{0}` is not a commit")]
     UnknownRev(String),
+    #[error("pull request {number} moved while it was fetched; run again")]
+    PrMoved { number: u32 },
     #[error("`{command}` failed: {stderr}")]
     Git { command: String, stderr: String },
     #[error("{}: {source}", .path.display())]
@@ -206,6 +208,29 @@ impl Repo {
     pub fn merge_base(&self, a: &Oid, b: &Oid) -> Result<Option<Oid>, RepoError> {
         let out = git::run_found(&self.root, &["merge-base", &a.0, &b.0])?;
         Ok(out.map(oid))
+    }
+
+    /// A fetched head other than `head` is `PrMoved`: a push came between `gh` and the fetch.
+    pub fn fetch_pr(&self, number: u32, base: &str, head: &str) -> Result<(), RepoError> {
+        let pr = format!("refs/stop-slop/pr-{number}");
+        // Only the two refs the check reads: no tags, no fetch in submodules, which can fail
+        // the whole run, and no `maintenance --auto`, whose gc cannot detach on Windows.
+        git::run(
+            &self.root,
+            &[
+                "fetch",
+                "--no-tags",
+                "--no-recurse-submodules",
+                "--no-auto-maintenance",
+                "origin",
+                &format!("+refs/pull/{number}/head:{pr}"),
+                &format!("+refs/heads/{base}:refs/remotes/origin/{base}"),
+            ],
+        )?;
+        if commit(&self.root, &pr)?.0 != head {
+            return Err(RepoError::PrMoved { number });
+        }
+        Ok(())
     }
 }
 

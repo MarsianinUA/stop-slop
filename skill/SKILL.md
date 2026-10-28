@@ -15,8 +15,9 @@ Run `stop-slop` inside the repository. If the command is missing, tell the user 
 
 - Exit codes: `0` nothing found, `1` findings, `2` the program refused its input (a bad `config.toml` names the key), `3` the program itself broke, `130` Ctrl+C stopped it. On 2 and 3, show its stderr to the user and stop: it ends with a `next:` line for each command that may help. `--json` then prints `{"failure": {"phase", "cause"}, "next": [..]}` instead of its usual line.
 - `--json` prints one line. Leave `--pretty` off: it indents the same JSON by 2 spaces for a person, and the indents cost you tokens.
-- `stop-slop check --json` prints `base`, `files` (the branch files it checked: commits, uncommitted edits and untracked files), `skipped`, `findings` and `fixed` (`rule`, `file`, `count` of the fixes `--fix` applied).
-  - `base` has `ref`, `sha` and `reason`: `flag` (given with `--base`), `pr` (the base of the branch's PR), `ancestor` (the nearest ancestor branch) or `default` (`origin/HEAD`).
+- `stop-slop check --json` prints `pr` (`null` without `--pr`), `base`, `files` (the branch files it checked: commits, uncommitted edits and untracked files), `skipped`, `findings` and `fixed` (`rule`, `file`, `count` of the fixes `--fix` applied).
+  - `pr` has `number`, `head` (the full sha), `base` (the branch name, without `origin/`) and `title`.
+  - `base` has `ref`, `sha` and `reason`: `flag` (given with `--base`), `pr` (the base of the PR: of `--pr`, or of the branch), `ancestor` (the nearest ancestor branch) or `default` (`origin/HEAD`).
 - A finding has `rule`, `kind`, `file`, `line`, `column`, `endLine`, `endColumn`, `message`, `inHunk`, `fixable`, `fingerprint`.
   - `kind`: `error` means the rule is sure; `candidate` is a heuristic you decide with the rule's `agent` hint; `parse-error` means the file did not parse, so no rule ran on it.
   - `inHunk: true` puts the finding on a line the branch changed; `false` is old code in a touched file.

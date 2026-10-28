@@ -7,7 +7,7 @@ use engine::{Engine, Finding, FixCount, LineRange, Mode, SourceFile};
 use kit::{EnumIndex, Fact, Facts, Package};
 use project::ProjectFacts;
 use repo::{Repo, Snapshot, WorkTree};
-use scope::{Base, GhPrBase, Scope, ScopeRequest, ScopedFile, Skipped};
+use scope::{Base, BaseReason, GhPrBase, PullRequest, Scope, ScopeRequest, ScopedFile, Skipped};
 use state::State;
 
 use crate::args::CheckArgs;
@@ -16,6 +16,7 @@ use crate::output::{self, JsonLayout};
 
 /// `files` holds only the files that were read.
 pub(crate) struct Checked {
+    pub(crate) pr: Option<PullRequest>,
     pub(crate) base: Option<Base>,
     pub(crate) files: Vec<Utf8PathBuf>,
     pub(crate) skipped: Vec<Skipped>,
@@ -48,7 +49,17 @@ fn check(args: CheckArgs) -> Result<Checked, CliError> {
     scan(&repo, &engine, args)
 }
 
-pub(crate) fn scan(repo: &Repo, engine: &Engine, args: CheckArgs) -> Result<Checked, CliError> {
+pub(crate) fn scan(repo: &Repo, engine: &Engine, mut args: CheckArgs) -> Result<Checked, CliError> {
+    let pr = args
+        .pr
+        .map(|number| pull_request(repo, number))
+        .transpose()?;
+    if let Some(pr) = &pr {
+        // The head oid rather than `refs/stop-slop/pr-<n>`: the commit `fetch_pr` checked,
+        // whatever moves the ref later.
+        args.rev = Some(pr.head.clone());
+        args.base = Some(format!("origin/{}", pr.base));
+    }
     let snapshot = match &args.rev {
         Some(rev) => repo.at_rev(rev)?,
         None => repo.worktree(),
@@ -72,6 +83,12 @@ pub(crate) fn scan(repo: &Repo, engine: &Engine, args: CheckArgs) -> Result<Chec
     // A `scope` error names the base or the path the user gave, so it goes first.
     let (mut scope, facts, mut sources) = prepared?;
     let index = index.transpose()?;
+    // `--pr` gave the base as a flag, but it is the base of the pull request.
+    if pr.is_some()
+        && let Some(base) = &mut scope.base
+    {
+        base.reason = BaseReason::Pr;
+    }
     let joined = Joined {
         files: &facts,
         // Without `Fact::Enums` no thread ran, and the empty index of `facts` stands in.
@@ -92,12 +109,19 @@ pub(crate) fn scan(repo: &Repo, engine: &Engine, args: CheckArgs) -> Result<Chec
     let files = sources.iter().map(|source| source.path.clone()).collect();
     let report = engine.run(sources, &joined, Mode::Check);
     Ok(Checked {
+        pr,
         base: scope.base,
         files,
         skipped: scope.skipped,
         findings: report.findings,
         fixed,
     })
+}
+
+fn pull_request(repo: &Repo, number: u32) -> Result<PullRequest, CliError> {
+    let pr = scope::pull_request(repo.root(), number)?;
+    repo.fetch_pr(number, &pr.base, &pr.head)?;
+    Ok(pr)
 }
 
 /// Writes only the files `Fix` changed. Their `sources` get the written bytes, so `Check`

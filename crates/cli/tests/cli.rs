@@ -387,8 +387,9 @@ fn check_reports_findings_of_the_branch_as_json() {
         .collect();
     assert_eq!(
         keys,
-        BTreeSet::from(["base", "files", "skipped", "findings", "fixed"])
+        BTreeSet::from(["pr", "base", "files", "skipped", "findings", "fixed"])
     );
+    assert_eq!(report["pr"], Value::Null);
     assert_eq!(
         report["base"],
         json!({"ref": "main", "sha": sha7(&t, "main"), "reason": "flag"})
@@ -452,7 +453,7 @@ fn check_json_is_one_line_and_pretty_indents_it() {
     assert_eq!(code(&pretty), 1, "{}", stderr(&pretty));
     let text = stdout(&pretty);
     assert!(
-        text.starts_with("{\n  \"base\": {\n    \"ref\": \"main\","),
+        text.starts_with("{\n  \"pr\": null,\n  \"base\": {\n    \"ref\": \"main\","),
         "{text}"
     );
     assert!(text.ends_with("\n}\n"), "{text}");
@@ -504,10 +505,20 @@ fn check_rejects_flags_that_do_not_go_together() {
         &["check", "--base", "main", "--files", "src/new.constants.ts"],
         &["check", "--base", "main", "--all"],
         &["check", "--pretty"],
+        &["check", "--pr", "1", "--rev", "feat"],
+        &["check", "--pr", "1", "--base", "main"],
+        &["check", "--pr", "1", "--files", "src/new.constants.ts"],
+        &["check", "--pr", "1", "--all"],
+        &["check", "--pr", "1", "--fix"],
     ] {
         let out = run(t.path(), args);
         assert_eq!(code(&out), 2, "{args:?}");
-        assert!(!stderr(&out).is_empty(), "{args:?}");
+        // clap's error, so `--pr` did not get as far as `gh`.
+        assert!(
+            stderr(&out).starts_with("error: "),
+            "{args:?}: {}",
+            stderr(&out)
+        );
     }
 }
 
@@ -823,6 +834,146 @@ fn ctrl_c_exits_with_130() {
         }
     }
     panic!("stop-slop did not set its Ctrl+C handler within 2 s");
+}
+
+/// A script stands in for `gh` on Linux and macOS only: `Command` on Windows looks only for
+/// `gh.exe`.
+#[cfg(unix)]
+mod pr {
+    use std::env;
+    use std::ffi::{OsStr, OsString};
+    use std::iter;
+    use std::os::unix::fs::{PermissionsExt, symlink};
+
+    use tempfile::TempDir;
+
+    use super::*;
+
+    const TITLE: &str = "Cache market prices";
+
+    /// The reviewer is on `main`. A bare `origin` holds `main` and, as `refs/pull/1/head`, the
+    /// `feat` of `branch_repo`, which the reviewer's repo no longer has as a branch.
+    fn pr_repo() -> (TempRepo, TempDir, String) {
+        let t = branch_repo();
+        let origin = tempfile::tempdir().expect("create a temp folder");
+        let url = origin.path().to_str().expect("a UTF-8 temp path");
+        t.git(&["init", "-q", "--bare", url]);
+        t.git(&["push", "-q", url, "main", "feat:refs/pull/1/head"]);
+        t.git(&["remote", "add", "origin", url]);
+        let head = t.git(&["rev-parse", "feat"]);
+        t.checkout("main");
+        t.git(&["branch", "-q", "-D", "feat"]);
+        (t, origin, head)
+    }
+
+    /// A folder with a `gh` that answers `gh pr view 1` with `head`, `main` and `TITLE`, one per
+    /// line as `--jq` prints them, and fails for any other pull request.
+    fn gh_for_pr_1(head: &str) -> TempDir {
+        let bin = tempfile::tempdir().expect("create a temp folder");
+        let gh = bin.path().join("gh");
+        let script = format!(
+            "#!/bin/sh\n\
+             [ \"$1 $2 $3\" = 'pr view 1' ] || {{ echo \"no pull request $3\" >&2; exit 1; }}\n\
+             printf '%s\\n' {head} main '{TITLE}'\n"
+        );
+        fs::write(&gh, script).expect("write gh");
+        fs::set_permissions(&gh, fs::Permissions::from_mode(0o755)).expect("make gh runnable");
+        bin
+    }
+
+    fn path_with(bin: &Path) -> OsString {
+        let path = env::var_os("PATH").unwrap_or_default();
+        env::join_paths(iter::once(bin.to_owned()).chain(env::split_paths(&path))).expect("a PATH")
+    }
+
+    fn run_with_path(dir: &Path, path: impl AsRef<OsStr>, args: &[&str]) -> Output {
+        exe(dir)
+            .env("PATH", path)
+            .args(args)
+            .output()
+            .expect("start stop-slop")
+    }
+
+    #[test]
+    fn check_pr_checks_the_head_of_the_pull_request_against_its_base() {
+        let (t, _origin, head) = pr_repo();
+        let gh = gh_for_pr_1(&head);
+        let args = ["check", "--pr", "1", "--json"];
+        let out = run_with_path(t.path(), path_with(gh.path()), &args);
+        assert_eq!(code(&out), 1, "{}", stderr(&out));
+        let report = json(&out);
+        assert_eq!(
+            report["pr"],
+            json!({"number": 1, "head": head, "base": "main", "title": TITLE})
+        );
+        assert_eq!(
+            report["base"],
+            json!({"ref": "origin/main", "sha": sha7(&t, "main"), "reason": "pr"})
+        );
+        assert_eq!(
+            finding_files(&report),
+            ["src/keep.constants.ts", "src/new.constants.ts"]
+        );
+
+        // The three steps `review.md` ran before `--pr` find the same.
+        assert_eq!(t.git(&["rev-parse", "refs/stop-slop/pr-1"]), head);
+        let args = [
+            "check",
+            "--rev",
+            "refs/stop-slop/pr-1",
+            "--base",
+            "origin/main",
+            "--json",
+        ];
+        let by_hand = check(t.path(), &args, 1);
+        assert_eq!(report["files"], by_hand["files"]);
+        assert_eq!(report["findings"], by_hand["findings"]);
+        // The working tree stays as it is.
+        assert_eq!(t.git(&["symbolic-ref", "--short", "HEAD"]), "main");
+        assert_eq!(t.git(&["status", "--porcelain"]), "");
+
+        let out = run_with_path(t.path(), path_with(gh.path()), &["check", "--pr", "1"]);
+        assert_eq!(code(&out), 1, "{}", stderr(&out));
+        let text = stdout(&out);
+        let lines: Vec<&str> = text.lines().take(2).collect();
+        assert_eq!(
+            lines,
+            [
+                format!("pr 1 {} into main", &head[..7]),
+                format!("base origin/main {} (pr)", sha7(&t, "main")),
+            ]
+        );
+    }
+
+    #[test]
+    fn check_pr_fails_with_phase_pr() {
+        let (t, _origin, head) = pr_repo();
+        let args = ["check", "--pr", "1", "--json"];
+        // `gh` names a head the fetch does not bring: a push came in between.
+        let moved = gh_for_pr_1(&t.git(&["rev-parse", "main"]));
+        let out = run_with_path(t.path(), path_with(moved.path()), &args);
+        let again = ["stop-slop check --pr 1 --json"];
+        assert_failure(&out, 2, "pr", "pull request 1 moved", &again);
+
+        let gh = gh_for_pr_1(&head);
+        let out = run_with_path(
+            t.path(),
+            path_with(gh.path()),
+            &["check", "--pr", "2", "--json"],
+        );
+        assert_failure(&out, 2, "pr", "pull request 2: gh: no pull request 2", &[]);
+
+        // On the Ubuntu runner `gh` sits beside `git` in `/usr/bin`: `PATH` gets only a link to
+        // `git`.
+        let git = env::split_paths(&env::var_os("PATH").unwrap_or_default())
+            .map(|dir| dir.join("git"))
+            .find(|git| git.is_file())
+            .expect("git on PATH");
+        let bin = tempfile::tempdir().expect("create a temp folder");
+        symlink(git, bin.path().join("git")).expect("link git");
+        let out = run_with_path(t.path(), bin.path(), &args);
+        assert_failure(&out, 2, "pr", "pull request 1: gh: ", &[]);
+    }
 }
 
 #[test]

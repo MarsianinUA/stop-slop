@@ -35,15 +35,17 @@ impl CliError {
             CliError::Repo(error)
             | CliError::Scope(ScopeError::Repo(error))
             | CliError::Project(ProjectError::Repo(error)) => match error {
-                RepoError::NotARepo | RepoError::OutsideRepo(_) | RepoError::UnknownRev(_) => {
-                    Exit::Refused
-                }
+                RepoError::NotARepo
+                | RepoError::OutsideRepo(_)
+                | RepoError::UnknownRev(_)
+                | RepoError::PrMoved { .. } => Exit::Refused,
                 RepoError::Git { .. } | RepoError::Io { .. } => Exit::Broken,
             },
             CliError::Scope(
                 ScopeError::UnknownBase(_)
                 | ScopeError::NoBase
                 | ScopeError::RevWithoutBase
+                | ScopeError::PullRequest { .. }
                 | ScopeError::BadFile { .. },
             )
             | CliError::Project(ProjectError::Json { .. })
@@ -64,10 +66,12 @@ impl CliError {
                 | RepoError::UnknownRev(_)
                 | RepoError::Git { .. }
                 | RepoError::Io { .. } => "repo",
+                RepoError::PrMoved { .. } => "pr",
             },
             CliError::Scope(
                 ScopeError::UnknownBase(_) | ScopeError::NoBase | ScopeError::RevWithoutBase,
             ) => "base",
+            CliError::Scope(ScopeError::PullRequest { .. }) => "pr",
             CliError::Scope(ScopeError::BadFile { .. }) => "files",
             CliError::Project(_) => "project",
             CliError::Config { .. } => "config",
@@ -91,8 +95,15 @@ impl CliError {
                 | RepoError::UnknownRev(_)
                 | RepoError::Git { .. }
                 | RepoError::Io { .. } => Vec::new(),
+                RepoError::PrMoved { number } => {
+                    vec![format!("stop-slop check --pr {number} --json")]
+                }
             },
-            CliError::Scope(ScopeError::RevWithoutBase | ScopeError::BadFile { .. })
+            CliError::Scope(
+                ScopeError::RevWithoutBase
+                | ScopeError::PullRequest { .. }
+                | ScopeError::BadFile { .. },
+            )
             | CliError::Project(_)
             | CliError::Config { .. }
             | CliError::State(_)

@@ -89,6 +89,7 @@ fn root_gives_the_work_tree_and_the_common_dir_from_a_subfolder_and_a_linked_wor
     assert_eq!(canon(&from_src.worktree), canon(t.path()));
     assert_eq!(canon(&from_wt.worktree), canon(&wt));
     assert_eq!(root(&env::temp_dir()).unwrap(), None);
+    assert_eq!(root(&t.path().join(".git")).unwrap(), None);
 }
 
 #[test]

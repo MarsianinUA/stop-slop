@@ -3,7 +3,7 @@
 Fix the findings in the files of the user's branch, with no approval step. The run is done when `check` is **clean**: no `error` left, and every `candidate` either fixed or ignored with a reason. The one exception is a `performance` or `branching` fix the project's tests reject: step 8 reverts it, and the report names it.
 
 1. `git fetch`, so the base is fresh. When `git remote` is empty or the fetch fails, go on and say so in the report.
-2. `stop-slop check --json`. Keep this first list for the report, in a temp file outside the repository: it tells the user's own lines (`inHunk: true`) from cleanup in old code (`inHunk: false`). Read `stop-slop rules --json` and the project conventions (SKILL.md).
+2. `stop-slop check --json`. Keep this first list for the report, in a temp file outside the repository: it tells the user's own lines (`inHunk: true`) from cleanup in old code (`inHunk: false`). Read `stop-slop rules --json` and the project conventions ([Project conventions win](SKILL.md#project-conventions-win)).
 3. `stop-slop check --fix --json`: the program applies its safe fixes and prints what is left.
 4. Fix every `error`, as its `message` says and its rule's `agent` text advises. Fix a `candidate` when its `agent` hint says it is a real problem; keep the others for step 6. Fix a `parse-error` when the branch broke the syntax, otherwise report it.
    - When a fix needs something the repository lacks (a logger, a config service), make the smallest change that meets the rule and say so in the report.
