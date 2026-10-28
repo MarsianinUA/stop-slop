@@ -134,6 +134,20 @@ fn ts_without_a_map_is_unmapped_and_only_files_of_the_tree_are_local() {
 }
 
 #[test]
+fn a_function_has_v8s_name_and_an_anonymous_one_an_empty_name() {
+    let names = |case| {
+        read_guest(case)
+            .functions
+            .into_iter()
+            .map(|f| f.name)
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(names("processes"), ["total", "report", "fib"]);
+    // `src/start up.js` runs an anonymous function.
+    assert_eq!(names("kinds"), ["parse", ""]);
+}
+
+#[test]
 fn the_case_of_guest_file_names_counts_on_every_host() {
     let samples = read_guest("case");
     // 1 ms of `parse` in `src/legacy.js` and 1 ms in `SRC/Legacy.js`: two files on Linux.

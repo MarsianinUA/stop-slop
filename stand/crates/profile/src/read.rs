@@ -51,6 +51,8 @@ struct Node<'a> {
 #[serde(rename_all = "camelCase")]
 struct CallFrame<'a> {
     #[serde(borrow)]
+    function_name: Cow<'a, str>,
+    #[serde(borrow)]
     url: Cow<'a, str>,
     /// From 0; -1 for V8's own frames such as `(program)`.
     line_number: i64,
@@ -141,6 +143,7 @@ enum Frame {
 
 #[derive(Default)]
 struct Function {
+    name: String,
     self_us: f64,
     total_us: f64,
     lines: HashMap<u32, f64>,
@@ -223,7 +226,8 @@ impl Sums<'_> {
                     column,
                     lines,
                 } => {
-                    let function = self.functions.entry((*file, *line, *column)).or_default();
+                    let name = &nodes[leaf].call_frame.function_name;
+                    let function = self.entry((*file, *line, *column), name);
                     function.self_us += us;
                     let ticks: u32 = nodes[leaf]
                         .position_ticks
@@ -249,13 +253,22 @@ impl Sums<'_> {
                     let key = (file, line, column);
                     if !counted.contains(&key) {
                         counted.push(key);
-                        self.functions.entry(key).or_default().total_us += us;
+                        let name = &nodes[node].call_frame.function_name;
+                        self.entry(key, name).total_us += us;
                     }
                 }
                 at = parents[node];
             }
         }
         Ok(())
+    }
+
+    /// Named by the first frame of the function.
+    fn entry(&mut self, key: (u32, u32, u32), name: &str) -> &mut Function {
+        self.functions.entry(key).or_insert_with(|| Function {
+            name: name.to_owned(),
+            ..Function::default()
+        })
     }
 
     fn resolve(&mut self, node: &Node<'_>, scripts: &mut Scripts) -> Frame {
@@ -358,6 +371,7 @@ impl Sums<'_> {
                     file: self.files[file as usize].clone(),
                     line,
                     column,
+                    name: function.name,
                     self_ms: ms(function.self_us),
                     total_ms: ms(function.total_us),
                     lines,

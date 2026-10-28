@@ -52,6 +52,8 @@ pub struct Sampled {
     /// From 1: where V8 puts the function start, the `(` of its parameters.
     pub line: u32,
     pub column: u32,
+    /// V8's function name; empty for an anonymous one.
+    pub name: String,
     pub self_ms: f64,
     /// A recursive function counts once per sample.
     pub total_ms: f64,
