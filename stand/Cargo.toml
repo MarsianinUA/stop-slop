@@ -10,6 +10,7 @@ rust-version = "1.97"
 [workspace.dependencies]
 camino = "1"
 humantime = "2"
+libc = "0.2"
 oxc_sourcemap = "9"
 saphyr = { version = "0.3", default-features = false }
 serde = { version = "1", features = ["derive"] }
