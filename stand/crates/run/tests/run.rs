@@ -1,7 +1,7 @@
 //! `run` and `inspect` on a `Fake` with its virtual clock. Each case loads a recipe with
 //! `spec::load` (only `spec` builds its newtypes), runs it, and reads the journal of the `Fake`.
 
-use std::cell::{Cell, RefCell};
+use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::time::{Duration, Instant};
@@ -14,9 +14,9 @@ use report::{
 };
 use run::{Cancel, InspectError, RunError, SetupCache, Side, StandFault, Version, Versions};
 use sandbox::{
-    Call, ExecId, ExecOutcome, Exited, Fake, Fault, ImageRef, Launch, Leftovers, Metrics, Mount,
-    Pulled, Rule, Sandbox, SandboxError, SandboxId, Scenario, Script, Seed, SnapshotId, Stopped,
-    VolumeName, Waitable,
+    Call, ExecId, ExecOutcome, Exited, Fake, Fault, FaultMode, ImageRef, Launch, Leftovers,
+    Metrics, Mount, PortStats, Pulled, Rule, Sandbox, SandboxError, SandboxId, Scenario, Script,
+    Seed, SnapshotId, Stopped, VolumeName, Waitable,
 };
 use spec::{Policy, Stand};
 use tempfile::TempDir;
@@ -781,22 +781,27 @@ fn each_launch_has_span_as_its_max_duration_and_the_stop_of_its_service() {
 
 /// The `Fake` with what a script cannot say: `cancel` set once a `create` starts `cancel_at`
 /// (Ctrl+C in the middle of a phase); `hang`: the `n`-th VM of a service, from 1, never ends,
-/// its exit kept out of every `wait`; `fail_stop`: every `stop` is a `Backend` error;
-/// `logs_grow`: each `logs` of a VM is one line longer than the one before, as the output of a
-/// running service grows; `latency`: a `wait` that saw an exit returns this much after it, as
-/// the adapter's poll does, while `Exited.at` keeps when it ended; `entry`: a file whose
-/// presence each `create` and `destroy` notes in `seen`, by VM.
+/// its exit kept out of every `wait`; `fail_stop`, `fail_fault`: every `stop`, every `fault` is
+/// a `Backend` error; `logs_grow`: each `logs` of a VM is one line longer than the one before, as
+/// the output of a running service grows; `latency`: a `wait` that saw an exit returns this much
+/// after it, as the adapter's poll does, while `Exited.at` keeps when it ended; `entry`: a file
+/// whose presence each `create` and `destroy` notes in `seen`, by VM; `ends`: the `n`-th VM of a
+/// service ends with this code this long after its `create`, whatever its script says.
 struct Hooked<'f> {
     fake: &'f Fake,
     cancel_at: Option<&'static str>,
     cancel: Cancel,
     hang: Option<(&'static str, usize)>,
     fail_stop: bool,
+    fail_fault: bool,
     logs_grow: bool,
     latency: Duration,
-    /// VMs of the service of `hang` so far.
-    made: Cell<usize>,
+    ends: Option<(&'static str, usize, i32, Duration)>,
+    /// VMs so far, by service.
+    made: RefCell<BTreeMap<String, usize>>,
     hidden: RefCell<Vec<SandboxId>>,
+    /// The VM of `ends` once made, when it ends and its code.
+    ending: RefCell<Option<(SandboxId, Instant, i32)>>,
     /// `logs` calls so far, by VM.
     reads: RefCell<Vec<(SandboxId, usize)>>,
     /// The time each `exec` had left at its call.
@@ -813,10 +818,13 @@ impl<'f> Hooked<'f> {
             cancel: Cancel::new(),
             hang: None,
             fail_stop: false,
+            fail_fault: false,
             logs_grow: false,
             latency: Duration::ZERO,
-            made: Cell::new(0),
+            ends: None,
+            made: RefCell::new(BTreeMap::new()),
             hidden: RefCell::new(Vec::new()),
+            ending: RefCell::new(None),
             reads: RefCell::new(Vec::new()),
             deadlines: RefCell::new(Vec::new()),
             entry: None,
@@ -850,13 +858,20 @@ impl Sandbox for Hooked<'_> {
             if self.cancel_at == Some(launch.service.as_str()) {
                 self.cancel.cancel();
             }
-            if let Some((service, n)) = self.hang
-                && launch.service == service
+            let n = {
+                let mut made = self.made.borrow_mut();
+                let count = made.entry(launch.service.clone()).or_default();
+                *count += 1;
+                *count
+            };
+            if self.hang == Some((launch.service.as_str(), n)) {
+                self.hidden.borrow_mut().push(id.clone());
+            }
+            if let Some((service, nth, code, after)) = self.ends
+                && (service, nth) == (launch.service.as_str(), n)
             {
-                self.made.set(self.made.get() + 1);
-                if self.made.get() == n {
-                    self.hidden.borrow_mut().push(id.clone());
-                }
+                let at = self.fake.now() + after;
+                *self.ending.borrow_mut() = Some((id.clone(), at, code));
             }
         }
         Ok(ids)
@@ -871,12 +886,32 @@ impl Sandbox for Hooked<'_> {
     }
     fn wait(&self, what: &[Waitable], deadline: Instant) -> Result<Option<Exited>, SandboxError> {
         let hidden = self.hidden.borrow();
+        let ending = self.ending.borrow().clone();
+        let ending = ending.filter(|(id, ..)| what.contains(&Waitable::Sandbox(id.clone())));
+        let own = |id: &SandboxId| ending.as_ref().is_some_and(|(ends, ..)| ends == id);
         let what: Vec<Waitable> = what
             .iter()
-            .filter(|waited| !matches!(waited, Waitable::Sandbox(id) if hidden.contains(id)))
+            .filter(
+                |waited| !matches!(waited, Waitable::Sandbox(id) if hidden.contains(id) || own(id)),
+            )
             .cloned()
             .collect();
-        let exited = self.fake.wait(&what, deadline)?;
+        let until = ending
+            .as_ref()
+            .map_or(deadline, |(_, at, _)| deadline.min(*at));
+        let mut exited = self.fake.wait(&what, until)?;
+        if exited.is_none()
+            && let Some((id, at, code)) = ending
+            && at <= deadline
+        {
+            self.ending.take();
+            let what = Waitable::Sandbox(id);
+            exited = Some(Exited {
+                what,
+                code: Some(code),
+                at,
+            });
+        }
         if exited.is_some() && !self.latency.is_zero() {
             // Nothing to wait for: the `Fake` moves its clock to the deadline.
             self.fake.wait(&[], self.fake.now() + self.latency)?;
@@ -902,6 +937,10 @@ impl Sandbox for Hooked<'_> {
         self.fake.stop(id)
     }
     fn fault(&self, ids: &[SandboxId], fault: &Fault) -> Result<(), SandboxError> {
+        if self.fail_fault {
+            let message = "the relay is gone".to_owned();
+            return Err(SandboxError::Backend { message });
+        }
         self.fake.fault(ids, fault)
     }
     fn metrics(&self, id: &SandboxId) -> Result<Metrics, SandboxError> {
@@ -1163,13 +1202,18 @@ fn services(journal: &[Call]) -> Vec<String> {
         .collect()
 }
 
-/// From the first `wait` after the `create` of `id` to the deadline of the last one.
+/// From the first `wait` after the `create` of `id` to the deadline of the last one before its
+/// `destroy`.
 fn waited(journal: &[Call], id: &SandboxId) -> Duration {
     let start = index_of(
         journal,
         |call| matches!(call, Call::Create { ids, .. } if ids.contains(id)),
     );
-    let waits: Vec<Instant> = journal[start..]
+    let end = index_of(
+        journal,
+        |call| matches!(call, Call::Destroy(gone) if gone == id),
+    );
+    let waits: Vec<Instant> = journal[start..end]
         .iter()
         .filter_map(|call| match call {
             Call::Wait { deadline, .. } => Some(*deadline),
@@ -3194,14 +3238,19 @@ fn outside_folders(case: &Case, journal: &[Call]) -> Vec<String> {
 #[test]
 fn the_set_of_extras_runs_only_what_it_names_and_the_stand_asks_for() {
     let span = run::span(&Case::new(&every_repeat()).stand);
-    let sets: [(&[Extra], &[&str]); 4] = [
+    let faults = [
+        "fault-1-before",
+        "fault-1-head",
+        "fault-2-before",
+        "fault-2-head",
+    ];
+    let every = ["coverage", faults[0], faults[1], faults[2], faults[3]];
+    let sets: [(&[Extra], &[&str]); 5] = [
         (&[], &[]),
         (&[Extra::Coverage], &["coverage"]),
-        (&[Extra::Fault, Extra::SecondPass], &[]),
-        (
-            &[Extra::Coverage, Extra::Fault, Extra::SecondPass],
-            &["coverage"],
-        ),
+        (&[Extra::Fault], &faults),
+        (&[Extra::Fault, Extra::SecondPass], &faults),
+        (&[Extra::Coverage, Extra::Fault, Extra::SecondPass], &every),
     ];
     for (set, folders) in sets {
         let case = Case::new(&every_repeat());
@@ -3211,6 +3260,7 @@ fn the_set_of_extras_runs_only_what_it_names_and_the_stand_asks_for() {
         let journal = fake.journal();
         assert_eq!(outside_folders(&case, &journal), folders, "{set:?}");
         assert_eq!(raw.coverage.is_some(), set.contains(&Extra::Coverage));
+        assert_eq!(raw.fault.is_some(), set.contains(&Extra::Fault));
         assert!(matches!(&raw.before, Some(BeforeOutcome::Passed(before)) if before.len() == 3));
         assert_eq!(raw.head.len(), 3);
         // `span` is of the stand: the same for every set, the repeats it does not run included.
@@ -3224,7 +3274,317 @@ fn the_set_of_extras_runs_only_what_it_names_and_the_stand_asks_for() {
     let case = Case::new(&EXAMPLE.replace("    x-stand: { profile: node }\n", ""));
     let fake = fake(example_rules());
     let raw = case.run(&fake, &case.versions(true)).unwrap();
-    assert!(raw.coverage.is_none());
+    assert!(raw.coverage.is_none() && raw.fault.is_none());
     assert!(outside_folders(&case, &fake.journal()).is_empty());
     assert_clean(&fake, &case.left());
+}
+
+/// `EXAMPLE` with `fault` on `db:5432`.
+fn under_fault(fault: &str) -> String {
+    EXAMPLE.replace(
+        "  workload: load\n",
+        &format!("  workload: load\n  fault: {{ target: \"db:5432\", {fault} }}\n"),
+    )
+}
+
+/// Metrics whose only port is `target`, with `connections` dropped before their first byte.
+fn refused(target: &str, connections: u64) -> Metrics {
+    Metrics {
+        ports: vec![PortStats {
+            target: target.into(),
+            connections,
+            open: 0,
+            bytes_out: 0,
+            bytes_in: 0,
+            http: None,
+            drops: connections,
+        }],
+        ..Metrics::default()
+    }
+}
+
+/// `example_rules` where `api` and the workload say what their relays see under a fault.
+fn fault_rules() -> Vec<Rule> {
+    let api = Script {
+        under_fault: Some(refused("db:5432", 7)),
+        ..stops(100 * Duration::from_millis(1))
+    };
+    let load = Script {
+        under_fault: Some(refused("api:3000", 9)),
+        writes: vec![("/stand/out/orders.jsonl".into(), b"{}\n".to_vec())],
+        ..exits(0, 30 * SECOND)
+    };
+    replaced(replaced(example_rules(), "api", api), "load", load)
+}
+
+/// Each `Fault` of the journal: its index, the VMs it names as `service-replica`, its switch.
+fn faults(journal: &[Call]) -> Vec<(usize, Vec<String>, Fault)> {
+    let made = created(journal);
+    let name = |id: &SandboxId| {
+        let (launch, _) = made.iter().find(|(_, made)| made == id).unwrap();
+        vm(launch)
+    };
+    let faults = journal.iter().enumerate();
+    let faults = faults.filter_map(|(index, call)| match call {
+        Call::Fault { ids, fault } => Some((index, ids.iter().map(name).collect(), fault.clone())),
+        _ => None,
+    });
+    faults.collect()
+}
+
+#[test]
+fn two_fault_repeats_per_version_take_turns_after_the_measured_ones_with_the_fault_on_before_the_workload()
+ {
+    let case = Case::new(&under_fault("mode: down"));
+    let fake = fake(fault_rules());
+    let raw = case.run(&fake, &case.versions(true)).unwrap();
+    let journal = fake.journal();
+    let turns = [
+        "fault-1-before",
+        "fault-1-head",
+        "fault-2-before",
+        "fault-2-head",
+    ];
+    let mut folders = vec!["coverage"];
+    folders.extend(turns);
+    assert_eq!(outside_folders(&case, &journal), folders);
+    let Some(fault) = &raw.fault else {
+        panic!("no fault outcome")
+    };
+    assert_eq!(
+        (fault.target.as_str(), fault.mode.as_str()),
+        ("db:5432", "down")
+    );
+    let before = fault.before.as_ref().expect("the fault repeats of before");
+    // The relays of the app see the fault; the workload, which drives the repeat, does not.
+    let drops = [("db-1", 0), ("api-1", 7), ("api-2", 7), ("load-1", 0)];
+    let drops: Vec<(String, u64)> = drops.iter().map(|(vm, n)| (vm.to_string(), *n)).collect();
+    for repeats in [&fault.head, before] {
+        let numbers: Vec<u32> = repeats.iter().map(|repeat| repeat.repeat).collect();
+        assert_eq!(numbers, [1, 2]);
+        for repeat in repeats {
+            assert_eq!((repeat.workload, repeat.exited.len()), (Some(0), 0));
+            let seen: Vec<(String, u64)> = repeat
+                .instances
+                .iter()
+                .map(|instance| {
+                    let dropped = instance.metrics.ports.iter().map(|port| port.drops);
+                    let vm = format!("{}-{}", instance.service, instance.replica);
+                    (vm, dropped.sum())
+                })
+                .collect();
+            assert_eq!(seen, drops);
+            let profiles = repeat.instances.iter().map(|instance| &instance.profile);
+            assert!(profiles.into_iter().all(Option::is_none));
+        }
+    }
+    // The last four repeats; in each, one `fault` on every VM but the workload, once `api` is
+    // healthy and before the workload is created.
+    let made = created(&journal);
+    let switches = faults(&journal);
+    assert_eq!(switches.len(), 4);
+    let last = made[made.len() - 16..].chunks(4);
+    for (chunk, ((index, vms, switch), folder)) in last.zip(switches.iter().zip(turns)) {
+        let names: Vec<String> = chunk.iter().map(|(launch, _)| vm(launch)).collect();
+        assert_eq!(names, ["db-1", "api-1", "api-2", "load-1"]);
+        assert_eq!(
+            (phase_of(&chunk[0].0), phase_of(&chunk[3].0)),
+            (folder, folder)
+        );
+        assert_eq!(vms, &["db-1", "api-1", "api-2"]);
+        assert_eq!(
+            (switch.target.as_str(), switch.mode),
+            ("db:5432", FaultMode::Down)
+        );
+        let healthy = journal[..*index]
+            .iter()
+            .any(|call| matches!(call, Call::ExecDetached { id, .. } if *id == chunk[2].1));
+        let load = index_of(
+            &journal,
+            |call| matches!(call, Call::Create { ids, .. } if ids.contains(&chunk[3].1)),
+        );
+        assert!(healthy && *index < load, "{folder}");
+        // No profiler, no probe, no kept snapshot; the end is whole.
+        for (launch, _) in chunk {
+            assert_eq!(profile_mounts(launch), (None, false), "{folder}");
+        }
+        let dir = case.run_dir().join(folder);
+        let probed = execs(&journal);
+        assert!(
+            probed
+                .iter()
+                .all(|(_, stdout, _)| !stdout.starts_with(&dir))
+        );
+        assert!(dir.join("metrics.json").is_file() && dir.join("api-2.log").is_file());
+        assert!(dir.join("out/orders.jsonl").is_file());
+    }
+    assert_eq!(
+        kept_from(&case, &journal),
+        [
+            ["before", "db", "repeat-3-before"],
+            ["head", "db", "repeat-3-head"]
+        ]
+    );
+    assert_clean(&fake, &case.left());
+
+    // `slow` with its delay, and only the head without `--before`.
+    let case = Case::new(&under_fault("mode: slow, delay: 2s"));
+    let fake = crate::fake(fault_rules());
+    let raw = case.run(&fake, &case.versions(false)).unwrap();
+    let fault = raw.fault.unwrap();
+    assert_eq!((fault.mode.as_str(), fault.head.len()), ("slow 2000ms", 2));
+    assert!(fault.before.is_none());
+    let switches = faults(&fake.journal());
+    assert_eq!(switches.len(), 2);
+    for (_, _, switch) in switches {
+        assert_eq!(switch.mode, FaultMode::Slow(2 * SECOND));
+    }
+    assert_clean(&fake, &case.left());
+
+    // `cache` starts with the workload and `side` after it: each gets the fault right after its
+    // `create`, the workload never.
+    let case = Case::new(&AFTER_THE_WORKLOAD.replace(
+        "x-stand: { workload: load }",
+        "x-stand: { workload: load, repeat: 1, fault: { target: \"db:5432\", mode: down } }",
+    ));
+    let fake = crate::fake(vec![
+        rule("db", stops(SECOND)),
+        rule("cache", stops(SECOND)),
+        rule("side", stops(SECOND)),
+        rule("load", exits(0, 5 * SECOND)),
+    ]);
+    case.run(&fake, &case.versions(false)).unwrap();
+    let journal = fake.journal();
+    let switches = faults(&journal);
+    let mut seen = Vec::new();
+    for (index, vms, _) in &switches {
+        let last = journal[..*index]
+            .iter()
+            .rposition(|call| matches!(call, Call::Create { .. }));
+        let Call::Create { batch, .. } = &journal[last.unwrap()] else {
+            unreachable!()
+        };
+        let batch: Vec<&str> = batch.iter().map(|launch| launch.service.as_str()).collect();
+        seen.push((vms.join(" "), batch.join(" ")));
+    }
+    let each = [
+        ("db-1", "db"),
+        ("cache-1", "cache load"),
+        ("side-1", "side"),
+    ];
+    let each: Vec<(String, String)> = each
+        .iter()
+        .map(|(vms, batch)| (vms.to_string(), batch.to_string()))
+        .collect();
+    assert_eq!(seen, [&each[..], &each[..]].concat());
+    assert_clean(&fake, &case.left());
+}
+
+#[test]
+fn a_fault_repeat_turns_the_workload_code_its_timeout_and_a_dead_service_into_categories() {
+    // Head only. By service, the VMs of setup come first, then those of the three measured repeats
+    // and the coverage repeat: the first fault repeat makes the fifth `load` and the ninth and
+    // tenth `api`.
+    let healthy_late = Script {
+        health: vec![Some(1), Some(0)],
+        ..stops(SECOND)
+    };
+    /// `hang` and `ends` of `Hooked`, and the categories of the first fault repeat.
+    struct Ending {
+        rules: Vec<Rule>,
+        hang: Option<(&'static str, usize)>,
+        ends: Option<(&'static str, usize, i32, Duration)>,
+        workload: Option<i32>,
+        exited: &'static [&'static str],
+    }
+    let cases = [
+        // The workload ends with 3.
+        Ending {
+            rules: fault_rules(),
+            hang: None,
+            ends: Some(("load", 5, 3, 10 * SECOND)),
+            workload: Some(3),
+            exited: &[],
+        },
+        // The workload hangs until the deadline of the repeat.
+        Ending {
+            rules: fault_rules(),
+            hang: Some(("load", 5)),
+            ends: None,
+            workload: None,
+            exited: &[],
+        },
+        // `api` dies under the fault, and the repeat goes on until the workload ends.
+        Ending {
+            rules: fault_rules(),
+            hang: None,
+            ends: Some(("api", 9, 1, 5 * SECOND)),
+            workload: Some(0),
+            exited: &["api"],
+        },
+        // `api` dies before it is healthy, so before the fault: the workload never starts.
+        Ending {
+            rules: replaced(fault_rules(), "api", healthy_late),
+            hang: None,
+            ends: Some(("api", 9, 1, SECOND / 2)),
+            workload: None,
+            exited: &["api"],
+        },
+    ];
+    for Ending {
+        rules,
+        hang,
+        ends,
+        workload,
+        exited,
+    } in cases
+    {
+        let case = Case::new(&under_fault("mode: down"));
+        let fake = fake(rules);
+        let sandbox = Hooked {
+            hang,
+            ends,
+            ..Hooked::new(&fake)
+        };
+        let raw = sandbox.run(&case, &case.versions(false)).unwrap();
+        let fault = raw.fault.unwrap();
+        let [first, second] = &fault.head[..] else {
+            panic!("{:?}", fault.head)
+        };
+        assert_eq!(first.workload, workload, "{hang:?} {ends:?}");
+        assert_eq!(first.exited, exited, "{hang:?} {ends:?}");
+        assert_eq!((second.workload, second.exited.len()), (Some(0), 0));
+        assert_eq!(raw.head.len(), 3);
+        let dir = case.run_dir().join("fault-1-head");
+        assert!(dir.join("metrics.json").is_file() && dir.join("db-1.log").is_file());
+        let journal = fake.journal();
+        if hang.is_some() {
+            // The deadline is `timeout` from the start of the repeat.
+            let db = &created(&journal)[3 + 4 * 4].1;
+            assert_eq!(waited(&journal, db), 299 * SECOND);
+        }
+        assert_clean(&fake, &case.left());
+    }
+
+    // A switch the port cannot set breaks the stand, before the workload of the repeat started.
+    let case = Case::new(&under_fault("mode: down"));
+    let fake = fake(fault_rules());
+    let sandbox = Hooked {
+        fail_fault: true,
+        ..Hooked::new(&fake)
+    };
+    let result = sandbox.run(&case, &case.versions(false));
+    assert!(
+        matches!(
+            &result,
+            Err(RunError::Stand {
+                phase: Phase::Ready,
+                fault: StandFault::Sandbox(SandboxError::Backend { .. }),
+            })
+        ),
+        "{result:?}"
+    );
+    let dir = case.run_dir().join("fault-1-head");
+    assert_eq!(logs_in(&dir), names(&["db-1", "api-1", "api-2"]));
+    assert_left(&fake, &case.left());
 }

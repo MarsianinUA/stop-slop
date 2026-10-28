@@ -29,6 +29,8 @@ pub struct Raw {
     /// `None` without a profiled service, or without `Extra::Coverage` in the set: `make` then
     /// copies the pool's.
     pub coverage: Option<CoverageOutcome>,
+    /// `None` without `x-stand.fault`, or without `Extra::Fault`.
+    pub fault: Option<FaultOutcome>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -110,6 +112,32 @@ pub enum CoverageOutcome {
     /// By service; the replicas of a service are one.
     Read(BTreeMap<String, Coverage>),
     Failed(Failure),
+}
+
+/// The fault repeats of each version (plan, row 73), in their order.
+#[derive(Debug)]
+pub struct FaultOutcome {
+    /// `<service>:<port>`.
+    pub target: String,
+    /// `down`, or `slow <delay>ms`.
+    pub mode: String,
+    pub head: Vec<FaultRepeat>,
+    /// `None` without `Versions.before`, or when "before" failed.
+    pub before: Option<Vec<FaultRepeat>>,
+}
+
+/// What a repeat under the fault ended with: its categories, never a failure of the run.
+#[derive(Debug)]
+pub struct FaultRepeat {
+    /// From 1.
+    pub repeat: u32,
+    /// `None` when the workload did not end with a code: the repeat hit its timeout, or ended
+    /// before the workload started, at a readiness that never came.
+    pub workload: Option<i32>,
+    /// Long-running services that exited during the repeat.
+    pub exited: Vec<String>,
+    /// At the cut; no profiler runs in a fault repeat.
+    pub instances: Vec<InstanceOutput>,
 }
 
 /// A failed lane in `Raw`, the `failure` of the `--json` line and `before.failed` of the report.

@@ -37,7 +37,7 @@ pub(crate) struct Frame<'a> {
     pub(crate) out: &'a Utf8Path,
     pub(crate) tar: &'a Utf8Path,
     pub(crate) seeds: &'a Seeds,
-    /// `None` in setup: only the repeats are measured.
+    /// `None` in setup and in the fault repeats: no measure reads a profile of them.
     pub(crate) mode: Option<ProfileMode>,
     /// The host folder of `/stand/preload`.
     pub(crate) preload: &'a Utf8Path,

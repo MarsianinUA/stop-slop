@@ -19,6 +19,7 @@ use spec::Stand;
 
 mod cache;
 mod drain;
+mod fault;
 mod keep;
 mod lane;
 mod launch;

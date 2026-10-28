@@ -13,18 +13,18 @@ use std::time::{Duration, Instant};
 use camino::{Utf8Path, Utf8PathBuf};
 use profile::{Called, Coverage, ProfileMode};
 use report::{
-    BeforeOutcome, Cause, CoverageOutcome, Extra, Failure, InstanceOutput, Phase, ProbeRan,
-    ProbeRule, Raw, RepeatOutput, Role, Setup, SetupSide,
+    BeforeOutcome, Cause, CoverageOutcome, Extra, Failure, FaultOutcome, InstanceOutput, Phase,
+    ProbeRan, ProbeRule, Raw, RepeatOutput, Role, Setup, SetupSide,
 };
-use sandbox::{Sandbox, SnapshotId};
+use sandbox::{Fault, Sandbox, SnapshotId};
 use spec::{Condition, ServiceKind, ServiceName, Stand, Tap};
 
-use crate::drain;
 use crate::keep::{self, Kept};
 use crate::launch::{self, Frame, Seeds};
 use crate::ready::{Fleet, Halt};
 use crate::{
-    Cancel, Failed, RunError, SetupCache, Side, StandFault, Version, Versions, cache, probes, span,
+    Cancel, Failed, RunError, SetupCache, Side, StandFault, Version, Versions, cache, drain, fault,
+    probes, span,
 };
 
 /// The run stops in `Phase`: a breakage of the stand, or `Cancel`.
@@ -61,6 +61,8 @@ enum Kind {
     Measured(u32),
     /// The coverage repeat of the head, out of every measure (architecture plan, row 38).
     Coverage,
+    /// A repeat under the fault of the stand (row 73), out of every measure.
+    Fault(u32),
 }
 
 struct Repeated {
@@ -68,6 +70,8 @@ struct Repeated {
     failure: Option<Failure>,
     /// By profiled service, its replicas as one: only the coverage repeat that passed reads them.
     calls: BTreeMap<String, Coverage>,
+    /// Only a fault repeat reads them.
+    ends: fault::Ends,
 }
 
 struct Ctx<'r, S> {
@@ -135,9 +139,12 @@ fn lanes<S: Sandbox>(ctx: &mut Ctx<S>, versions: &Versions) -> Result<Raw, RunEr
         }
         measure(ctx, Side::Head, &versions.head, &mut head, repeat)?;
     }
-    let outside = match &head {
-        Lane::Ready { seeds, .. } => outside(ctx, versions, seeds)?,
-        Lane::Failed { .. } => Outside::default(),
+    let outside = match (&head, &versions.before, &before) {
+        (Lane::Ready { seeds, .. }, Some(version), Some(Lane::Ready { seeds: own, .. })) => {
+            outside(ctx, (&versions.head, seeds), Some((version, own)))?
+        }
+        (Lane::Ready { seeds, .. }, ..) => outside(ctx, (&versions.head, seeds), None)?,
+        (Lane::Failed { .. }, ..) => Outside::default(),
     };
     let (outputs, failure) = match head {
         Lane::Ready { outputs, .. } => (outputs, None),
@@ -207,6 +214,7 @@ fn raw(
             Lane::Failed { failure, .. } => BeforeOutcome::Failed(failure),
         }),
         coverage: outside.coverage,
+        fault: outside.fault,
     }
 }
 
@@ -214,21 +222,33 @@ fn raw(
 #[derive(Default)]
 struct Outside {
     coverage: Option<CoverageOutcome>,
+    fault: Option<FaultOutcome>,
 }
 
+/// A version whose lane passed its measured repeats, and what they start from.
+type Passed<'a> = (&'a Version, &'a Seeds);
+
 /// After the measured repeats of a head that passed them, each repeat outside the stats that
-/// `extras` names and the stand asks for: the coverage repeat of the head.
+/// `extras` names and the stand asks for: the coverage repeat of the head, then the fault repeats.
+/// `before` takes part only when its lane passed too.
 fn outside<S: Sandbox>(
     ctx: &mut Ctx<S>,
-    versions: &Versions,
-    head: &Seeds,
+    head: Passed,
+    before: Option<Passed>,
 ) -> Result<Outside, Stop> {
-    let coverage = if ctx.extras.contains(&Extra::Coverage) && launch::any_profiled(ctx.stand) {
-        Some(coverage(ctx, &versions.head, head)?)
+    let stand = ctx.stand;
+    let coverage = if ctx.extras.contains(&Extra::Coverage) && launch::any_profiled(stand) {
+        Some(coverage(ctx, head.0, head.1)?)
     } else {
         None
     };
-    Ok(Outside { coverage })
+    let fault = match &stand.fault {
+        Some(fault) if ctx.extras.contains(&Extra::Fault) => {
+            Some(faults(ctx, fault, head, before)?)
+        }
+        _ => None,
+    };
+    Ok(Outside { coverage, fault })
 }
 
 /// From the cache entry on a hit; else setup as without a cache, and its entry once it passed.
@@ -471,6 +491,26 @@ fn measure<S: Sandbox>(
     Ok(())
 }
 
+/// Two per version in turns, "before" first (architecture plan, «Тома, снимки и деревья», step 5):
+/// how each ended is a category, never a failure of the run.
+fn faults<S: Sandbox>(
+    ctx: &mut Ctx<S>,
+    fault: &spec::Fault,
+    head: Passed,
+    before: Option<Passed>,
+) -> Result<FaultOutcome, Stop> {
+    let (mut heads, mut befores) = (Vec::new(), Vec::new());
+    for n in 1..=fault::REPEATS {
+        if let Some((version, seeds)) = before {
+            let repeated = run_repeat(ctx, Side::Before, version, seeds, Kind::Fault(n))?;
+            befores.push(fault::repeat(n, repeated.ends, repeated.output.instances));
+        }
+        let repeated = run_repeat(ctx, Side::Head, head.0, head.1, Kind::Fault(n))?;
+        heads.push(fault::repeat(n, repeated.ends, repeated.output.instances));
+    }
+    Ok(fault::outcome(fault, heads, before.map(|_| befores)))
+}
+
 /// After the measured repeats of a head that passed them: its failure is a fact for the report,
 /// not a failure of the run.
 fn coverage<S: Sandbox>(
@@ -485,12 +525,12 @@ fn coverage<S: Sandbox>(
     })
 }
 
-/// One repeat (architecture plan, «Тома, снимки и деревья», steps 3 and 4): the services by
-/// levels, the workload to its exit, then the cut, the probes of a measured repeat
-/// (`after-workload`, `on-failure` when it failed), the clean stop, the end-of-run snapshots of
-/// the last or a failed measured repeat, and the drain, then the profiles on the host. Its
-/// deadline runs from its start, readiness included. The phase is `Ready` until the `create`
-/// with the workload returned, `Workload` from then on.
+/// One repeat (architecture plan, «Тома, снимки и деревья», steps 3 to 5): the services by
+/// levels, the fault of a fault repeat once what the workload waits for is ready, the workload to
+/// its exit, then the cut, the probes of a measured repeat (`after-workload`, `on-failure` when it
+/// failed), the clean stop, the end-of-run snapshots of the last or a failed measured repeat, and
+/// the drain, then the profiles on the host. Its deadline runs from its start, readiness included.
+/// The phase is `Ready` until the `create` with the workload returned, `Workload` from then on.
 fn run_repeat<S: Sandbox>(
     ctx: &mut Ctx<S>,
     side: Side,
@@ -506,15 +546,25 @@ fn run_repeat<S: Sandbox>(
         Kind::Measured(repeat) => (
             ctx.run_dir.join(format!("repeat-{repeat}-{side}")),
             stand.timeout.get(),
-            ProfileMode::Cpu,
+            Some(ProfileMode::Cpu),
             Some(repeat),
         ),
         Kind::Coverage => (
             ctx.run_dir.join("coverage"),
             stand.timeout.get() * 3 / 2,
-            ProfileMode::Coverage,
+            Some(ProfileMode::Coverage),
             None,
         ),
+        Kind::Fault(repeat) => (
+            ctx.run_dir.join(format!("fault-{repeat}-{side}")),
+            stand.timeout.get(),
+            None,
+            Some(repeat),
+        ),
+    };
+    let switch = match kind {
+        Kind::Fault(_) => stand.fault.as_ref().map(fault::switch),
+        Kind::Measured(_) | Kind::Coverage => None,
     };
     let out = dir.join("out");
     fs::create_dir_all(&out)
@@ -526,13 +576,20 @@ fn run_repeat<S: Sandbox>(
         out: &out,
         tar: &version.tar,
         seeds,
-        mode: Some(mode),
+        mode,
         preload: &ctx.preload,
         span: ctx.span,
     };
     let mut started = None;
-    let ran = start_repeat(ctx, &mut fleet, &frame, deadline, &mut started)
-        .and_then(|()| fleet.finished(ctx.sandbox, deadline, ctx.cancel));
+    let ran = start_repeat(
+        ctx,
+        &mut fleet,
+        &frame,
+        switch.as_ref(),
+        deadline,
+        &mut started,
+    )
+    .and_then(|()| fleet.finished(ctx.sandbox, deadline, ctx.cancel));
     let phase = match started {
         Some(_) => Phase::Workload,
         None => Phase::Ready,
@@ -553,7 +610,7 @@ fn run_repeat<S: Sandbox>(
         ended.saturating_duration_since(started)
     });
     let tap = match (kind, &failing) {
-        (Kind::Coverage, _) => None,
+        (Kind::Coverage | Kind::Fault(_), _) => None,
         (Kind::Measured(_), Some(_)) => Some(Tap::OnFailure),
         (Kind::Measured(_), None) => Some(Tap::AfterWorkload),
     };
@@ -561,6 +618,7 @@ fn run_repeat<S: Sandbox>(
         Kind::Measured(repeat) if failing.is_some() || repeat == stand.repeat.get() => Some(side),
         _ => None,
     };
+    let ends = fault::ends(&fleet);
     let mut ended = end_phase(ctx, &mut fleet, tap, keeps, &dir, &out)
         .map_err(|fault| torn(ctx.sandbox, &mut fleet, &dir, Stop::Fault(phase, fault)))?;
     let read = profiles(&dir, kind, failing.is_some(), &mut ended);
@@ -588,14 +646,18 @@ fn run_repeat<S: Sandbox>(
         output,
         failure,
         calls,
+        ends,
     })
 }
 
-/// `started`: when the `create` with the workload returned, the start of `wall`.
+/// `started`: when the `create` with the workload returned, the start of `wall`. `fault` goes on
+/// once what the workload waits for is ready, before its batch, and on what starts with it or
+/// after it right after their `create`.
 fn start_repeat<S: Sandbox>(
     ctx: &Ctx<S>,
     fleet: &mut Fleet,
     frame: &Frame,
+    fault: Option<&Fault>,
     deadline: Instant,
     started: &mut Option<Instant>,
 ) -> Result<(), Halt> {
@@ -604,9 +666,21 @@ fn start_repeat<S: Sandbox>(
         for name in &level {
             wait_for(ctx, fleet, name, deadline)?;
         }
+        let workload = level.contains(&&stand.workload);
+        if let Some(fault) = fault
+            && workload
+        {
+            fault::on(ctx.sandbox, fleet, 0, fault)?;
+        }
+        let from = fleet.members.len();
         let created = fleet.start(ctx.sandbox, launch::starts(stand, &level, frame))?;
-        if level.contains(&&stand.workload) {
+        if workload {
             *started = Some(created);
+        }
+        if let Some(fault) = fault
+            && fleet.under_fault
+        {
+            fault::on(ctx.sandbox, fleet, from, fault)?;
         }
     }
     Ok(())
@@ -681,7 +755,9 @@ fn profiles(
         let instance = &mut ended.instances[index];
         let (service, replica) = (instance.service.as_str(), instance.replica);
         match kind {
-            Kind::Measured(_) => instance.profile = Some(drain::samples(dir, service, replica)?),
+            Kind::Measured(_) | Kind::Fault(_) => {
+                instance.profile = Some(drain::samples(dir, service, replica)?);
+            }
             Kind::Coverage if failed => {}
             Kind::Coverage => {
                 let part = drain::coverage(dir, service, replica)?;

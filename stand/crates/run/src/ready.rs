@@ -35,11 +35,15 @@ pub(crate) struct Member {
 #[derive(Default)]
 pub(crate) struct Fleet {
     pub(crate) members: Vec<Member>,
+    /// A fault repeat once its fault is on: a long-running service that ends is one of its
+    /// categories, noted in its `exit`, and the waits go on.
+    pub(crate) under_fault: bool,
 }
 
 /// Why a phase stopped short of its goal.
 pub(crate) enum Halt {
-    /// A member's command ended: a long-running service, or a setup service with another code than 0.
+    /// A member's command ended: a long-running service (not under a fault), or a setup service
+    /// with another code than 0.
     Down(usize),
     Unhealthy(usize),
     /// The phase's deadline, while waiting for this member.
@@ -58,7 +62,8 @@ impl From<SandboxError> for Halt {
 enum Woke {
     /// The healthcheck attempt ended with this code.
     Job(Option<i32>),
-    /// A setup service exited 0, or the workload ended: the caller looks again at what it waits for.
+    /// A setup service exited 0, the workload ended, or a long-running service under a fault: the
+    /// caller looks again at what it waits for.
     Exit,
     Deadline,
 }
@@ -192,7 +197,8 @@ impl Fleet {
     }
 
     /// The first exit among the running members and `job`, or the deadline. A setup service
-    /// that exits 0 and the workload are noted for the caller; any other exit halts the phase.
+    /// that exits 0, the workload and a long-running service under a fault are noted for the
+    /// caller; any other exit halts the phase.
     fn watch(
         &mut self,
         sandbox: &impl Sandbox,
@@ -227,6 +233,7 @@ impl Fleet {
             return match member.kind {
                 ServiceKind::Setup if exited.code == Some(0) => Ok(Woke::Exit),
                 ServiceKind::Workload => Ok(Woke::Exit),
+                ServiceKind::LongRunning if self.under_fault => Ok(Woke::Exit),
                 _ => Err(Halt::Down(index)),
             };
         }
