@@ -1,0 +1,13 @@
+services:
+  seed:
+    image: postgres:17
+    expose: [5432]
+    deploy: { resources: { limits: { cpus: "1", memory: 512m } } }
+  load:
+    image: node:22
+    depends_on:
+      seed: { condition: service_completed_successfully }
+    deploy: { resources: { limits: { cpus: "1", memory: 512m } } }
+x-stand:
+  workload: load
+  fault: { target: "seed:5432", mode: down }

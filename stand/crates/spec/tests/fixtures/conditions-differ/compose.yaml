@@ -1,0 +1,17 @@
+services:
+  seed:
+    image: node:22
+    healthcheck: { test: ["CMD", "true"] }
+    deploy: { resources: { limits: { cpus: "1", memory: 512m } } }
+  api:
+    image: node:22
+    depends_on:
+      seed: { condition: service_completed_successfully }
+    deploy: { resources: { limits: { cpus: "1", memory: 512m } } }
+  load:
+    image: node:22
+    depends_on:
+      seed: { condition: service_healthy }
+      api: { condition: service_started }
+    deploy: { resources: { limits: { cpus: "1", memory: 512m } } }
+x-stand: { workload: load }

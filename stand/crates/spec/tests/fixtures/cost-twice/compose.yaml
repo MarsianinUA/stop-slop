@@ -1,0 +1,10 @@
+services:
+  load:
+    image: node:22
+    deploy: { resources: { limits: { cpus: "1", memory: 512m } } }
+x-stand:
+  workload: load
+  expect:
+    cost:
+      - { measure: stand.wall, change: +10%, reason: "one more lookup" }
+      - { measure: stand.wall, change: none, reason: "the same work" }

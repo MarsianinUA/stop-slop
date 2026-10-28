@@ -1,0 +1,6 @@
+services:
+  load:
+    image: node:22
+    volumes: [".:/"]
+    deploy: { resources: { limits: { cpus: "1", memory: 512m } } }
+x-stand: { workload: load }

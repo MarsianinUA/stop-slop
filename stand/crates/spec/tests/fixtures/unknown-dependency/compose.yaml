@@ -1,0 +1,7 @@
+services:
+  load:
+    image: node:22
+    depends_on:
+      - db
+    deploy: { resources: { limits: { cpus: "1", memory: 512m } } }
+x-stand: { workload: load }

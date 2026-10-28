@@ -1,0 +1,23 @@
+services:
+  db:
+    image: postgres:17
+    deploy: { resources: { limits: { cpus: "1", memory: 512m } } }
+  load:
+    image: node:22
+    depends_on: [db]
+    deploy: { resources: { limits: { cpus: "1", memory: 512m } } }
+x-stand:
+  workload: load
+  second_pass: true
+  probes:
+    orders: { in: db, at: after-workload, run: ["psql", "-At", "-c", "select * from orders"] }
+  expect:
+    cost:
+      - { measure: stand.wall, change: none, reason: "the same work" }
+      - { measure: api.cpu, change: +10%, reason: "one more lookup" }
+      - { measure: api.memory, change: -10%, reason: "a smaller cache" }
+      - { measure: api.shutdown, change: down, reason: "no drain wait" }
+      - { measure: "api:3000.connections", change: unknown, reason: "the pool decides" }
+    unchanged:
+      - { file: probe.orders.jsonl, reason: "a second pass sees the same orders" }
+      - { file: results/orders.jsonl, reason: "the workload reads the same orders" }

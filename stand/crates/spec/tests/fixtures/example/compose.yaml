@@ -1,0 +1,60 @@
+services:
+  db:
+    image: postgres:17
+    command: ["postgres", "-c", "wal_level=logical"]   # for the slot probe of guide probes
+    environment: { POSTGRES_PASSWORD: stand }
+    volumes: ["pgdata:/var/lib/postgresql/data"]
+    expose: [5432]
+    healthcheck: { test: ["CMD", "pg_isready", "-U", "postgres"], interval: 1s, retries: 30 }
+    deploy: { resources: { limits: { cpus: "1", memory: 1g } } }
+  prepare:                        # the prepare service: dependencies and build on the version disk
+    image: node:22
+    working_dir: /w/app
+    volumes: ["${STAND_REPO}:/w/app"]
+    command: ["sh", "-c", "npm ci --cache /w/.npm && npm run build"]   # the cache on the version disk
+    deploy: { resources: { limits: { cpus: "2", memory: 2g } } }
+    x-stand: { network: public }
+  migrate:                        # setup: migrations on the built tree from the version's snapshot
+    image: node:22
+    working_dir: /w/app
+    volumes: ["${STAND_REPO}:/w/app"]
+    command: ["node", "dist/migrate.js"]
+    depends_on:
+      prepare: { condition: service_completed_successfully }
+      db: { condition: service_healthy }
+    deploy: { resources: { limits: { cpus: "1", memory: 512m } } }
+  api:                            # long-running
+    image: node:22
+    working_dir: /w/app
+    volumes: ["${STAND_REPO}:/w/app", ".:/harness:ro"]
+    command: ["node", "dist/main.js"]
+    expose: [3000]
+    depends_on:
+      migrate: { condition: service_completed_successfully }
+      db: { condition: service_healthy }
+    healthcheck: { test: ["CMD", "node", "/harness/ping.js"], interval: 1s, retries: 30 }
+    deploy: { resources: { limits: { cpus: "2", memory: 1g } }, replicas: 2 }
+    x-stand: { profile: node }
+  load:                           # the workload from the harness; writes /stand/out/*.jsonl
+    image: node:22
+    working_dir: /harness
+    volumes: [".:/harness:ro"]
+    command: ["node", "load.js", "http://api:3000"]
+    depends_on: { api: { condition: service_healthy } }
+    deploy: { resources: { limits: { cpus: "1", memory: 512m } } }
+volumes: { pgdata: {} }
+x-stand:
+  workload: load
+  repeat: 3
+  probes:
+    orders:                       # the state below the app: rows of a table
+      in: db
+      at: after-workload
+      run: ["psql", "-U", "postgres", "-At", "-c", "select row_to_json(o) from orders o order by id"]
+      key: /id
+      ignore: [/updated_at]
+  expect:
+    cost:
+      - { measure: stand.wall, change: +10%, reason: "one more index lookup per order" }
+  # fault: { target: "db:5432", mode: down }     # opt-in
+  # second_pass: true                            # opt-in
