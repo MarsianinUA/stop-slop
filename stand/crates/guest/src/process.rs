@@ -1,18 +1,21 @@
 //! `run`, `stop` and `exec`. `run` starts the service's command in a process group of its own and
 //! records it in the status file; `stop`, a later exec, signals that command as Docker signals a
 //! container's main process, and kills its group at the grace. `exec` runs a probe or an `inspect`
-//! command, dropped from root to the image's user under the probe group, until its deadline. When a
-//! command ends, the rest of its group is killed, as a container's processes end with its main one.
+//! command, dropped from root to the image's user under the probe group, until its deadline, and
+//! records how it ended in `<out>.status`. When a command ends, the rest of its group is killed, as
+//! a container's processes end with its main one.
 
 use std::fs::{self, File};
-use std::io;
+use std::io::{self, Write};
 use std::os::unix::process::{CommandExt, ExitStatusExt};
 use std::path::Path;
 use std::process::{Command as Process, ExitCode, ExitStatus, Stdio};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use guest::{ExecArgs, PROBE_GID, RunArgs, StopArgs, StopReport};
+use guest::{
+    ExecArgs, ExecEnd, ExecStatus, PROBE_GID, RunArgs, StopArgs, StopReport, signal_number,
+};
 use serde::{Deserialize, Serialize};
 
 const POLL: Duration = Duration::from_millis(5);
@@ -99,6 +102,11 @@ pub fn stop(args: &StopArgs) -> ExitCode {
 
 pub fn exec(args: &ExecArgs) -> ExitCode {
     const WHO: &str = "stand-guest exec";
+    let status = ExecStatus::path(&args.out);
+    // An earlier exec's status would pass for this one's if this one failed before writing its own.
+    if let Err(error) = remove_if_there(&status) {
+        return crate::failed(WHO, format!("remove {}: {error}", status.display()));
+    }
     let uid = match user_id(&args.user) {
         Ok(uid) => uid,
         Err(message) => return crate::failed(WHO, message),
@@ -106,6 +114,11 @@ pub fn exec(args: &ExecArgs) -> ExitCode {
     let (out, err) = match outputs(&args.out) {
         Ok(files) => files,
         Err(message) => return crate::failed(WHO, message),
+    };
+    // Why the command did not start goes where its stderr would have gone.
+    let mut start_err = match err.try_clone() {
+        Ok(file) => file,
+        Err(error) => return crate::failed(WHO, format!("copy the stderr handle: {error}")),
     };
     let mut probe = command(&args.argv);
     probe
@@ -118,25 +131,45 @@ pub fn exec(args: &ExecArgs) -> ExitCode {
         // SAFETY: `drop_to` makes only async-signal-safe calls, as a child before exec must.
         unsafe { probe.pre_exec(move || drop_to(uid)) };
     }
-    let mut child = match probe.spawn() {
-        Ok(child) => child,
-        Err(error) => return not_started(WHO, &args.argv[0], &error),
-    };
-    let pid = child.id() as libc::pid_t;
-    let exited = poll(Instant::now() + args.deadline, || {
-        child.try_wait().expect("wait for the command")
-    });
-    kill_group(pid);
-    match exited {
-        Some(exit) => ExitCode::from(shell_code(exit)),
-        None => {
-            let _ = child.wait();
-            ExitCode::from(124)
+    let ended = match probe.spawn() {
+        Ok(mut child) => {
+            let pid = child.id() as libc::pid_t;
+            let exited = poll(Instant::now() + args.deadline, || {
+                child.try_wait().transpose()
+            });
+            let past_deadline = exited.is_none();
+            kill_group(pid);
+            let end = match exited.unwrap_or_else(|| child.wait()) {
+                Ok(exit) => end_of(exit),
+                Err(error) => return crate::failed(WHO, format!("wait for the command: {error}")),
+            };
+            ExecStatus {
+                end,
+                // Not a command that exited on its own between the last look and the kill.
+                timed_out: past_deadline && end == ExecEnd::Signal(libc::SIGKILL),
+            }
         }
+        Err(error) => {
+            let (why, code) = start_failure(&args.argv[0], &error);
+            let Some(code) = code else {
+                return crate::failed(WHO, why);
+            };
+            // The code alone still says it did not start.
+            let _ = writeln!(start_err, "{WHO}: {why}");
+            ExecStatus {
+                end: ExecEnd::Code(code.into()),
+                timed_out: false,
+            }
+        }
+    };
+    match ended.write(&status) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(error) => crate::failed(WHO, format!("write {}: {error}", status.display())),
     }
 }
 
-/// After `setuid` the group can no longer change, so the order is fixed.
+/// `setgid` before `setuid`: a user other than root can no longer change its group after it. Root
+/// keeps its capabilities through `setuid(0)`, so a command under root can still leave `PROBE_GID`.
 fn drop_to(uid: libc::uid_t) -> io::Result<()> {
     let dropped = unsafe {
         libc::setgroups(0, std::ptr::null()) == 0
@@ -180,15 +213,18 @@ fn outputs(out: &Path) -> Result<(File, File), String> {
     let mut err = out.as_os_str().to_owned();
     err.push(".err");
     let create = |path: &Path| {
-        let removed = match fs::remove_file(path) {
-            Err(error) if error.kind() != io::ErrorKind::NotFound => Err(error),
-            _ => Ok(()),
-        };
-        removed
+        remove_if_there(path)
             .and_then(|()| File::create_new(path))
             .map_err(|error| format!("create {}: {error}", path.display()))
     };
     Ok((create(out)?, create(Path::new(&err))?))
+}
+
+fn remove_if_there(path: &Path) -> io::Result<()> {
+    match fs::remove_file(path) {
+        Err(error) if error.kind() != io::ErrorKind::NotFound => Err(error),
+        _ => Ok(()),
+    }
 }
 
 fn command(argv: &[String]) -> Process {
@@ -197,21 +233,49 @@ fn command(argv: &[String]) -> Process {
     command
 }
 
-/// The codes a shell gives a command it could not start.
 fn not_started(who: &str, program: &str, error: &io::Error) -> ExitCode {
-    eprintln!("{who}: start `{program}`: {error}");
-    ExitCode::from(if error.kind() == io::ErrorKind::NotFound {
-        127
-    } else {
-        126
-    })
+    let (why, code) = start_failure(program, error);
+    match code {
+        Some(code) => {
+            eprintln!("{who}: {why}");
+            ExitCode::from(code)
+        }
+        None => crate::failed(who, why),
+    }
+}
+
+/// Why `program` did not start, and the code a shell gives it then: 127 when it is not there, 126
+/// when it is no program the user may run. `None` when `stand-guest` failed itself: the fork, or the
+/// drop of privileges in the child, which fail with none of these errors.
+fn start_failure(program: &str, error: &io::Error) -> (String, Option<u8>) {
+    let code = match error.raw_os_error() {
+        Some(libc::ENOENT | libc::ENOTDIR) => Some(127),
+        Some(
+            libc::EACCES
+            | libc::ENOEXEC
+            | libc::EISDIR
+            | libc::ELOOP
+            | libc::ENAMETOOLONG
+            | libc::ETXTBSY,
+        ) => Some(126),
+        _ => None,
+    };
+    (format!("start `{program}`: {error}"), code)
 }
 
 /// The code a shell shows: 128 + n after a death by signal n.
 fn shell_code(exit: ExitStatus) -> u8 {
+    match end_of(exit) {
+        ExecEnd::Code(code) => code as u8,
+        ExecEnd::Signal(signal) => 128 + signal as u8,
+    }
+}
+
+/// `signal()` is set whenever `code()` is not: a reaped command is never only stopped.
+fn end_of(exit: ExitStatus) -> ExecEnd {
     match exit.code() {
-        Some(code) => code as u8,
-        None => 128 + exit.signal().unwrap_or(0) as u8,
+        Some(code) => ExecEnd::Code(code),
+        None => ExecEnd::Signal(exit.signal().unwrap_or(0)),
     }
 }
 
@@ -295,45 +359,4 @@ fn now_ms() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |since| since.as_millis() as u64)
-}
-
-/// The fixed Linux numbers of the names `spec` allows (x86_64 and aarch64 share them): the binary
-/// runs inside a Linux guest, and `libc` has no `SIGPWR` or `SIGSTKFLT` on macOS, where the host
-/// tests send only `SIGTERM`, 15 everywhere.
-fn signal_number(name: &str) -> Option<libc::c_int> {
-    let number = match name {
-        "SIGHUP" => 1,
-        "SIGINT" => 2,
-        "SIGQUIT" => 3,
-        "SIGILL" => 4,
-        "SIGTRAP" => 5,
-        "SIGABRT" | "SIGIOT" => 6,
-        "SIGBUS" => 7,
-        "SIGFPE" => 8,
-        "SIGKILL" => 9,
-        "SIGUSR1" => 10,
-        "SIGSEGV" => 11,
-        "SIGUSR2" => 12,
-        "SIGPIPE" => 13,
-        "SIGALRM" => 14,
-        "SIGTERM" => 15,
-        "SIGSTKFLT" => 16,
-        "SIGCHLD" => 17,
-        "SIGCONT" => 18,
-        "SIGSTOP" => 19,
-        "SIGTSTP" => 20,
-        "SIGTTIN" => 21,
-        "SIGTTOU" => 22,
-        "SIGURG" => 23,
-        "SIGXCPU" => 24,
-        "SIGXFSZ" => 25,
-        "SIGVTALRM" => 26,
-        "SIGPROF" => 27,
-        "SIGWINCH" => 28,
-        "SIGIO" | "SIGPOLL" => 29,
-        "SIGPWR" => 30,
-        "SIGSYS" => 31,
-        _ => return None,
-    };
-    Some(number)
 }

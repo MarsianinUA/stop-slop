@@ -9,8 +9,9 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use guest::{
-    Command, Counters, Entry, ExecArgs, FaultSwitch, FaultSwitchMode, GuestError, Route, Routes,
-    RunArgs, StopArgs, StopReport, TargetCounters, TrimArgs, UnexposedCount, UnexposedName,
+    Command, Counters, Entry, ExecArgs, ExecEnd, ExecStatus, FaultSwitch, FaultSwitchMode,
+    GuestError, Route, Routes, RunArgs, StopArgs, StopReport, TargetCounters, TrimArgs,
+    UnexposedCount, UnexposedName,
 };
 use serde_json::json;
 
@@ -155,6 +156,14 @@ fn the_files_keep_their_json_shape() {
             attempts: 1,
         }],
     };
+    let exited = ExecStatus {
+        end: ExecEnd::Code(3),
+        timed_out: false,
+    };
+    let timed_out = ExecStatus {
+        end: ExecEnd::Signal(9),
+        timed_out: true,
+    };
     let down_json = json!({"target": "db:5432", "mode": "down"});
     let slow_json = json!({"target": "db:5432", "mode": "slow", "delayMs": 2000});
     let stopped_json = json!({"afterMs": 120, "killed": true, "code": null});
@@ -162,11 +171,15 @@ fn the_files_keep_their_json_shape() {
         "targets": [{"target": "api:3000", "connections": 3, "open": 1, "bytesOut": 10, "bytesIn": 20, "http": [0, 2, 0, 0, 1], "drops": 0}],
         "unexposed": [{"name": "cache", "attempts": 1}],
     });
+    let exited_json = json!({"code": 3, "timedOut": false});
+    let timed_out_json = json!({"signal": 9, "timedOut": true});
 
     assert_eq!(serde_json::to_value(&down).unwrap(), down_json);
     assert_eq!(serde_json::to_value(&slow).unwrap(), slow_json);
     assert_eq!(serde_json::to_value(stopped).unwrap(), stopped_json);
     assert_eq!(serde_json::to_value(&counters).unwrap(), counters_json);
+    assert_eq!(serde_json::to_value(exited).unwrap(), exited_json);
+    assert_eq!(serde_json::to_value(timed_out).unwrap(), timed_out_json);
     assert_eq!(FaultSwitch::parse(&down_json.to_string()).unwrap(), down);
     assert_eq!(FaultSwitch::parse(&slow_json.to_string()).unwrap(), slow);
     assert_eq!(
@@ -176,6 +189,16 @@ fn the_files_keep_their_json_shape() {
     assert_eq!(
         Counters::parse(&counters_json.to_string()).unwrap(),
         counters
+    );
+    assert_eq!(ExecStatus::parse(&exited_json.to_string()).unwrap(), exited);
+    assert_eq!(
+        ExecStatus::parse(&timed_out_json.to_string()).unwrap(),
+        timed_out
+    );
+    assert!(ExecStatus::parse(r#"{"timedOut": false}"#).is_err());
+    assert_eq!(
+        ExecStatus::path("/stand/out/probe.orders.jsonl".as_ref()),
+        PathBuf::from("/stand/out/probe.orders.jsonl.status")
     );
 }
 
@@ -667,11 +690,27 @@ mod process {
         std::os::unix::fs::symlink(&victim, temp.path().join("probe.jsonl.err")).unwrap();
         let script = "sleep 30 & echo $$; echo oops >&2; exit 3";
         let exit = exec(&out, LONG, "", script).status().unwrap();
-        assert_eq!(exit.code(), Some(3));
+        assert_eq!(exit.code(), Some(0));
+        assert_eq!(exec_status(&out), ended(ExecEnd::Code(3), false));
         let err = fs::read_to_string(temp.path().join("probe.jsonl.err")).unwrap();
         assert_eq!(err, "oops\n");
         assert_eq!(fs::read_to_string(&victim).unwrap(), "kept");
         assert_group_ends(fs::read_to_string(&out).unwrap().trim().parse().unwrap());
+    }
+
+    /// 124 is what `timeout(1)` exits with at the deadline, 125 what `stand-guest` exits with when it
+    /// fails itself.
+    #[test]
+    fn exec_reports_a_command_that_exits_124_or_125_as_its_own_code() {
+        let temp = tempfile::tempdir().unwrap();
+        let out = temp.path().join("probe.jsonl");
+        for code in [124, 125] {
+            let exit = exec(&out, LONG, "", &format!("exit {code}"))
+                .status()
+                .unwrap();
+            assert_eq!(exit.code(), Some(0), "{code}");
+            assert_eq!(exec_status(&out), ended(ExecEnd::Code(code), false));
+        }
     }
 
     #[test]
@@ -683,9 +722,52 @@ mod process {
         let exit = exec(&out, deadline, "", "sleep 30 & echo $$; wait")
             .status()
             .unwrap();
-        assert_eq!(exit.code(), Some(124));
+        assert_eq!(exit.code(), Some(0));
+        assert_eq!(
+            exec_status(&out),
+            ended(ExecEnd::Signal(libc::SIGKILL), true)
+        );
         assert!((deadline..LONG).contains(&started.elapsed()));
         assert_group_ends(fs::read_to_string(&out).unwrap().trim().parse().unwrap());
+    }
+
+    #[test]
+    fn exec_reports_a_command_that_did_not_start_with_the_shell_code_and_why() {
+        let temp = tempfile::tempdir().unwrap();
+        let out = temp.path().join("probe.jsonl");
+        let missing = temp.path().join("no-such-probe");
+        let exit = guest(&Command::Exec(ExecArgs {
+            out: out.clone(),
+            deadline: LONG,
+            user: String::new(),
+            argv: vec![missing.display().to_string()],
+        }))
+        .status()
+        .unwrap();
+        assert_eq!(exit.code(), Some(0));
+        assert_eq!(exec_status(&out), ended(ExecEnd::Code(127), false));
+        let err = fs::read_to_string(temp.path().join("probe.jsonl.err")).unwrap();
+        let why = format!("stand-guest exec: start `{}`: ", missing.display());
+        assert!(err.starts_with(&why), "{err}");
+    }
+
+    /// A status left by an earlier exec on the same outputs goes too.
+    #[test]
+    fn exec_that_fails_itself_exits_125_and_leaves_no_status() {
+        let temp = tempfile::tempdir().unwrap();
+        let out = temp.path().join("probe.jsonl");
+        let earlier = ended(ExecEnd::Code(0), false);
+        earlier.write(&ExecStatus::path(&out)).unwrap();
+        let output = exec(&out, LONG, "stand-guest-no-such-user", "exit 0")
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(125));
+        let stderr = String::from_utf8(output.stderr).unwrap();
+        assert!(
+            stderr.contains("no user `stand-guest-no-such-user`"),
+            "{stderr}"
+        );
+        assert!(!ExecStatus::path(&out).exists());
     }
 
     /// In a guest `exec` starts as root; without root here the case is skipped.
@@ -708,9 +790,24 @@ mod process {
                 .status()
                 .unwrap();
             assert_eq!(exit.code(), Some(0), "{user:?}");
+            assert_eq!(
+                exec_status(&out),
+                ended(ExecEnd::Code(0), false),
+                "{user:?}"
+            );
             let ids = fs::read_to_string(&out).unwrap();
             assert_eq!(ids, format!("{uid}\n{gid}\n{gid}\n"), "{user:?}");
         }
+        // `setuid` refuses uid -1: a failed drop is `stand-guest`'s own failure, not a probe that
+        // did not start.
+        let output = exec(&out, LONG, "4294967295", "exit 0").output().unwrap();
+        assert_eq!(output.status.code(), Some(125));
+        let stderr = String::from_utf8(output.stderr).unwrap();
+        assert!(
+            stderr.starts_with("stand-guest exec: start `sh`: "),
+            "{stderr}"
+        );
+        assert!(!ExecStatus::path(&out).exists());
     }
 
     /// `sh -c <script>` with `$1`, `$2`... set to `args`.
@@ -762,6 +859,14 @@ mod process {
             user: user.into(),
             argv: sh(script, &[]),
         }))
+    }
+
+    fn exec_status(out: &Path) -> ExecStatus {
+        ExecStatus::parse(&fs::read_to_string(ExecStatus::path(out)).unwrap()).unwrap()
+    }
+
+    fn ended(end: ExecEnd, timed_out: bool) -> ExecStatus {
+        ExecStatus { end, timed_out }
     }
 
     fn recorded(status: &Path) -> serde_json::Value {

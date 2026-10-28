@@ -1,7 +1,7 @@
-//! `stand-guest`, run by the sandbox adapter inside each guest. Exit codes follow `timeout(1)`: the
-//! command's own code, 124 when `exec` hit its deadline, 125 when `stand-guest` itself failed (one
-//! line on stderr says why), 126 when the command could not start, 127 when it was not found,
-//! 128 + n when signal n killed it.
+//! `stand-guest`, run by the sandbox adapter inside each guest. 125 means `stand-guest` itself
+//! failed, and one line on stderr says why. `run` exits with its command's code as a shell gives it:
+//! 126 when the command could not start, 127 when it was not found, 128 + n when signal n killed it.
+//! `exec` exits 0 once it wrote how its command ended to `<out>.status` (`guest::ExecStatus`).
 
 #[cfg(unix)]
 mod net;

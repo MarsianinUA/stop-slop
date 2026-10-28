@@ -1,6 +1,6 @@
-//! What the sandbox adapter and `stand-guest` exchange: the subcommand arguments and the files of
-//! `/stand/net`. The adapter writes the arguments and `FaultSwitch` and reads `Counters` and
-//! `StopReport`; the binary does the opposite.
+//! What the sandbox adapter and `stand-guest` exchange: the subcommand arguments, the files of
+//! `/stand/net` and the status of an `exec`. The adapter writes the arguments and `FaultSwitch` and
+//! reads `Counters`, `StopReport` and `ExecStatus`; the binary does the opposite.
 
 use std::fs;
 use std::io::{self, Write};
@@ -77,9 +77,10 @@ pub struct StopArgs {
     pub grace: Duration,
 }
 
-/// `stand-guest exec`: starts as root, drops the supplementary groups, `setgid(PROBE_GID)`, then `setuid(user)`
-/// (after `setuid` the group can no longer change); stdout to `out`, stderr to `<out>.err`, the process
-/// group killed at `deadline`. `user` is the image's `USER`; empty means root.
+/// `stand-guest exec`: starts as root, drops the supplementary groups, `setgid(PROBE_GID)`, then `setuid(user)`;
+/// stdout to `out`, stderr to `<out>.err`, how the command ended to `<out>.status` (`ExecStatus`), the
+/// process group killed at `deadline`. `user` is the image's `USER`; empty means root. Only a user other
+/// than root is held in `PROBE_GID`: root keeps its capabilities, so a probe under root can leave it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExecArgs {
     pub out: PathBuf,
@@ -446,6 +447,86 @@ impl StopReport {
         serde_json::from_str(text.trim())
             .map_err(|error| GuestError::File(format!("stop report: {error}")))
     }
+}
+
+/// How the command of `stand-guest exec` ended, in `<out>.status` beside its outputs: a channel of its
+/// own, since the command may exit with any code, 124 and 125 too. `stand-guest exec` exits 0 once the
+/// file is written, and 125 without it when it fails itself. `timed_out`: killed at the deadline.
+/// `{"code": 3, "timedOut": false}` or `{"signal": 9, "timedOut": true}`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExecStatus {
+    #[serde(flatten)]
+    pub end: ExecEnd,
+    pub timed_out: bool,
+}
+
+/// A command that could not start has the code a shell gives it: 126, or 127 when it was not
+/// found; the reason is in `<out>.err`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ExecEnd {
+    Code(i32),
+    Signal(i32),
+}
+
+impl ExecStatus {
+    /// `<out>.status`, for the `out` of an `ExecArgs`.
+    pub fn path(out: &Path) -> PathBuf {
+        let mut path = out.as_os_str().to_owned();
+        path.push(".status");
+        path.into()
+    }
+
+    pub fn write(&self, path: &Path) -> io::Result<()> {
+        write_whole(path, &json(self))
+    }
+
+    pub fn parse(text: &str) -> Result<ExecStatus, GuestError> {
+        serde_json::from_str(text)
+            .map_err(|error| GuestError::File(format!("exec status: {error}")))
+    }
+}
+
+/// The Linux number of a signal name `spec` allows; x86_64 and aarch64 share them. A table, not
+/// `libc`: the guest is always Linux, and this library builds on every host. On a macOS host only
+/// the tests send a signal, `SIGTERM`, which is 15 there too.
+pub fn signal_number(name: &str) -> Option<i32> {
+    let number = match name {
+        "SIGHUP" => 1,
+        "SIGINT" => 2,
+        "SIGQUIT" => 3,
+        "SIGILL" => 4,
+        "SIGTRAP" => 5,
+        "SIGABRT" | "SIGIOT" => 6,
+        "SIGBUS" => 7,
+        "SIGFPE" => 8,
+        "SIGKILL" => 9,
+        "SIGUSR1" => 10,
+        "SIGSEGV" => 11,
+        "SIGUSR2" => 12,
+        "SIGPIPE" => 13,
+        "SIGALRM" => 14,
+        "SIGTERM" => 15,
+        "SIGSTKFLT" => 16,
+        "SIGCHLD" => 17,
+        "SIGCONT" => 18,
+        "SIGSTOP" => 19,
+        "SIGTSTP" => 20,
+        "SIGTTIN" => 21,
+        "SIGTTOU" => 22,
+        "SIGURG" => 23,
+        "SIGXCPU" => 24,
+        "SIGXFSZ" => 25,
+        "SIGVTALRM" => 26,
+        "SIGPROF" => 27,
+        "SIGWINCH" => 28,
+        "SIGIO" | "SIGPOLL" => 29,
+        "SIGPWR" => 30,
+        "SIGSYS" => 31,
+        _ => return None,
+    };
+    Some(number)
 }
 
 #[derive(Debug, thiserror::Error)]
