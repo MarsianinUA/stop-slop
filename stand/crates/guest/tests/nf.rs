@@ -7,7 +7,7 @@
 #![cfg(target_os = "linux")]
 
 use std::io::{self, ErrorKind, Read, Write};
-use std::net::{Ipv4Addr, Shutdown, SocketAddr, TcpListener, TcpStream};
+use std::net::{Ipv4Addr, Ipv6Addr, Shutdown, SocketAddr, TcpListener, TcpStream};
 use std::path::PathBuf;
 use std::process::{Child, Command as Process, Output};
 use std::thread;
@@ -67,9 +67,10 @@ fn a_probe_reaches_loopback_and_nothing_else() {
         "a_probe_reaches_loopback_and_nothing_else",
         PROBE_GID,
         || {
+            use Dial::{Connected, Refused};
             assert_eq!(
                 dial_out().0,
-                [Dial::Connected, Dial::Refused, Dial::Refused]
+                [Connected, Refused, Refused, Connected, Refused]
             )
         },
     );
@@ -82,7 +83,7 @@ fn another_group_reaches_an_outside_address_and_the_names() {
         0,
         || {
             let (dials, _fwd) = dial_out();
-            assert_eq!(dials, [Dial::Connected; 3]);
+            assert_eq!(dials, [Dial::Connected; 5]);
             assert_eq!(request((API, 3000)), b"api");
         },
     );
@@ -94,21 +95,39 @@ enum Dial {
     Refused,
 }
 
-/// Dials loopback, an address outside `127.0.0.0/8` and a name. The outside address is put on
-/// `lo` too, so nothing but the rule can refuse it.
-fn dial_out() -> ([Dial; 3], Forwarder) {
+/// Dials loopback, an address outside `127.0.0.0/8` and a name, then the IPv6 loopback and an
+/// address beside it. The outside addresses are put on `lo` too, so nothing but the rules can
+/// refuse them.
+fn dial_out() -> ([Dial; 5], Forwarder) {
     let outside = Ipv4Addr::new(10, 1, 1, 1);
+    let outside6 = Ipv6Addr::new(0xfd00, 0, 0, 0, 0, 0, 0, 1);
     ip(&["address", "add", &format!("{outside}/32"), "dev", "lo"]);
-    let local = TcpListener::bind((Ipv4Addr::UNSPECIFIED, 0)).unwrap();
+    ip(&[
+        "-6",
+        "address",
+        "add",
+        &format!("{outside6}/128"),
+        "dev",
+        "lo",
+    ]);
+    // Both families: `bindv6only` is off in a new namespace.
+    let local = TcpListener::bind((Ipv6Addr::UNSPECIFIED, 0)).unwrap();
     let port = local.local_addr().unwrap().port();
     let fwd = Forwarder::start(vec![route("api", 3000, API, upstream(b"api"))], vec![]);
-    let dials = [(Ipv4Addr::LOCALHOST, port), (outside, port), (API, 3000)].map(|to| {
-        match TcpStream::connect_timeout(&SocketAddr::from(to), Duration::from_secs(5)) {
+    let to: [SocketAddr; 5] = [
+        (Ipv4Addr::LOCALHOST, port).into(),
+        (outside, port).into(),
+        (API, 3000).into(),
+        (Ipv6Addr::LOCALHOST, port).into(),
+        (outside6, port).into(),
+    ];
+    let dials = to.map(
+        |to| match TcpStream::connect_timeout(&to, Duration::from_secs(5)) {
             Ok(_) => Dial::Connected,
             Err(error) if error.kind() == ErrorKind::ConnectionRefused => Dial::Refused,
-            Err(error) => panic!("dial {to:?}: {error}"),
-        }
-    });
+            Err(error) => panic!("dial {to}: {error}"),
+        },
+    );
     (dials, fwd)
 }
 

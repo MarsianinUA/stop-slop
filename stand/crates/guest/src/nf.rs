@@ -1,21 +1,28 @@
-//! `table ip stand`, installed over a netfilter netlink socket of its own: the guest image has no
-//! `nft` or `iptables`. One batch builds the rules of the blueprint's Internal formats:
+//! `table ip stand` and `table ip6 stand`, installed over a netfilter netlink socket of its own:
+//! the guest image has no `nft` or `iptables`. One batch builds the rules of the blueprint's
+//! Internal formats:
 //!
 //! ```text
-//! chain out { type nat hook output priority -100
+//! table ip stand {
+//!   chain out { type nat hook output priority -100
 //!     ip daddr <name address> meta l4proto tcp redirect to :<forwarder>    (one per address) }
-//! chain probe { type filter hook output priority 0
+//!   chain probe { type filter hook output priority 0
 //!     meta skgid 65533 ip daddr != 127.0.0.0/8 reject
-//!     meta skgid 65533 tcp dport <forwarder> reject }
+//!     meta skgid 65533 tcp dport <forwarder> reject } }
+//! table ip6 stand {
+//!   chain probe { type filter hook output priority 0
+//!     meta skgid 65533 ip6 daddr != ::1 reject } }
 //! ```
 //!
 //! The filter chain runs after the nat chain, so a probe that dials a name already has the
-//! forwarder's port as its destination there. Numbers `libc` does not name are from
+//! forwarder's port as its destination there. The names and the forwarder are IPv4 only, so the
+//! IPv6 table only keeps a probe from leaving by an IPv6 address, which microsandbox gives the
+//! guest whenever the host has an IPv6 route. Numbers `libc` does not name are from
 //! `linux/netfilter/nf_tables.h`.
 
 use std::io;
 use std::mem;
-use std::net::{Ipv4Addr, SocketAddrV4, TcpStream};
+use std::net::{Ipv4Addr, Ipv6Addr, SocketAddrV4, TcpStream, UdpSocket};
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 
 use guest::PROBE_GID;
@@ -70,11 +77,17 @@ const NFTA_REJECT_ICMP_CODE: u16 = 2;
 /// What `reject` means in `nft`: a TCP `connect` gets `ECONNREFUSED`. Without a code the kernel
 /// refuses the whole batch.
 const ICMP_PORT_UNREACH: u8 = 3;
+const ICMPV6_PORT_UNREACH: u8 = 4;
 
 const IPV4_DADDR: Field = Field {
     base: libc::NFT_PAYLOAD_NETWORK_HEADER as u32,
     offset: 16,
     len: 4,
+};
+const IPV6_DADDR: Field = Field {
+    base: libc::NFT_PAYLOAD_NETWORK_HEADER as u32,
+    offset: 24,
+    len: 16,
 };
 const TCP_DPORT: Field = Field {
     base: libc::NFT_PAYLOAD_TRANSPORT_HEADER as u32,
@@ -84,18 +97,28 @@ const TCP_DPORT: Field = Field {
 
 /// A second install in the same guest fails rather than leave a rule to a dead port in front.
 pub fn install(forwarder_port: u16, addresses: &[Ipv4Addr]) -> io::Result<()> {
-    let mut messages = vec![
+    let mut ip = vec![
         (NFT_MSG_NEWTABLE, NLM_F_EXCL, table()),
         (NFT_MSG_NEWCHAIN, 0, chain("out", -100, "nat")),
     ];
     for &address in addresses {
         let rule = redirect(address, forwarder_port);
-        messages.push((NFT_MSG_NEWRULE, NLM_F_APPEND, rule));
+        ip.push((NFT_MSG_NEWRULE, NLM_F_APPEND, rule));
     }
-    messages.push((NFT_MSG_NEWCHAIN, 0, chain("probe", 0, "filter")));
-    messages.push((NFT_MSG_NEWRULE, NLM_F_APPEND, probe_off_loopback()));
-    messages.push((NFT_MSG_NEWRULE, NLM_F_APPEND, probe_to(forwarder_port)));
-    let bytes = batch(messages);
+    ip.push((NFT_MSG_NEWCHAIN, 0, chain("probe", 0, "filter")));
+    ip.push((NFT_MSG_NEWRULE, NLM_F_APPEND, probe_off_loopback()));
+    ip.push((NFT_MSG_NEWRULE, NLM_F_APPEND, probe_to(forwarder_port)));
+    let mut tables = vec![(libc::NFPROTO_IPV4, ip)];
+    // A kernel without IPv6 gives a probe no IPv6 socket to leave by.
+    if ipv6()? {
+        let ip6 = vec![
+            (NFT_MSG_NEWTABLE, NLM_F_EXCL, table()),
+            (NFT_MSG_NEWCHAIN, 0, chain("probe", 0, "filter")),
+            (NFT_MSG_NEWRULE, NLM_F_APPEND, probe_off_loopback6()),
+        ];
+        tables.push((libc::NFPROTO_IPV6, ip6));
+    }
+    let bytes = batch(tables);
 
     let socket = open()?;
     if unsafe { libc::send(socket.as_raw_fd(), bytes.as_ptr().cast(), bytes.len(), 0) } < 0 {
@@ -174,7 +197,7 @@ fn probe_off_loopback() -> Attrs {
                 .nest(NFTA_BITWISE_XOR, value(&[0, 0, 0, 0])),
         ))
         .elem(cmp(libc::NFT_CMP_NEQ, &[127, 0, 0, 0]))
-        .elem(reject());
+        .elem(reject(ICMP_PORT_UNREACH));
     rule("probe", exprs)
 }
 
@@ -184,8 +207,24 @@ fn probe_to(port: u16) -> Attrs {
         .elem(cmp(libc::NFT_CMP_EQ, &[libc::IPPROTO_TCP as u8]))
         .elem(load(TCP_DPORT))
         .elem(cmp(libc::NFT_CMP_EQ, &port.to_be_bytes()))
-        .elem(reject());
+        .elem(reject(ICMP_PORT_UNREACH));
     rule("probe", exprs)
+}
+
+fn probe_off_loopback6() -> Attrs {
+    let exprs = probe()
+        .elem(load(IPV6_DADDR))
+        .elem(cmp(libc::NFT_CMP_NEQ, &Ipv6Addr::LOCALHOST.octets()))
+        .elem(reject(ICMPV6_PORT_UNREACH));
+    rule("probe", exprs)
+}
+
+fn ipv6() -> io::Result<bool> {
+    match UdpSocket::bind((Ipv6Addr::UNSPECIFIED, 0)) {
+        Ok(_) => Ok(true),
+        Err(error) if error.raw_os_error() == Some(libc::EAFNOSUPPORT) => Ok(false),
+        Err(error) => Err(error),
+    }
 }
 
 /// `meta skgid 65533`; the kernel loads the gid in host byte order.
@@ -244,12 +283,12 @@ fn cmp(op: libc::c_int, data: &[u8]) -> Attrs {
     )
 }
 
-fn reject() -> Attrs {
+fn reject(code: u8) -> Attrs {
     expr(
         "reject",
         Attrs::default()
             .be32(NFTA_REJECT_TYPE, libc::NFT_REJECT_ICMP_UNREACH as u32)
-            .raw(NFTA_REJECT_ICMP_CODE, &[ICMP_PORT_UNREACH]),
+            .raw(NFTA_REJECT_ICMP_CODE, &[code]),
     )
 }
 
@@ -293,10 +332,13 @@ impl Attrs {
     }
 }
 
-/// One transaction of nf_tables messages that create things in family ip: the kernel applies all
-/// of them or none. It reports a refused message whether or not that one asked for an ack, so
-/// only the last asks. Message `n` (from 1) has sequence number `n`.
-fn batch(messages: Vec<(u16, u16, Attrs)>) -> Vec<u8> {
+/// The kind of an nf_tables message, its flags beyond the ones every message has, its attributes.
+type Message = (u16, u16, Attrs);
+
+/// One transaction of nf_tables messages that create things, by family: the kernel applies all of
+/// them or none. It reports a refused message whether or not that one asked for an ack, so only
+/// the last asks. Message `n` (from 1) has sequence number `n`, counted across the families.
+fn batch(tables: Vec<(libc::c_int, Vec<Message>)>) -> Vec<u8> {
     let mut bytes = Vec::new();
     let control = |bytes: &mut Vec<u8>, kind, seq| {
         let family = libc::AF_UNSPEC as u8;
@@ -312,20 +354,16 @@ fn batch(messages: Vec<(u16, u16, Attrs)>) -> Vec<u8> {
         );
     };
     control(&mut bytes, NFNL_MSG_BATCH_BEGIN, 0);
+    let messages: Vec<_> = tables
+        .into_iter()
+        .flat_map(|(family, messages)| messages.into_iter().map(move |m| (family as u8, m)))
+        .collect();
     let last = messages.len() as u32;
-    for (seq, (kind, flags, attrs)) in (1..).zip(messages) {
+    for (seq, (family, (kind, flags, attrs))) in (1..).zip(messages) {
         let ack = if seq == last { NLM_F_ACK } else { 0 };
         let flags = NLM_F_REQUEST | NLM_F_CREATE | ack | flags;
         let kind = (NFNL_SUBSYS_NFTABLES << 8) | kind;
-        message(
-            &mut bytes,
-            kind,
-            flags,
-            seq,
-            libc::NFPROTO_IPV4 as u8,
-            0,
-            &attrs,
-        );
+        message(&mut bytes, kind, flags, seq, family, 0, &attrs);
     }
     control(&mut bytes, NFNL_MSG_BATCH_END, last + 1);
     bytes

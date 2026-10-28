@@ -1,4 +1,4 @@
-//! Names, published ports, the network policy and `stand-guest net`.
+//! Names, published ports, the network policy, `stand-guest net` and its fault switch.
 //!
 //! Each peer name gets a loopback address in the guest's hosts file; `net`'s REDIRECT rule sends a
 //! connection to that address into the forwarder, which dials `host.microsandbox.internal` on the
@@ -7,14 +7,16 @@
 use std::collections::BTreeMap;
 use std::net::{Ipv4Addr, TcpListener};
 use std::path::PathBuf;
+use std::sync::Arc;
+use std::time::Duration;
 
-use ::guest::{Command, Entry, Route, Routes, UnexposedName};
+use ::guest::{Command, Entry, FaultSwitch, FaultSwitchMode, Route, Routes, UnexposedName};
 use ::microsandbox as msb;
 use camino::{Utf8Path, Utf8PathBuf};
 use msb::sandbox::FsSetAttrs;
 
-use super::{GUEST_CALL, backend, guest, process, within};
-use crate::{Launch, Outbound, SandboxError};
+use super::{GUEST_CALL, Live, backend, guest, process, within};
+use crate::{Fault, FaultMode, Launch, Outbound, SandboxError};
 
 /// Root writes it: `net` its counters, the adapter its fault switch.
 pub(super) const NET_DIR: &str = "/stand/net";
@@ -26,6 +28,8 @@ const HOSTS_BEGIN: &str = "# stop-slop-stand begin";
 const HOSTS_END: &str = "# stop-slop-stand end";
 /// 127.0.0.2 to 127.0.0.254.
 const MAX_NAMES: usize = 253;
+/// `net` reads the switch every 100 ms and says nothing back.
+const FAULT_SETTLE: Duration = Duration::from_millis(200);
 
 /// The host side of `NET_DIR` in the adapter's folder of a VM.
 pub(super) fn net_dir(folder: &Utf8Path) -> Utf8PathBuf {
@@ -156,6 +160,43 @@ pub(super) async fn start(
         None => Ok(()),
         Some(info) => Err(process::ended(&job, "stand-guest net", &info).await),
     }
+}
+
+/// The switch goes in as a temporary file and is renamed there, so the guest's own view of the
+/// bind has it at once, whatever virtio-fs caches of the host's, and `net` never reads a part.
+/// Each VM gets it before the wait, so the wait is paid once.
+pub(super) async fn fault(lives: &[Arc<Live>], fault: &Fault) -> Result<(), SandboxError> {
+    let mode = match fault.mode {
+        FaultMode::Down => FaultSwitchMode::Down,
+        FaultMode::Slow(delay) => FaultSwitchMode::Slow {
+            delay_ms: u64::try_from(delay.as_millis()).unwrap_or(u64::MAX),
+        },
+    };
+    let switch = FaultSwitch {
+        target: fault.target.clone(),
+        mode,
+    };
+    let (tmp, path) = (
+        format!("{NET_DIR}/{FAULT}.tmp"),
+        format!("{NET_DIR}/{FAULT}"),
+    );
+    for live in lives {
+        // Outside the binds, so only the renamed copy shows in the guest.
+        let staged = live.folder.join(FAULT);
+        switch
+            .write(staged.as_std_path())
+            .map_err(|error| backend(format!("{staged}: {error}")))?;
+        let fs = live.vm.fs();
+        let copy = fs.copy_from_host(&staged, &tmp);
+        let copied = within(GUEST_CALL, "copy the fault switch in", copy).await;
+        let _ = std::fs::remove_file(&staged);
+        copied?.map_err(backend)?;
+        within(GUEST_CALL, "turn the fault on", fs.rename(&tmp, &path))
+            .await?
+            .map_err(backend)?;
+    }
+    tokio::time::sleep(FAULT_SETTLE).await;
+    Ok(())
 }
 
 /// A VM from a snapshot carries the hosts file of the VM it was taken from, so the block is

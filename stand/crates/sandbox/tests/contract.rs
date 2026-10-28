@@ -912,8 +912,8 @@ mod live {
     use ::microsandbox as msb;
     use camino::{Utf8Path, Utf8PathBuf};
     use sandbox::{
-        Exposed, ImageRef, Launch, Metrics, Microsandbox, Outbound, Peer, PortStats, Sandbox,
-        SandboxError, SandboxId, Seed, SnapshotId, VolumeName, Waitable,
+        ExecOutcome, Exposed, Fault, FaultMode, ImageRef, Launch, Metrics, Microsandbox, Outbound,
+        Peer, PortStats, Sandbox, SandboxError, SandboxId, Seed, SnapshotId, VolumeName, Waitable,
     };
     use tempfile::TempDir;
 
@@ -1010,6 +1010,21 @@ mod live {
             )
         }
 
+        /// As a probe runs: the probe group, the image's user, the env of the service. Gives what
+        /// it wrote on stdout and then on stderr.
+        fn probe(&self, id: &SandboxId, script: &str) -> (ExecOutcome, String) {
+            static NEXT: AtomicU32 = AtomicU32::new(0);
+            let name = format!("probe-{}.out", NEXT.fetch_add(1, Ordering::Relaxed));
+            let stdout = self.out().join(&name);
+            let deadline = Instant::now() + EXIT;
+            let outcome = self
+                .sandbox
+                .exec(id, &argv(&["sh", "-c", script]), deadline, &stdout);
+            let said = [stdout.to_string(), format!("{stdout}.err")]
+                .map(|path| fs::read_to_string(path).unwrap_or_default());
+            (outcome.unwrap(), said.concat())
+        }
+
         fn until_passes(&self, id: &SandboxId, script: &str) {
             let deadline = Instant::now() + EXIT;
             while self.plain(id, script).0 != Some(0) {
@@ -1104,6 +1119,7 @@ mod live {
         logs_and_metrics_until_destroy,
         stop_then_the_rest_work,
         snapshot_seeds_a_volume,
+        restore_takes_its_own_launch,
         restore_refuses_a_missing_bind_and_a_new_volume,
         leftovers_sees_what_was_made,
         pull_of_an_unknown_image_is_not_found,
@@ -1111,6 +1127,8 @@ mod live {
         a_snapshot_outlives_its_vm,
         tree_lands_before_the_command,
         copy_out_brings_the_scratch_folder,
+        create_returns_once_the_command_runs,
+        exec_writes_stdout_and_times_out,
     );
 
     /// Row 88, a stop rule of T-11: without a digest the setup cache key cannot see a new image
@@ -1350,6 +1368,71 @@ const ghost = () => new Promise(ok => { const c = net.connect(1234, 'ghost');
         case.finish(&ids);
     }
 
+    /// busybox `nc`: 0 once it connected, and it closes at once; on stderr why not (a refusal only
+    /// with `-vv`).
+    fn dial(host: &str, port: u16) -> String {
+        format!("nc -zvv -w 5 {host} {port}")
+    }
+
+    /// Row 62, a stop rule of T-11: a probe runs in the probe group as the image's user (root in
+    /// `postgres`, 101 in `nginx-unprivileged`) and reaches only its own guest's loopback, over
+    /// IPv4 and IPv6. A peer by name, an outside address and an IPv6 address beside `::1` refuse
+    /// it at once, while the same dials outside the probe group connect. `fd00::1` on `lo` stands
+    /// for an outside IPv6 address, which a host without an IPv6 route does not give the guest.
+    #[test]
+    fn live_a_probe_reaches_only_loopback_with_the_probe_group_and_the_image_user() {
+        let Some(case) = Case::start() else { return };
+        let peers = [peer("db", 1, &[5432]), peer("web", 1, &[8080])];
+        let mut db = postgres("db", &peers, case.out());
+        db.outbound = Outbound::Public;
+        let mut web = launch("web", NGINX);
+        web.ports = vec![Exposed(8080)];
+        web.peers = peers.to_vec();
+        web.mounts = vec![out(case.out())];
+        let ids = case.create(vec![db, web]);
+        let (db, web) = (&ids[0], &ids[1]);
+        let page = "wget -q -O /dev/null http://127.0.0.1:8080/";
+        case.until_passes(db, PG_READY);
+        case.until_passes(web, page);
+        let (_, global) = case.plain(db, "ip -6 address show scope global");
+        note(&format!("global ipv6 of the guest: {:?}", global.trim()));
+        let added = case.plain(db, "ip -6 address add fd00::1/128 dev lo");
+        assert_eq!(added.0, Some(0), "{}", added.1);
+
+        let sql = "PGPASSWORD=pw psql -h 127.0.0.1 -U postgres -tAc 'select 1'";
+        let read = case.probe(db, sql);
+        assert_eq!(read, (ExecOutcome::Exited(0), "1\n".to_owned()));
+        for (id, local) in [(db, dial("::1", 5432)), (web, page.to_owned())] {
+            let (outcome, said) = case.probe(id, &local);
+            assert_eq!(outcome, ExecOutcome::Exited(0), "`{local}` in {id}: {said}");
+        }
+        let away = [
+            (db, "web", 8080),
+            (db, "1.1.1.1", 80),
+            (db, "fd00::1", 5432),
+            (web, "db", 5432),
+        ];
+        for (id, host, port) in away {
+            let dial = dial(host, port);
+            let (code, said) = case.plain(id, &dial);
+            assert_eq!(
+                code,
+                Some(0),
+                "`{dial}` in {id} outside the probe group: {said}"
+            );
+            let (outcome, said) = case.probe(id, &dial);
+            let refused = said.to_lowercase().contains("refused");
+            assert!(
+                outcome != ExecOutcome::Exited(0) && refused,
+                "`{dial}` in {id} as a probe: {outcome:?} {said}"
+            );
+        }
+        let (_, who) = case.probe(web, "id -u; id -g; id -G");
+        let who: Vec<&str> = who.split_whitespace().collect();
+        assert_eq!(who, ["101", "65533", "65533"], "uid, gid, groups");
+        case.finish(&ids);
+    }
+
     const BURST: &str = r#"
 const net = require('net');
 let started = 0;
@@ -1381,6 +1464,79 @@ Promise.all(Array.from({ length: 32 }, lane));
         let line = target(&metrics, "srv:9090");
         note(&format!("burst of 300, 32 at a time: {line:?}"));
         assert!(line.connections == 300 && line.drops >= 1, "{line:?}");
+        case.finish(&ids);
+    }
+
+    /// Holds a connection to `srv:9090` open; once `/tmp/go` shows (the guest's own file, no
+    /// virtio-fs in the way), dials a new one and logs `next first <ms>` at its first byte, else
+    /// how it ended.
+    const HOLDER: &str = r#"
+const net = require('net'), fs = require('fs');
+const held = net.connect(9090, 'srv');
+held.once('data', () => console.log('held ready'));
+held.on('error', e => console.log('held ' + e.code));
+const dial = () => new Promise(ok => {
+  const c = net.connect(9090, 'srv'), started = Date.now();
+  c.on('data', () => { ok('first ' + (Date.now() - started)); c.destroy(); });
+  c.on('error', e => ok(e.code)); c.on('close', () => ok('closed'));
+});
+(async () => {
+  while (!fs.existsSync('/tmp/go')) await new Promise(r => setTimeout(r, 5));
+  console.log('next ' + await dial());
+  held.destroy();
+})();
+"#;
+
+    /// The T-09 stage 4 question: `fault` writes the switch inside the guest and returns after
+    /// `net` has read it, so a connection the guest opens right after the return sees the fault:
+    /// `down` resets the open connection and the new one, `slow` holds the new one's first byte.
+    #[test]
+    fn live_down_and_slow_reach_the_relay_before_fault_returns() {
+        let Some(case) = Case::start() else { return };
+        case.write("srv.js", SERVER);
+        case.write("holder.js", HOLDER);
+        let peers = [peer("srv", 1, &[8080, 9090]), peer("holder", 1, &[])];
+        let ids = case.create(vec![server(1, &peers, case.out())]);
+        case.until_logged(&ids[0], "ready");
+        let delay = Duration::from_millis(600);
+        for mode in [FaultMode::Down, FaultMode::Slow(delay)] {
+            let mut holder = launch("holder", NODE);
+            holder.command = Some(argv(&["node", "/stand/out/holder.js"]));
+            holder.peers = peers.to_vec();
+            holder.mounts = vec![out(case.out())];
+            let holder = case.create(vec![holder]).remove(0);
+            case.until_logged(&holder, "held ready");
+            let fault = Fault {
+                target: "srv:9090".into(),
+                mode,
+            };
+            let started = Instant::now();
+            let faulted = std::slice::from_ref(&holder);
+            case.sandbox.fault(faulted, &fault).unwrap();
+            let took = started.elapsed();
+            assert_eq!(
+                case.probe(&holder, "touch /tmp/go").0,
+                ExecOutcome::Exited(0)
+            );
+            assert_eq!(wait_exit(case.sandbox, &holder), Some(0));
+            let log = case.log(&holder);
+            let lines: Vec<&str> = log.lines().collect();
+            note(&format!("{mode:?}: fault() took {took:?}, then {lines:?}"));
+            match mode {
+                FaultMode::Down => {
+                    let reset = ["held ECONNRESET", "next ECONNRESET"];
+                    assert!(reset.iter().all(|line| lines.contains(line)), "{lines:?}");
+                }
+                FaultMode::Slow(delay) => {
+                    let first = lines
+                        .iter()
+                        .find_map(|line| line.strip_prefix("next first "));
+                    let first: u128 = first.and_then(|ms| ms.parse().ok()).unwrap_or(0);
+                    assert!(first >= delay.as_millis(), "{lines:?}");
+                }
+            }
+            case.sandbox.destroy(&holder).unwrap();
+        }
         case.finish(&ids);
     }
 

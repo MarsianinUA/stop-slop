@@ -140,12 +140,15 @@ impl Sandbox for Microsandbox {
 
     fn exec(
         &self,
-        _id: &SandboxId,
-        _argv: &[String],
-        _deadline: Instant,
-        _stdout: &Utf8Path,
+        id: &SandboxId,
+        argv: &[String],
+        deadline: Instant,
+        stdout: &Utf8Path,
     ) -> Result<ExecOutcome, SandboxError> {
-        Err(not_built("exec"))
+        let (id, argv, stdout) = (id.clone(), argv.to_vec(), stdout.to_owned());
+        self.block(|inner| async move {
+            process::exec(&*inner.live(&id)?, &argv, deadline, &stdout).await
+        })
     }
 
     fn stop(&self, id: &SandboxId) -> Result<Stopped, SandboxError> {
@@ -153,8 +156,15 @@ impl Sandbox for Microsandbox {
         self.block(|inner| async move { process::stop(&*inner.live(&id)?).await })
     }
 
-    fn fault(&self, _ids: &[SandboxId], _fault: &Fault) -> Result<(), SandboxError> {
-        Err(not_built("fault"))
+    fn fault(&self, ids: &[SandboxId], fault: &Fault) -> Result<(), SandboxError> {
+        let (ids, fault) = (ids.to_vec(), fault.clone());
+        self.block(|inner| async move {
+            let lives: Vec<_> = ids
+                .iter()
+                .map(|id| inner.live(id))
+                .collect::<Result<_, _>>()?;
+            network::fault(&lives, &fault).await
+        })
     }
 
     fn metrics(&self, id: &SandboxId) -> Result<Metrics, SandboxError> {
@@ -627,10 +637,6 @@ async fn lay_out(vm: &msb::Sandbox, launch: &Launch) -> Result<(), SandboxError>
         volumes::seed_tree(vm, tar, at, owner).await?;
     }
     Ok(())
-}
-
-fn not_built(what: &str) -> SandboxError {
-    backend(format!("{what}: not built yet"))
 }
 
 fn sample(vm: msb::Sandbox, peak: Arc<AtomicU64>) -> tokio::task::AbortHandle {

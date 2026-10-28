@@ -1,5 +1,5 @@
-//! The service under `stand-guest run`, its `stop`, healthcheck attempts, `Scratch` folders and
-//! `copy_out`.
+//! The service under `stand-guest run`, its `stop`, probes under `stand-guest exec`, healthcheck
+//! attempts, `Scratch` folders and `copy_out`.
 //!
 //! A VM gets no env of its own, fresh or restored (a snapshot carries none, plan row 87): the env,
 //! the workdir and the command of the `Launch` go into the exec of the service, and the same env
@@ -9,14 +9,14 @@ use std::io;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
-use ::guest::{Command, RunArgs, RunStatus, StopArgs, StopReport};
+use ::guest::{Command, ExecArgs, ExecEnd, ExecStatus, RunArgs, RunStatus, StopArgs, StopReport};
 use ::microsandbox as msb;
-use camino::{Utf8Path, Utf8PathBuf};
+use camino::{Utf8Component, Utf8Path, Utf8PathBuf};
 use msb::jobs::{Job, JobInfo, JobLogOptions, JobState};
 use msb::sandbox::{ExecOptionsBuilder, FsSetAttrs};
 
 use super::{GUEST_CALL, Live, POLL, backend, guest, within};
-use crate::{Launch, SandboxError, Stopped};
+use crate::{ExecOutcome, Launch, Mount, SandboxError, Stopped};
 
 /// Where `run` keeps its status file: the service's user writes it, so it is a bind of its own and
 /// `/stand/net`, which root writes, stays out of that user's reach.
@@ -40,6 +40,8 @@ fn status_in_guest() -> PathBuf {
 /// From the image's config; a `Launch` field, when set, wins.
 #[derive(Debug, Clone)]
 pub(super) struct ImageDefaults {
+    /// `USER` as the image writes it; empty is root.
+    pub user: String,
     pub workdir: Option<String>,
     pub entrypoint: Vec<String>,
     pub cmd: Vec<String>,
@@ -51,6 +53,10 @@ pub(super) async fn image_defaults(launch: &Launch) -> Result<ImageDefaults, San
         .map_err(backend)?;
     let config = detail.config;
     Ok(ImageDefaults {
+        user: config
+            .as_ref()
+            .and_then(|c| c.user.clone())
+            .unwrap_or_default(),
         workdir: config
             .as_ref()
             .and_then(|c| c.working_dir.clone())
@@ -184,6 +190,80 @@ pub(super) async fn stop(live: &Live) -> Result<Stopped, SandboxError> {
         after: Duration::from_millis(report.after_ms),
         killed: report.killed,
     })
+}
+
+/// A probe or `inspect`: root starts `stand-guest exec`, which drops to the probe group and the
+/// image's user, with the VM's env and workdir. Its outputs reach the host through the VM's bind
+/// that holds `stdout`; `<stdout>.status` says how the command ended and goes once read.
+pub(super) async fn exec(
+    live: &Live,
+    argv: &[String],
+    deadline: Instant,
+    stdout: &Utf8Path,
+) -> Result<ExecOutcome, SandboxError> {
+    let left = deadline.saturating_duration_since(Instant::now());
+    let args = Command::Exec(ExecArgs {
+        out: PathBuf::from(guest_path(&live.launch.mounts, stdout)?),
+        deadline: left,
+        user: live.image.user.clone(),
+        argv: argv.to_vec(),
+    })
+    .to_args();
+    let call = live.vm.exec_with(guest::BIN, |options| {
+        let options = options.args(args).user("root").timeout(left + MARGIN);
+        with_env(options, &live.launch, &live.image)
+    });
+    let output = within(left + MARGIN + MARGIN, "run a probe", call)
+        .await?
+        .map_err(backend)?;
+    if output.status().code != 0 {
+        return Err(guest_failed("stand-guest exec", &output));
+    }
+    let path = Utf8PathBuf::from(format!("{stdout}.status"));
+    let read = std::fs::read_to_string(&path);
+    let _ = std::fs::remove_file(&path);
+    let text = read.map_err(|error| guest_error(format!("{path}: {error}")))?;
+    let status =
+        ExecStatus::parse(&text).map_err(|error| guest_error(format!("{path}: {error}")))?;
+    Ok(match (status.timed_out, status.end) {
+        (true, _) => ExecOutcome::TimedOut,
+        (false, ExecEnd::Code(code)) => ExecOutcome::Exited(code),
+        (false, ExecEnd::Signal(signal)) => ExecOutcome::Exited(128 + signal),
+    })
+}
+
+/// `stdout` in the guest: under the guest path of the writable bind whose host folder holds it,
+/// the deepest one when they nest.
+fn guest_path(mounts: &[Mount], stdout: &Utf8Path) -> Result<String, SandboxError> {
+    let under = mounts.iter().filter_map(|mount| match mount {
+        Mount::Bind {
+            host,
+            guest,
+            read_only: false,
+        } => {
+            let rest = stdout.strip_prefix(host).ok()?;
+            let parts: Option<Vec<&str>> = rest
+                .components()
+                .map(|part| match part {
+                    Utf8Component::Normal(name) => Some(name),
+                    _ => None,
+                })
+                .collect();
+            let parts = parts.filter(|parts| !parts.is_empty())?;
+            Some((host.as_str().len(), guest, parts))
+        }
+        _ => None,
+    });
+    let (_, guest, parts) = under.max_by_key(|(depth, ..)| *depth).ok_or_else(|| {
+        guest_error(format!(
+            "{stdout} is not a file under a writable bind of the VM"
+        ))
+    })?;
+    Ok(format!(
+        "{}/{}",
+        guest.trim_end_matches('/'),
+        parts.join("/")
+    ))
 }
 
 /// uid and gid.
@@ -390,6 +470,31 @@ mod tests {
     }
 
     #[test]
+    fn a_probe_output_maps_through_the_deepest_writable_bind() {
+        let bind = |host: &str, guest: &str, read_only| Mount::Bind {
+            host: host.into(),
+            guest: guest.into(),
+            read_only,
+        };
+        let mounts = [
+            bind("/run/1", "/stand/out", false),
+            bind("/run/1/inspect", "/stand/inspect", false),
+            bind("/run/1/preload", "/stand/preload", true),
+        ];
+        let mapped = |stdout: &str| guest_path(&mounts, Utf8Path::new(stdout));
+        let deep = mapped("/run/1/inspect/db/1.out").unwrap();
+        assert_eq!(deep, "/stand/inspect/db/1.out");
+        let shallow = mapped("/run/1/preload/p.out").unwrap();
+        assert_eq!(shallow, "/stand/out/preload/p.out");
+        for outside in ["/run/2/p.out", "/run/1", "/run/1/../2/p.out"] {
+            assert!(
+                matches!(mapped(outside), Err(SandboxError::Guest { .. })),
+                "{outside}"
+            );
+        }
+    }
+
+    #[test]
     fn id_gives_the_uid_and_gid_of_gnu_and_busybox() {
         let gnu = "uid=1000(node) gid=1000(node) groups=1000(node)\n";
         assert_eq!(parse_id(gnu), Some(Owner(1000, 1000)));
@@ -401,6 +506,7 @@ mod tests {
     #[test]
     fn a_new_entrypoint_drops_the_cmd_of_the_image_as_compose_does() {
         let image = ImageDefaults {
+            user: String::new(),
             workdir: None,
             entrypoint: vec!["docker-entrypoint.sh".into()],
             cmd: vec!["postgres".into()],
