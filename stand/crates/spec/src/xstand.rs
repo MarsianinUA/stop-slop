@@ -100,7 +100,8 @@ pub(crate) fn probes(
         let at = at_field.parse(tap)?;
         if at == Tap::AfterSetup && !in_setup.contains(&service) {
             return Err(at_field.invalid(format!(
-                "`{}` does not run in setup, where `after-setup` probes: no setup service waits for it",
+                "`{}` does not run in setup, where `after-setup` probes: no setup service waits \
+                 for it",
                 service.as_str()
             )));
         }

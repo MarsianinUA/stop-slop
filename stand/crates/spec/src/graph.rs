@@ -195,7 +195,7 @@ fn prepare(
                 .at("image")
                 .invalid(format!(
                     "`{}` is not `{image}` of the prepare service `{}`: every `${{STAND_REPO}}` \
-                 service starts from its snapshot, which keeps the image",
+                     service starts from its snapshot, which keeps the image",
                     service.image,
                     prepare.as_str()
                 )));

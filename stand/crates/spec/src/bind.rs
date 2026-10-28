@@ -127,18 +127,13 @@ pub(crate) fn required<'a>(field: &Field<'a>, key: &str, why: &str) -> Result<Fi
         .ok_or_else(|| field.at(key).invalid(format!("required: {why}")))
 }
 
+/// The names of the top-level `volumes`, whose values `allow` keeps empty.
 fn volumes(field: &Field) -> Result<BTreeSet<String>, Invalid> {
-    field
+    Ok(field
         .entries()?
         .into_iter()
-        .map(|(name, value)| {
-            if value.is_null() || value.is_map() {
-                Ok(name.to_owned())
-            } else {
-                Err(value.invalid("a volume takes no keys: write `pgdata: {}`"))
-            }
-        })
-        .collect()
+        .map(|(name, _)| name.to_owned())
+        .collect())
 }
 
 fn service(field: &Field, dir: &Utf8Path, volumes: &BTreeSet<String>) -> Result<Service, Invalid> {
@@ -467,9 +462,6 @@ fn depends_on(field: &Field) -> Result<BTreeMap<ServiceName, Condition>, Invalid
     }
     let mut depends_on = BTreeMap::new();
     for (name, value) in field.entries()? {
-        if !value.is_map() && !value.is_null() {
-            return Err(value.invalid("write `condition: <condition>`"));
-        }
         let condition = optional(&value, "condition", |field| field.parse(condition))?;
         depends_on.insert(
             ServiceName(name.to_owned()),

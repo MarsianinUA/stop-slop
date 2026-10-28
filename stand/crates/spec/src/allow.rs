@@ -4,7 +4,8 @@
 use crate::Invalid;
 use crate::tree::Field;
 
-/// What a position of the file takes. `allow` looks only at keys: the type of a value is `bind`'s.
+/// What a position of the file takes. `allow` looks at keys, and at the type only where keys are
+/// fixed: the rest is `bind`'s.
 enum Shape {
     /// A mapping of these keys; with `extensions` also of `x-*` keys, which nothing reads.
     Keys {
@@ -160,7 +161,11 @@ const REFUSED: [(&str, &str); 3] = [
     ),
 ];
 
+/// A document that is not a mapping has no services, which `bind` reports.
 pub(crate) fn check(root: &Field) -> Result<(), Invalid> {
+    if !root.is_map() {
+        return Ok(());
+    }
     walk(root, &ROOT)
 }
 
@@ -173,7 +178,7 @@ fn walk(field: &Field, shape: &Shape) -> Result<(), Invalid> {
             }
             Ok(())
         }
-        Keys { keys, extensions } if field.is_map() => {
+        Keys { keys, extensions } => {
             for (key, value) in field.entries()? {
                 match keys.iter().find(|(name, _)| *name == key) {
                     Some((_, inner)) => walk(&value, inner)?,
@@ -189,7 +194,7 @@ fn walk(field: &Field, shape: &Shape) -> Result<(), Invalid> {
             }
             Ok(())
         }
-        Names(_) | Items(_) | Keys { .. } => Ok(()),
+        Names(_) | Items(_) => Ok(()),
     }
 }
 

@@ -289,13 +289,13 @@ fn values_take_the_forms_of_compose() {
         worker.command.as_deref(),
         Some(&["worker.js".to_owned()][..])
     );
-    // A boolean reads as Compose writes it, a number as YAML gives it back, `$$` as `$`.
+    // A boolean reads as Compose writes it, a number as written, `$$` as `$`.
     assert_eq!(
         worker.environment,
         BTreeMap::from([
             ("DEBUG".to_owned(), "true".to_owned()),
             ("PRICE".to_owned(), "$5".to_owned()),
-            ("RATIO".to_owned(), "0.5".to_owned()),
+            ("RATIO".to_owned(), "0.50".to_owned()),
         ])
     );
     let health = worker.healthcheck.as_ref().unwrap();
@@ -407,6 +407,12 @@ fn the_allowlist_refuses_keys_the_stand_does_not_read() {
             "top level or in a service",
         ),
         ("syntax", "yaml", 5, ""),
+        (
+            "wrong-type",
+            "services.load.healthcheck",
+            4,
+            "expected a mapping, found `curl",
+        ),
     ]);
     stand("extension");
 }
@@ -666,6 +672,24 @@ fn expect_reads_changes_without_quotes_and_holds_them_to_the_policy() {
     );
 
     assert_refused(&[
+        (
+            "cost-wording",
+            "x-stand.expect.cost[0].change",
+            9,
+            "`up to +10%`: no sign",
+        ),
+        (
+            "cost-no-sign",
+            "x-stand.expect.cost[0].change",
+            9,
+            "`10%`: no sign",
+        ),
+        (
+            "cost-no-percent",
+            "x-stand.expect.cost[0].change",
+            9,
+            "`+10`: no `%`",
+        ),
         (
             "cost-below-5",
             "x-stand.expect.cost[0].change",

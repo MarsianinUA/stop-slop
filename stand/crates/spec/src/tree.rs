@@ -1,6 +1,6 @@
 //! The YAML of the stand file as a tree that keeps the line of every key: `saphyr` stays here.
 
-use saphyr::{LoadableYamlNode, MarkedYaml, Scalar, YamlData};
+use saphyr::{LoadableYamlNode, MarkedYaml, Marker, Scalar, YamlData};
 
 use crate::{Invalid, TREE};
 
@@ -21,7 +21,7 @@ pub(crate) struct Node {
 enum Value {
     Null,
     Bool(bool),
-    /// A string, or a number as `saphyr` gives it back: `0.50` is `0.5`, `0x10` is `16`.
+    /// A string, or a number as written: `+10`, `0.50`, `0x10`.
     Text(String),
     List(Vec<Node>),
     Map(Vec<Entry>),
@@ -38,19 +38,20 @@ struct Entry {
 /// The one document of `text`; an empty text is a null document.
 pub(crate) fn parse(text: &str) -> Result<Node, Invalid> {
     let mut documents = MarkedYaml::load_from_str(text).map_err(|error| Invalid {
-        line: line(error.marker().line()),
+        line: line(error.marker()),
         key: YAML.to_owned(),
         message: error.info().to_owned(),
     })?;
     if let Some(second) = documents.get(1) {
         return Err(Invalid {
-            line: line(second.span.start.line()),
+            line: line(&second.span.start),
             key: YAML.to_owned(),
             message: "a second document: the stand file is one".to_owned(),
         });
     }
+    let source = Source::new(text);
     match documents.pop() {
-        Some(document) => node(document),
+        Some(document) => node(document, &source),
         None => Ok(Node {
             line: 1,
             value: Value::Null,
@@ -58,20 +59,52 @@ pub(crate) fn parse(text: &str) -> Result<Node, Invalid> {
     }
 }
 
-fn node(yaml: MarkedYaml) -> Result<Node, Invalid> {
-    let line = line(yaml.span.start.line());
+/// The text `saphyr` read, which marks positions in chars.
+struct Source<'t> {
+    text: &'t str,
+    /// The byte offset of every char, and the end.
+    offsets: Vec<usize>,
+}
+
+impl<'t> Source<'t> {
+    fn new(text: &'t str) -> Source<'t> {
+        let offsets = text.char_indices().map(|(at, _)| at).chain([text.len()]);
+        Source {
+            text,
+            offsets: offsets.collect(),
+        }
+    }
+
+    fn between(&self, start: &Marker, end: &Marker) -> Option<String> {
+        let start = *self.offsets.get(start.index())?;
+        let end = *self.offsets.get(end.index())?;
+        self.text.get(start..end).map(str::to_owned)
+    }
+}
+
+fn node(yaml: MarkedYaml, source: &Source) -> Result<Node, Invalid> {
+    let span = yaml.span;
+    let line = line(&span.start);
+    // YAML gives back `+10` as `10` and `0.50` as `0.5`.
+    let number = |read: String| source.between(&span.start, &span.end).unwrap_or(read);
     let value = match yaml.data {
         YamlData::Value(Scalar::Null) => Value::Null,
         YamlData::Value(Scalar::Boolean(value)) => Value::Bool(value),
-        YamlData::Value(Scalar::Integer(value)) => Value::Text(value.to_string()),
-        YamlData::Value(Scalar::FloatingPoint(value)) => Value::Text(value.0.to_string()),
-        YamlData::Value(Scalar::String(value)) => Value::Text(value.into_owned()),
-        YamlData::Sequence(items) => {
-            Value::List(items.into_iter().map(node).collect::<Result<_, _>>()?)
-        }
-        YamlData::Mapping(entries) => {
-            Value::Map(entries.into_iter().map(entry).collect::<Result<_, _>>()?)
-        }
+        YamlData::Value(Scalar::Integer(read)) => Value::Text(number(read.to_string())),
+        YamlData::Value(Scalar::FloatingPoint(read)) => Value::Text(number(read.0.to_string())),
+        YamlData::Value(Scalar::String(text)) => Value::Text(text.into_owned()),
+        YamlData::Sequence(items) => Value::List(
+            items
+                .into_iter()
+                .map(|item| node(item, source))
+                .collect::<Result<_, _>>()?,
+        ),
+        YamlData::Mapping(entries) => Value::Map(
+            entries
+                .into_iter()
+                .map(|pair| entry(pair, source))
+                .collect::<Result<_, _>>()?,
+        ),
         YamlData::Tagged(tag, _) => Value::Tagged(tag.to_string()),
         // `load_from_str` resolves scalars and aliases, so these are values it could not read.
         YamlData::Representation(..) | YamlData::Alias(_) | YamlData::BadValue => {
@@ -85,12 +118,14 @@ fn node(yaml: MarkedYaml) -> Result<Node, Invalid> {
     Ok(Node { line, value })
 }
 
-fn entry((key, value): (MarkedYaml, MarkedYaml)) -> Result<Entry, Invalid> {
-    let line = line(key.span.start.line());
-    let key = match key.data {
+fn entry((key, value): (MarkedYaml, MarkedYaml), source: &Source) -> Result<Entry, Invalid> {
+    let span = key.span;
+    let line = line(&span.start);
+    let number = |read: String| source.between(&span.start, &span.end).unwrap_or(read);
+    let text = match key.data {
         YamlData::Value(Scalar::String(text)) => text.into_owned(),
-        YamlData::Value(Scalar::Integer(number)) => number.to_string(),
-        YamlData::Value(Scalar::FloatingPoint(number)) => number.0.to_string(),
+        YamlData::Value(Scalar::Integer(read)) => number(read.to_string()),
+        YamlData::Value(Scalar::FloatingPoint(read)) => number(read.0.to_string()),
         YamlData::Value(Scalar::Boolean(value)) => value.to_string(),
         _ => {
             return Err(Invalid {
@@ -101,14 +136,14 @@ fn entry((key, value): (MarkedYaml, MarkedYaml)) -> Result<Entry, Invalid> {
         }
     };
     Ok(Entry {
-        key,
+        key: text,
         line,
-        value: node(value)?,
+        value: node(value, source)?,
     })
 }
 
-fn line(line: usize) -> u32 {
-    u32::try_from(line).unwrap_or(u32::MAX)
+fn line(marker: &Marker) -> u32 {
+    u32::try_from(marker.line()).unwrap_or(u32::MAX)
 }
 
 /// `$$` is `$`. Any other `$` starts a substitution, and the stand makes none: there is no host
@@ -131,7 +166,6 @@ pub(crate) fn interpolate(text: &str) -> Result<String, String> {
 }
 
 /// A node with its key path and the line to report it at.
-#[derive(Clone)]
 pub(crate) struct Field<'a> {
     node: &'a Node,
     /// Such as `services.api.volumes[0]`; empty for the document.
