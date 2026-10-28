@@ -33,11 +33,14 @@ impl Seeds {
 
 /// What differs between the phases of a version.
 pub(crate) struct Frame<'a> {
-    /// The host folder of `/stand/out` for the workload and every service with a probe.
+    /// The host folder of `/stand/out` for the workload.
     pub(crate) out: &'a Utf8Path,
+    /// The host folder of `/stand/out` for every service with a probe: `out`, but in the second
+    /// pass the folder of the repeat, which holds the `out-<n>/` of each pass for its probes.
+    pub(crate) probed: &'a Utf8Path,
     pub(crate) tar: &'a Utf8Path,
     pub(crate) seeds: &'a Seeds,
-    /// `None` in setup and in the fault repeats: no measure reads a profile of them.
+    /// `None` in setup, the fault repeats and the second pass: no measure reads a profile of them.
     pub(crate) mode: Option<ProfileMode>,
     /// The host folder of `/stand/preload`.
     pub(crate) preload: &'a Utf8Path,
@@ -114,9 +117,14 @@ pub(crate) fn of(stand: &Stand, name: &ServiceName, replica: u32, frame: &Frame)
             }),
         }
     }
-    if service.kind == ServiceKind::Workload || probed(stand, name) {
+    let out = match service.kind {
+        ServiceKind::Workload => Some(frame.out),
+        _ if probed(stand, name) => Some(frame.probed),
+        _ => None,
+    };
+    if let Some(out) = out {
         mounts.push(Mount::Bind {
-            host: frame.out.to_owned(),
+            host: out.to_owned(),
             guest: OUT.to_owned(),
             read_only: false,
         });

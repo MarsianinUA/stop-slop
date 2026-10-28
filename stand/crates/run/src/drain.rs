@@ -146,6 +146,21 @@ pub(crate) fn drain(
     Ok(())
 }
 
+/// One member out of `fleet` before its phase ends: its logs into `log`, then `destroy`.
+pub(crate) fn release(
+    sandbox: &impl Sandbox,
+    fleet: &mut Fleet,
+    index: usize,
+    log: &Utf8Path,
+) -> Result<(), StandFault> {
+    let id = &fleet.members[index].id;
+    let bytes = sandbox.logs(id).map_err(StandFault::Sandbox)?;
+    fs::write(log, bytes).map_err(StandFault::io(log))?;
+    sandbox.destroy(id).map_err(StandFault::Sandbox)?;
+    fleet.members.remove(index);
+    Ok(())
+}
+
 /// After a stand fault or `Cancel`: the logs it can still read, then `destroy` of every member;
 /// errors are dropped, the first one already ends the run.
 pub(crate) fn teardown(sandbox: &impl Sandbox, fleet: &mut Fleet, dir: &Utf8Path) {

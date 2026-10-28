@@ -13,10 +13,11 @@ use std::time::{Duration, Instant};
 use camino::{Utf8Path, Utf8PathBuf};
 use profile::{Called, Coverage, ProfileMode};
 use report::{
-    BeforeOutcome, Cause, CoverageOutcome, Extra, Failure, FaultOutcome, InstanceOutput, Phase,
-    ProbeRan, ProbeRule, Raw, RepeatOutput, Role, Setup, SetupSide,
+    BeforeOutcome, Cause, CoverageOutcome, Extra, Failure, FaultOutcome, InstanceOutput, Pass,
+    PassPair, Phase, ProbeRan, ProbeRule, Raw, RepeatOutput, Role, SecondPassOutcome, Setup,
+    SetupSide,
 };
-use sandbox::{Fault, Sandbox, SnapshotId};
+use sandbox::{Fault, Metrics, PortStats, Sandbox, SnapshotId};
 use spec::{Condition, ServiceKind, ServiceName, Stand, Tap};
 
 use crate::keep::{self, Kept};
@@ -215,6 +216,7 @@ fn raw(
         }),
         coverage: outside.coverage,
         fault: outside.fault,
+        second_pass: outside.second_pass,
     }
 }
 
@@ -223,14 +225,15 @@ fn raw(
 struct Outside {
     coverage: Option<CoverageOutcome>,
     fault: Option<FaultOutcome>,
+    second_pass: Option<SecondPassOutcome>,
 }
 
 /// A version whose lane passed its measured repeats, and what they start from.
 type Passed<'a> = (&'a Version, &'a Seeds);
 
 /// After the measured repeats of a head that passed them, each repeat outside the stats that
-/// `extras` names and the stand asks for: the coverage repeat of the head, then the fault repeats.
-/// `before` takes part only when its lane passed too.
+/// `extras` names and the stand asks for: the coverage repeat of the head, the fault repeats, the
+/// second pass of each version, "before" first. `before` takes part only when its lane passed too.
 fn outside<S: Sandbox>(
     ctx: &mut Ctx<S>,
     head: Passed,
@@ -248,7 +251,29 @@ fn outside<S: Sandbox>(
         }
         _ => None,
     };
-    Ok(Outside { coverage, fault })
+    let second_pass = match &stand.second_pass {
+        Some(pass) if ctx.extras.contains(&Extra::SecondPass) => {
+            let before = match before {
+                Some((version, seeds)) => Some(second_pass(ctx, Side::Before, version, seeds)?),
+                None => None,
+            };
+            Some(SecondPassOutcome {
+                unchanged: pass
+                    .unchanged
+                    .iter()
+                    .map(|file| file.file.clone())
+                    .collect(),
+                head: second_pass(ctx, Side::Head, head.0, head.1)?,
+                before,
+            })
+        }
+        _ => None,
+    };
+    Ok(Outside {
+        coverage,
+        fault,
+        second_pass,
+    })
 }
 
 /// From the cache entry on a hit; else setup as without a cache, and its entry once it passed.
@@ -359,6 +384,7 @@ fn start_setup<S: Sandbox>(
         version_snapshot(ctx, fleet, seeds)?;
         let frame = Frame {
             out,
+            probed: out,
             tar: &version.tar,
             seeds,
             mode: None,
@@ -574,6 +600,7 @@ fn run_repeat<S: Sandbox>(
     let deadline = ctx.sandbox.now() + timeout;
     let frame = Frame {
         out: &out,
+        probed: &out,
         tar: &version.tar,
         seeds,
         mode,
@@ -594,18 +621,7 @@ fn run_repeat<S: Sandbox>(
         Some(_) => Phase::Workload,
         None => Phase::Ready,
     };
-    let (ended, failing) = match ran {
-        Ok((Some(0), at)) => (at, None),
-        Ok((code, at)) => {
-            let workload = Some(stand.workload.as_str().to_owned());
-            (at, Some((workload, code.map_or(Cause::Died, Cause::Exit))))
-        }
-        Err(halt) => {
-            let fell = fell(&fleet, halt, Cause::Timeout, phase)
-                .map_err(|stop| torn(ctx.sandbox, &mut fleet, &dir, stop))?;
-            (ctx.sandbox.now(), Some(fell))
-        }
-    };
+    let (ended, failing) = workload_outcome(ctx.sandbox, stand, &mut fleet, ran, phase, &dir)?;
     let wall = started.map_or(Duration::ZERO, |started| {
         ended.saturating_duration_since(started)
     });
@@ -626,14 +642,7 @@ fn run_repeat<S: Sandbox>(
     let Ended {
         instances, probes, ..
     } = ended;
-    let failure = failing.map(|(service, cause)| Failure {
-        phase,
-        service,
-        repeat,
-        cause,
-        logs: Some(dir.clone()),
-        probes: probes.iter().map(|probe| probe.out.clone()).collect(),
-    });
+    let failure = failing.map(|failing| failure(failing, phase, repeat, &dir, &probes));
     let output = RepeatOutput {
         // 0 only in the coverage repeat, whose output never leaves `run`.
         repeat: repeat.unwrap_or_default(),
@@ -684,6 +693,181 @@ fn start_repeat<S: Sandbox>(
         }
     }
     Ok(())
+}
+
+/// The service and the cause of a failed repeat.
+type Failing = (Option<String>, Cause);
+
+/// When the wait for the workload ended, and what failed if anything did; `Err` when the run
+/// itself stops instead, its members torn down.
+fn workload_outcome(
+    sandbox: &impl Sandbox,
+    stand: &Stand,
+    fleet: &mut Fleet,
+    ran: Result<(Option<i32>, Instant), Halt>,
+    phase: Phase,
+    dir: &Utf8Path,
+) -> Result<(Instant, Option<Failing>), Stop> {
+    Ok(match ran {
+        Ok((Some(0), at)) => (at, None),
+        Ok((code, at)) => {
+            let workload = Some(stand.workload.as_str().to_owned());
+            (at, Some((workload, code.map_or(Cause::Died, Cause::Exit))))
+        }
+        Err(halt) => {
+            let fell = fell(fleet, halt, Cause::Timeout, phase)
+                .map_err(|stop| torn(sandbox, fleet, dir, stop))?;
+            (sandbox.now(), Some(fell))
+        }
+    })
+}
+
+fn failure(
+    (service, cause): Failing,
+    phase: Phase,
+    repeat: Option<u32>,
+    dir: &Utf8Path,
+    probes: &[ProbeRan],
+) -> Failure {
+    Failure {
+        phase,
+        service,
+        repeat,
+        cause,
+        logs: Some(dir.to_owned()),
+        probes: probes.iter().map(|probe| probe.out.clone()).collect(),
+    }
+}
+
+/// How far a second pass got.
+enum Reached {
+    /// The first pass failed.
+    First(Failing),
+    /// The second pass ran after the first passed, and failed or not.
+    Second(Pass, Option<Failing>),
+}
+
+/// The workload twice on one state (architecture plan, «Тома, снимки и деревья», step 6): a
+/// repeat as a measured one, without profiler and kept snapshot, under `timeout` x 2. After the
+/// first pass the cut, its probes into `out-1/` and the end of the first workload VM; then the
+/// workload again in a fresh VM on `out-2/`, beside the same volumes and long-running services,
+/// no restore. A failure in either pass ends the repeat as a failed measured one does; it is a
+/// fact, never a failure of the run.
+fn second_pass<S: Sandbox>(
+    ctx: &mut Ctx<S>,
+    side: Side,
+    version: &Version,
+    seeds: &Seeds,
+) -> Result<PassPair, Stop> {
+    if ctx.cancel.is_cancelled() {
+        return Err(Stop::Cancelled(Phase::Ready));
+    }
+    let (stand, sandbox) = (ctx.stand, ctx.sandbox);
+    let dir = ctx.run_dir.join(format!("pass2-{side}"));
+    // Both before any VM: a probed service writes into them through its bind of `dir`, and a
+    // guest may not see a folder the host makes later.
+    let outs = [dir.join("out-1"), dir.join("out-2")];
+    for out in &outs {
+        fs::create_dir_all(out)
+            .map_err(StandFault::io(out))
+            .map_err(|fault| Stop::Fault(Phase::Ready, fault))?;
+    }
+    let mut fleet = Fleet::default();
+    let deadline = sandbox.now() + stand.timeout.get() * 2;
+    let frame = |out| Frame {
+        out,
+        probed: &dir,
+        tar: &version.tar,
+        seeds,
+        mode: None,
+        preload: &ctx.preload,
+        span: ctx.span,
+    };
+    let mut started = None;
+    let ran = start_repeat(
+        ctx,
+        &mut fleet,
+        &frame(&outs[0]),
+        None,
+        deadline,
+        &mut started,
+    )
+    .and_then(|()| fleet.finished(sandbox, deadline, ctx.cancel));
+    let phase = match started {
+        Some(_) => Phase::Workload,
+        None => Phase::Ready,
+    };
+    let reached = match workload_outcome(sandbox, stand, &mut fleet, ran, phase, &dir)?.1 {
+        Some(failing) => Reached::First(failing),
+        None => {
+            let first = between_passes(ctx, &mut fleet, &dir, &outs[0])
+                .map_err(|fault| torn(sandbox, &mut fleet, &dir, Stop::Fault(phase, fault)))?;
+            let again = launch::starts(stand, &[&stand.workload], &frame(&outs[1]));
+            let ran = fleet
+                .start(sandbox, again)
+                .and_then(|_| fleet.finished(sandbox, deadline, ctx.cancel));
+            let (_, failing) = workload_outcome(sandbox, stand, &mut fleet, ran, phase, &dir)?;
+            Reached::Second(first, failing)
+        }
+    };
+    let (tap, out) = match &reached {
+        Reached::First(_) => (Tap::OnFailure, &outs[0]),
+        Reached::Second(_, Some(_)) => (Tap::OnFailure, &outs[1]),
+        Reached::Second(_, None) => (Tap::AfterWorkload, &outs[1]),
+    };
+    let ended = end_phase(ctx, &mut fleet, Some(tap), None, &dir, out)
+        .map_err(|fault| torn(sandbox, &mut fleet, &dir, Stop::Fault(phase, fault)))?;
+    let Ended {
+        instances, probes, ..
+    } = ended;
+    Ok(match reached {
+        Reached::First(failing) | Reached::Second(_, Some(failing)) => {
+            PassPair::Failed(failure(failing, phase, None, &dir, &probes))
+        }
+        Reached::Second(first, None) => PassPair::Passed {
+            first,
+            second: Pass {
+                out_dir: out.to_owned(),
+                probes,
+                ports: ports(instances.iter().map(|instance| &instance.metrics)),
+            },
+        },
+    })
+}
+
+/// After the first pass: the cut, its `after-workload` probes into `out`, then the first workload
+/// VM drained and destroyed before the second one starts, since the adapter keeps one host port
+/// per (service, replica, port). Its log is `<workload>-1.pass-1.log` in `dir`.
+fn between_passes<S: Sandbox>(
+    ctx: &Ctx<S>,
+    fleet: &mut Fleet,
+    dir: &Utf8Path,
+    out: &Utf8Path,
+) -> Result<Pass, StandFault> {
+    let sandbox = ctx.sandbox;
+    let cut = drain::cut(sandbox, fleet).map_err(StandFault::Sandbox)?;
+    let tap = Tap::AfterWorkload;
+    let probes = probes::run(sandbox, ctx.stand, fleet, tap, out).map_err(StandFault::Sandbox)?;
+    let mut members = fleet.members.iter();
+    let index = members
+        .position(|member| member.kind == ServiceKind::Workload)
+        .expect("the first pass started its workload");
+    let workload = &fleet.members[index].launch;
+    let log = dir.join(format!(
+        "{}-{}.pass-1.log",
+        workload.service, workload.replica
+    ));
+    drain::release(sandbox, fleet, index, &log)?;
+    Ok(Pass {
+        out_dir: out.to_owned(),
+        probes,
+        ports: ports(cut.iter().map(|cut| &cut.metrics)),
+    })
+}
+
+fn ports<'m>(metrics: impl Iterator<Item = &'m Metrics>) -> Vec<PortStats> {
+    let ports = metrics.flat_map(|metrics| metrics.ports.iter().cloned());
+    ports.collect()
 }
 
 struct Ended {

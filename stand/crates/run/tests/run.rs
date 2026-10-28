@@ -9,8 +9,8 @@ use std::time::{Duration, Instant};
 use camino::{Utf8Path, Utf8PathBuf};
 use profile::ProfileError;
 use report::{
-    BeforeOutcome, Cause, CoverageOutcome, Extra, Failure, Phase, ProbeRan, ProfileOutcome, Raw,
-    Role,
+    BeforeOutcome, Cause, CoverageOutcome, Extra, Failure, PassPair, Phase, ProbeRan,
+    ProfileOutcome, Raw, Role,
 };
 use run::{Cancel, InspectError, RunError, SetupCache, Side, StandFault, Version, Versions};
 use sandbox::{
@@ -3244,12 +3244,16 @@ fn the_set_of_extras_runs_only_what_it_names_and_the_stand_asks_for() {
         "fault-2-before",
         "fault-2-head",
     ];
-    let every = ["coverage", faults[0], faults[1], faults[2], faults[3]];
-    let sets: [(&[Extra], &[&str]); 5] = [
+    // The workload starts twice in each second pass.
+    let passes = ["pass2-before", "pass2-before", "pass2-head", "pass2-head"];
+    let both = [faults.as_slice(), &passes].concat();
+    let every = [&["coverage"][..], &both].concat();
+    let sets: [(&[Extra], &[&str]); 6] = [
         (&[], &[]),
         (&[Extra::Coverage], &["coverage"]),
         (&[Extra::Fault], &faults),
-        (&[Extra::Fault, Extra::SecondPass], &faults),
+        (&[Extra::SecondPass], &passes),
+        (&[Extra::Fault, Extra::SecondPass], &both),
         (&[Extra::Coverage, Extra::Fault, Extra::SecondPass], &every),
     ];
     for (set, folders) in sets {
@@ -3261,6 +3265,7 @@ fn the_set_of_extras_runs_only_what_it_names_and_the_stand_asks_for() {
         assert_eq!(outside_folders(&case, &journal), folders, "{set:?}");
         assert_eq!(raw.coverage.is_some(), set.contains(&Extra::Coverage));
         assert_eq!(raw.fault.is_some(), set.contains(&Extra::Fault));
+        assert_eq!(raw.second_pass.is_some(), set.contains(&Extra::SecondPass));
         assert!(matches!(&raw.before, Some(BeforeOutcome::Passed(before)) if before.len() == 3));
         assert_eq!(raw.head.len(), 3);
         // `span` is of the stand: the same for every set, the repeats it does not run included.
@@ -3274,7 +3279,7 @@ fn the_set_of_extras_runs_only_what_it_names_and_the_stand_asks_for() {
     let case = Case::new(&EXAMPLE.replace("    x-stand: { profile: node }\n", ""));
     let fake = fake(example_rules());
     let raw = case.run(&fake, &case.versions(true)).unwrap();
-    assert!(raw.coverage.is_none() && raw.fault.is_none());
+    assert!(raw.coverage.is_none() && raw.fault.is_none() && raw.second_pass.is_none());
     assert!(outside_folders(&case, &fake.journal()).is_empty());
     assert_clean(&fake, &case.left());
 }
@@ -3587,4 +3592,250 @@ fn a_fault_repeat_turns_the_workload_code_its_timeout_and_a_dead_service_into_ca
     let dir = case.run_dir().join("fault-1-head");
     assert_eq!(logs_in(&dir), names(&["db-1", "api-1", "api-2"]));
     assert_left(&fake, &case.left());
+}
+
+/// `EXAMPLE` with the second pass and two files that should not change; the workload publishes a
+/// port, so the `Fake` refuses a second live VM of it.
+fn twice() -> String {
+    let unchanged = "{ unchanged: [{ file: probe.orders.jsonl, reason: \"a read\" }, \
+                     { file: orders.jsonl, reason: \"the same orders\" }] }";
+    EXAMPLE
+        .replace(
+            "  workload: load\n",
+            &format!("  workload: load\n  second_pass: true\n  expect: {unchanged}\n"),
+        )
+        .replace(
+            "    command: [\"node\", \"load.js\", \"http://api:3000\"]\n",
+            "    command: [\"node\", \"load.js\", \"http://api:3000\"]\n    expose: [9000]\n",
+        )
+}
+
+/// Metrics whose only port is `target`, with `open` connections still open.
+fn holding(target: &str, open: u64) -> Metrics {
+    Metrics {
+        ports: vec![PortStats {
+            target: target.into(),
+            connections: 10,
+            open,
+            bytes_out: 100,
+            bytes_in: 200,
+            http: None,
+            drops: 0,
+        }],
+        ..Metrics::default()
+    }
+}
+
+/// `example_rules` where `api` holds connections to `db` and the workload's are closed.
+fn pass_rules() -> Vec<Rule> {
+    let api = Script {
+        metrics: holding("db:5432", 2),
+        ..stops(100 * Duration::from_millis(1))
+    };
+    let load = Script {
+        metrics: holding("api:3000", 0),
+        writes: vec![(
+            "/stand/out/orders.jsonl".into(),
+            b"{\"ok\":true}\n".to_vec(),
+        )],
+        ..exits(0, 30 * SECOND)
+    };
+    replaced(replaced(example_rules(), "api", api), "load", load)
+}
+
+#[test]
+fn the_second_pass_runs_the_workload_twice_on_one_state() {
+    let case = Case::new(&twice());
+    let fake = fake(pass_rules());
+    let raw = case.run(&fake, &case.versions(true)).unwrap();
+    let journal = fake.journal();
+    let passes = ["pass2-before", "pass2-before", "pass2-head", "pass2-head"];
+    assert_eq!(
+        outside_folders(&case, &journal),
+        [&["coverage"][..], &passes].concat()
+    );
+    let Some(pass) = &raw.second_pass else {
+        panic!("no second pass")
+    };
+    assert_eq!(pass.unchanged, ["probe.orders.jsonl", "orders.jsonl"]);
+    let Some(before) = &pass.before else {
+        panic!("no second pass of before")
+    };
+    // The last ten VMs: per version `db`, both `api`, then the workload twice.
+    let made = created(&journal);
+    let last = made[made.len() - 10..].chunks(5);
+    for ((pair, chunk), side) in [before, &pass.head]
+        .into_iter()
+        .zip(last)
+        .zip(["before", "head"])
+    {
+        let PassPair::Passed { first, second } = pair else {
+            panic!("{side}: {pair:?}")
+        };
+        let dir = case.run_dir().join(format!("pass2-{side}"));
+        let vms: Vec<String> = chunk.iter().map(|(launch, _)| vm(launch)).collect();
+        assert_eq!(
+            vms,
+            ["db-1", "api-1", "api-2", "load-1", "load-1"],
+            "{side}"
+        );
+        // `db` binds the folder of the repeat; each workload its own `out-<n>`.
+        let outs: Vec<Utf8PathBuf> = chunk
+            .iter()
+            .filter_map(|(launch, _)| out_of(launch).map(Utf8Path::to_owned))
+            .collect();
+        assert_eq!(outs, [dir.clone(), dir.join("out-1"), dir.join("out-2")]);
+        for (n, pass) in [(1, first), (2, second)] {
+            let out = dir.join(format!("out-{n}"));
+            assert_eq!(pass.out_dir, out);
+            assert_eq!(ran(&pass.probes), ["orders"]);
+            assert_eq!(pass.probes[0].out, out.join("probe.orders.jsonl"));
+            assert!(pass.probes[0].out.is_file() && out.join("orders.jsonl").is_file());
+            // After the pass, of every instance: the database, both replicas, that workload.
+            let ports: Vec<(&str, u64)> = pass
+                .ports
+                .iter()
+                .map(|port| (port.target.as_str(), port.open))
+                .collect();
+            assert_eq!(
+                ports,
+                [("db:5432", 2), ("db:5432", 2), ("api:3000", 0)],
+                "{side} {n}"
+            );
+        }
+        // The cut and the probe of the first pass come at its exit, and its workload is gone
+        // before the second starts; the database and the replicas stay, with no restore.
+        let (first_load, second_load) = (&chunk[3].1, &chunk[4].1);
+        let at = |matches: &dyn Fn(&Call) -> bool| index_of(&journal, matches);
+        let cut = at(&|call| matches!(call, Call::Metrics(id) if id == first_load));
+        let probe = at(
+            &|call| matches!(call, Call::Exec { stdout, .. } if *stdout == dir.join("out-1/probe.orders.jsonl")),
+        );
+        let gone = at(&|call| matches!(call, Call::Destroy(id) if id == first_load));
+        let again =
+            at(&|call| matches!(call, Call::Create { ids, .. } if ids.contains(second_load)));
+        let db_gone = at(&|call| matches!(call, Call::Destroy(id) if *id == chunk[0].1));
+        assert!(
+            cut < probe && probe < gone && gone < again && again < db_gone,
+            "{side}"
+        );
+        let restarts = journal[gone..again]
+            .iter()
+            .filter(|call| matches!(call, Call::Create { .. } | Call::Stop(_)));
+        assert_eq!(restarts.count(), 0, "{side}");
+        for (launch, _) in chunk {
+            assert_eq!(profile_mounts(launch), (None, false), "{side}");
+        }
+        let logs = ["api-1", "api-2", "db-1", "load-1", "load-1.pass-1"];
+        assert_eq!(logs_in(&dir), names(&logs), "{side}");
+        assert!(dir.join("metrics.json").is_file());
+    }
+    assert_eq!(
+        kept_from(&case, &journal),
+        [
+            ["before", "db", "repeat-3-before"],
+            ["head", "db", "repeat-3-head"]
+        ]
+    );
+    assert_clean(&fake, &case.left());
+}
+
+#[test]
+fn a_failed_second_pass_is_a_fact_at_twice_the_timeout() {
+    // Head only. By service, the VMs of setup come first, then those of the three measured repeats
+    // and the coverage repeat: the second pass makes the fifth and sixth `load` and the ninth and
+    // tenth `api`.
+    let healthy_late = Script {
+        health: vec![Some(1), Some(0)],
+        ..stops(SECOND)
+    };
+    /// `hang` and `ends` of `Hooked`, the failure and the probe folder of the pass that failed.
+    struct Failing {
+        rules: Vec<Rule>,
+        hang: Option<(&'static str, usize)>,
+        ends: Option<(&'static str, usize, i32, Duration)>,
+        failure: (Phase, &'static str, Cause),
+        out: &'static str,
+        loads: usize,
+    }
+    let cases = [
+        // The second workload never ends: the repeat ends at twice `timeout`.
+        Failing {
+            rules: pass_rules(),
+            hang: Some(("load", 6)),
+            ends: None,
+            failure: (Phase::Workload, "load", Cause::Timeout),
+            out: "out-2",
+            loads: 2,
+        },
+        // The first workload fails: no second one.
+        Failing {
+            rules: pass_rules(),
+            hang: None,
+            ends: Some(("load", 5, 4, 10 * SECOND)),
+            failure: (Phase::Workload, "load", Cause::Exit(4)),
+            out: "out-1",
+            loads: 1,
+        },
+        // `api` dies before it is healthy: no workload.
+        Failing {
+            rules: replaced(pass_rules(), "api", healthy_late),
+            hang: None,
+            ends: Some(("api", 9, 1, SECOND / 2)),
+            failure: (Phase::Ready, "api", Cause::Died),
+            out: "out-1",
+            loads: 0,
+        },
+    ];
+    for Failing {
+        rules,
+        hang,
+        ends,
+        failure: (phase, service, cause),
+        out,
+        loads,
+    } in cases
+    {
+        let case = Case::new(&twice());
+        let fake = fake(rules);
+        let sandbox = Hooked {
+            hang,
+            ends,
+            ..Hooked::new(&fake)
+        };
+        let raw = sandbox.run(&case, &case.versions(false)).unwrap();
+        assert_eq!(raw.head.len(), 3);
+        let pass = raw.second_pass.unwrap();
+        assert!(pass.before.is_none());
+        let dir = case.run_dir().join("pass2-head");
+        let expected = Failure {
+            phase,
+            service: Some(service.into()),
+            repeat: None,
+            cause,
+            logs: Some(dir.clone()),
+            probes: vec![dir.join(out).join("probe.last.jsonl")],
+        };
+        assert!(
+            matches!(&pass.head, PassPair::Failed(failure) if *failure == expected),
+            "{:?}",
+            pass.head
+        );
+        let journal = fake.journal();
+        let made = created(&journal);
+        let second: Vec<String> = made[3 + 4 * 4..]
+            .iter()
+            .map(|(launch, _)| vm(launch))
+            .collect();
+        let mut expected = vec!["db-1", "api-1", "api-2"];
+        expected.extend(vec!["load-1"; loads]);
+        assert_eq!(second, expected, "{service}");
+        assert!(dir.join("metrics.json").is_file() && dir.join("db-1.log").is_file());
+        if hang.is_some() {
+            // The first wait ends a chunk of 1 s after the start, the last one at the deadline.
+            let db = &made[3 + 4 * 4].1;
+            assert_eq!(waited(&journal, db), (600 - 1) * SECOND);
+        }
+        assert_clean(&fake, &case.left());
+    }
 }

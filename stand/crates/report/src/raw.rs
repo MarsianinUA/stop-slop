@@ -1,5 +1,5 @@
 //! What `run::run` returns (plan, row 85). The port's types come from `sandbox` without features,
-//! so `report` has no copy of `Metrics`, `Stopped` or `ExecOutcome`.
+//! so `report` has no copy of `Metrics`, `PortStats`, `Stopped` or `ExecOutcome`.
 
 use std::collections::BTreeMap;
 use std::fmt;
@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use camino::Utf8PathBuf;
 use profile::{Coverage, Samples};
-use sandbox::{ExecOutcome, Metrics, Stopped};
+use sandbox::{ExecOutcome, Metrics, PortStats, Stopped};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 #[derive(Debug)]
@@ -31,6 +31,8 @@ pub struct Raw {
     pub coverage: Option<CoverageOutcome>,
     /// `None` without `x-stand.fault`, or without `Extra::Fault`.
     pub fault: Option<FaultOutcome>,
+    /// `None` without `x-stand.second_pass`, or without `Extra::SecondPass`.
+    pub second_pass: Option<SecondPassOutcome>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -138,6 +140,37 @@ pub struct FaultRepeat {
     pub exited: Vec<String>,
     /// At the cut; no profiler runs in a fault repeat.
     pub instances: Vec<InstanceOutput>,
+}
+
+/// The second pass of each version (plan, row 74).
+#[derive(Debug)]
+pub struct SecondPassOutcome {
+    /// The files of `expect.unchanged`.
+    pub unchanged: Vec<String>,
+    pub head: PassPair,
+    /// `None` without `Versions.before`, or when "before" failed.
+    pub before: Option<PassPair>,
+}
+
+#[derive(Debug)]
+pub enum PassPair {
+    Passed {
+        first: Pass,
+        second: Pass,
+    },
+    /// `repeat` is `None`; `probes` are the `on-failure` outputs of the pass that failed.
+    Failed(Failure),
+}
+
+#[derive(Debug)]
+pub struct Pass {
+    /// Host folder of the workload's `/stand/out` in this pass, with the `probe.<name>.jsonl` of
+    /// the probes after it.
+    pub out_dir: Utf8PathBuf,
+    pub probes: Vec<ProbeRan>,
+    /// Of every instance at the cut after this pass, the workload's included; a long-running
+    /// service counts from its start, so the second pass holds the first.
+    pub ports: Vec<PortStats>,
 }
 
 /// A failed lane in `Raw`, the `failure` of the `--json` line and `before.failed` of the report.
