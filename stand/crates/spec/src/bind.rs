@@ -99,7 +99,7 @@ pub(crate) fn name(field: &Field, name: &str) -> Result<String, Invalid> {
              and `volume:pgdata.bytes`"
         )
     } else if is_device(name) {
-        not_on_windows(name)
+        not_on_windows(name, DEVICE)
     } else {
         return Ok(name.to_owned());
     };
@@ -133,8 +133,10 @@ fn is_device(name: &str) -> bool {
     }
 }
 
-fn not_on_windows(name: &str) -> String {
-    format!("`{name}` is a device name on Windows, and the stand names files on the host after it")
+const DEVICE: &str = "is a device name on Windows";
+
+fn not_on_windows(name: &str, why: &str) -> String {
+    format!("`{name}` {why}, and the stand names files on the host after it")
 }
 
 pub(crate) fn service_named(
@@ -172,7 +174,11 @@ fn volumes(field: &Field) -> Result<BTreeSet<String>, Invalid> {
             return Err(value.invalid(not_volume_name(name)));
         }
         if is_device(name) {
-            return Err(value.invalid(not_on_windows(name)));
+            return Err(value.invalid(not_on_windows(name, DEVICE)));
+        }
+        if name.ends_with('.') {
+            let why = "ends with a `.`, which Windows drops from a file name";
+            return Err(value.invalid(not_on_windows(name, why)));
         }
         unlike_in_case(&value, name, names.iter().map(String::as_str))?;
         names.insert(name.to_owned());

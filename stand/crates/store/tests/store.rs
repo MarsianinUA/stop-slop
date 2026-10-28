@@ -101,6 +101,16 @@ fn ids(runs: &[RunPaths]) -> Vec<&str> {
     runs.iter().map(|run| run.id.as_str()).collect()
 }
 
+/// A set: `kept_runs` goes in the order of the session keys, which are hashes.
+fn kept_at(store: &Store, now: SystemTime) -> BTreeSet<String> {
+    store
+        .kept_runs(now)
+        .unwrap()
+        .into_iter()
+        .map(|run| run.id)
+        .collect()
+}
+
 fn json_of(path: &Utf8Path) -> Value {
     serde_json::from_str(&fs::read_to_string(path).unwrap()).unwrap()
 }
@@ -403,14 +413,10 @@ fn the_kept_run_is_the_last_one_kept_and_drop_kept_forgets_by_scope() {
     assert_eq!(mine.kept().unwrap().unwrap().id, second.id);
     theirs.keep(&other).unwrap();
 
-    let kept: BTreeSet<String> = home
-        .store
-        .kept_runs()
-        .unwrap()
-        .into_iter()
-        .map(|run| run.id)
-        .collect();
-    assert_eq!(kept, BTreeSet::from([second.id.clone(), other.id.clone()]));
+    assert_eq!(
+        kept_at(&home.store, at(3)),
+        BTreeSet::from([second.id.clone(), other.id.clone()])
+    );
 
     let dropped = home
         .store
@@ -424,7 +430,7 @@ fn the_kept_run_is_the_last_one_kept_and_drop_kept_forgets_by_scope() {
         ids(&home.store.drop_kept(KeptScope::All).unwrap()),
         [second.id.as_str()]
     );
-    assert!(home.store.kept_runs().unwrap().is_empty());
+    assert!(kept_at(&home.store, at(3)).is_empty());
 }
 
 #[test]
@@ -456,14 +462,22 @@ fn the_ttl_forgets_a_session_and_what_it_keeps_but_not_its_journal() {
     let live_entry = live.new_entry(&live_key).unwrap();
     live.cache(Slot::Head, &live_key, entry(&live_entry, "run-2"))
         .unwrap();
+    let live_run = live.new_run(at(4), &pool_key("2")).unwrap();
+    live.keep(&live_run).unwrap();
 
-    assert!(
-        home.store
-            .expired(at(0) + 3 * DAY - Duration::from_secs(1))
-            .unwrap()
-            .is_empty()
+    let ttl = at(0) + 3 * DAY;
+    let before_ttl = ttl - Duration::from_secs(1);
+    assert!(home.store.expired(before_ttl).unwrap().is_empty());
+    assert_eq!(
+        kept_at(&home.store, before_ttl),
+        BTreeSet::from([run.id.clone(), live_run.id.clone()])
     );
-    let expired = home.store.expired(at(0) + 3 * DAY).unwrap();
+    assert_eq!(
+        kept_at(&home.store, ttl),
+        BTreeSet::from([live_run.id.clone()]),
+        "the sweep before forget leaves no snapshots of an expired session"
+    );
+    let expired = home.store.expired(ttl).unwrap();
     assert_eq!(expired.len(), 1);
     home.store.forget(&expired).unwrap();
 
@@ -473,7 +487,10 @@ fn the_ttl_forgets_a_session_and_what_it_keeps_but_not_its_journal() {
     assert!(!run.dir.exists());
     assert!(!old_entry.exists());
     assert!(live_entry.is_dir());
-    assert_eq!(ids(&home.store.kept_runs().unwrap()), Vec::<&str>::new());
+    assert_eq!(
+        kept_at(&home.store, at(0)),
+        BTreeSet::from([live_run.id.clone()])
+    );
     assert_eq!(
         home.store.kept_images().unwrap(),
         ["mysql:8", "node:22", "redis:7"]
@@ -483,8 +500,8 @@ fn the_ttl_forgets_a_session_and_what_it_keeps_but_not_its_journal() {
         .join("journal")
         .join(format!("{}.json", old.key()));
     assert_eq!(json_of(&journal).as_array().unwrap().len(), 1);
-    assert!(live.history().unwrap().is_empty());
-    assert_eq!(home.store.expired(at(0) + 3 * DAY).unwrap().len(), 0);
+    assert!(matches!(&live.history().unwrap()[..], [record] if record.id == live_run.id));
+    assert_eq!(home.store.expired(ttl).unwrap().len(), 0);
 }
 
 #[test]

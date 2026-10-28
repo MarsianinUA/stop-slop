@@ -151,7 +151,7 @@ impl Session {
 impl Store {
     /// The entries the cache slots of every session not expired at `now` name; the sweep leaves
     /// their snapshots (`run::cached_ids`), so an expired session's snapshots go before `forget`
-    /// deletes the folders.
+    /// deletes the folders. `now` is the one `expired` gets, as for `kept_runs`.
     pub fn cache_entries(&self, now: SystemTime) -> Result<Vec<Utf8PathBuf>, StoreError> {
         let mut entries = Vec::new();
         for (session, state) in self.sessions()? {

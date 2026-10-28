@@ -75,6 +75,12 @@ fn a_name_is_one_file_name_on_every_host() {
             10,
             "`nul.data` is a device name on Windows",
         ),
+        (
+            "volume-trailing-dot",
+            "volumes.data.",
+            10,
+            "`data.` ends with a `.`, which Windows drops",
+        ),
     ]);
     let dir = tempfile::tempdir().unwrap();
     let file = Utf8Path::from_path(dir.path())
