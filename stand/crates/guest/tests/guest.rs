@@ -1018,6 +1018,41 @@ mod trim {
         );
     }
 
+    #[test]
+    fn trim_under_root_tells_a_disk_without_discard_from_a_failure() {
+        const NAME: &str = "trim_under_root_tells_a_disk_without_discard_from_a_failure";
+        if unsafe { libc::geteuid() } != 0 {
+            return skip_root_case(NAME, "not root");
+        }
+        let disk = match Ext4::without_discard() {
+            Ok(disk) => disk,
+            Err(why) => return skip_root_case(NAME, &why),
+        };
+        let no_discard = format!(
+            "stand-guest trim: FITRIM {}: its disk does not support discard",
+            disk.dir.display()
+        );
+        let output = trim(&[&disk.dir]);
+        let stderr = String::from_utf8(output.stderr).unwrap();
+        assert_eq!(
+            output.status.code(),
+            Some(i32::from(guest::TRIM_NO_DISCARD)),
+            "{stderr}"
+        );
+        assert_eq!(stderr.lines().collect::<Vec<_>>(), [no_discard.as_str()]);
+
+        let output = trim(&[&disk.dir, Path::new("/proc")]);
+        assert_eq!(output.status.code(), Some(125));
+        let stderr = String::from_utf8(output.stderr).unwrap();
+        assert_eq!(
+            stderr.lines().collect::<Vec<_>>(),
+            [
+                no_discard.as_str(),
+                "stand-guest trim: FITRIM /proc: not supported by its file system"
+            ]
+        );
+    }
+
     fn trim(mounts: &[&Path]) -> Output {
         let mounts = mounts.iter().map(|mount| mount.to_path_buf()).collect();
         guest(&Command::Trim(TrimArgs { mounts })).output().unwrap()
@@ -1027,31 +1062,54 @@ mod trim {
     struct Ext4 {
         image: PathBuf,
         dir: PathBuf,
-        _temp: tempfile::TempDir,
+        /// The ramfs the image is on, if any.
+        ram: Option<PathBuf>,
+        temp: tempfile::TempDir,
     }
 
     impl Ext4 {
         fn mount() -> Result<Ext4, String> {
+            Ext4::make(false)
+        }
+
+        /// The image on a ramfs, which has no `fallocate`, so its loop device takes no discard.
+        fn without_discard() -> Result<Ext4, String> {
+            Ext4::make(true)
+        }
+
+        fn make(on_ram: bool) -> Result<Ext4, String> {
             let temp = tempfile::tempdir().unwrap();
-            let image = temp.path().join("disk.img");
-            let dir = temp.path().join("w");
-            File::create(&image).unwrap().set_len(64 << 20).unwrap();
-            fs::create_dir(&dir).unwrap();
+            let mut disk = Ext4 {
+                image: temp.path().join("disk.img"),
+                dir: temp.path().join("w"),
+                ram: None,
+                temp,
+            };
+            if on_ram {
+                let ram = disk.temp.path().join("ram");
+                fs::create_dir(&ram).unwrap();
+                ran(Process::new("mount")
+                    .args(["-t", "ramfs", "ramfs"])
+                    .arg(&ram))?;
+                disk.image = ram.join("disk.img");
+                disk.ram = Some(ram);
+            }
+            File::create(&disk.image)
+                .unwrap()
+                .set_len(64 << 20)
+                .unwrap();
+            fs::create_dir(&disk.dir).unwrap();
             // The inode tables and the journal are written now, not by a kernel thread while the
             // image is measured.
             let lazy = "lazy_itable_init=0,lazy_journal_init=0";
             ran(Process::new("mkfs.ext4")
                 .args(["-q", "-F", "-b", "4096", "-E", lazy])
-                .arg(&image))?;
+                .arg(&disk.image))?;
             ran(Process::new("mount")
                 .args(["-o", "loop"])
-                .arg(&image)
-                .arg(&dir))?;
-            Ok(Ext4 {
-                image,
-                dir,
-                _temp: temp,
-            })
+                .arg(&disk.image)
+                .arg(&disk.dir))?;
+            Ok(disk)
         }
 
         fn allocated(&self) -> u64 {
@@ -1059,10 +1117,15 @@ mod trim {
         }
     }
 
-    /// `mount -o loop` frees the loop device on the unmount.
+    /// `mount -o loop` frees the loop device on the unmount. Also runs when `make` failed half
+    /// way, so the ramfs never outlives the test; `output` keeps the complaint about what was not
+    /// mounted yet out of the run.
     impl Drop for Ext4 {
         fn drop(&mut self) {
-            let _ = Process::new("umount").arg(&self.dir).status();
+            let _ = Process::new("umount").arg(&self.dir).output();
+            if let Some(ram) = &self.ram {
+                let _ = Process::new("umount").arg(ram).output();
+            }
         }
     }
 

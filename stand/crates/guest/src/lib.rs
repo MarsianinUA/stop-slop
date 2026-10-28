@@ -93,11 +93,17 @@ pub struct ExecArgs {
 }
 
 /// `stand-guest trim`: as root, the FITRIM ioctl on each mount point of an owned disk, without image tools.
-/// The root disk does not support it, so the adapter never names it.
+/// The root disk does not support it, so the adapter never names it. Exits 0 when every mount was
+/// trimmed, `TRIM_NO_DISCARD` when the only ones left are on disks that take no discard, 125 when any
+/// other failed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TrimArgs {
     pub mounts: Vec<PathBuf>,
 }
+
+/// Not 125: a disk that takes no discard, as the owned disks of VMs on CI's Linux runner, is nothing
+/// the guest could fix.
+pub const TRIM_NO_DISCARD: u8 = 3;
 
 impl Command {
     /// The arguments after the binary's path, for example

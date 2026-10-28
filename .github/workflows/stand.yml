@@ -81,8 +81,8 @@ jobs:
           done
           namei -l "$PWD/target/debug/stand-guest"
       # The root cases of guest (the probe's privilege drop, a service's stdio of another user, FITRIM
-      # on a loop-mounted ext4) skipped above; here they run as root, where a skip fails, and the
-      # count shows the filter matched each.
+      # on a loop-mounted ext4 and on one whose disk takes no discard) skipped above; here they run
+      # as root, where a skip fails, and the count shows the filter matched each.
       # `--workspace` rather than `-p guest` keeps the features of the build above, so nothing is rebuilt.
       - name: Run the root cases of guest under sudo
         if: runner.os == 'Linux'
@@ -94,8 +94,9 @@ jobs:
           cargo test --locked --workspace --test guest -- --exact \
             process::exec_under_root_takes_the_probe_group_and_the_user \
             process::run_gives_a_command_of_another_user_stdio_it_can_reopen \
-            trim::trim_under_root_frees_the_blocks_of_deleted_files | tee "$RUNNER_TEMP/root.log"
-          grep -q ' 3 passed;' "$RUNNER_TEMP/root.log"
+            trim::trim_under_root_frees_the_blocks_of_deleted_files \
+            trim::trim_under_root_tells_a_disk_without_discard_from_a_failure | tee "$RUNNER_TEMP/root.log"
+          grep -q ' 4 passed;' "$RUNNER_TEMP/root.log"
 
   # Runs the stand-guest of this commit, not the pinned release, so a change to the guest shows here
   # before it is released.

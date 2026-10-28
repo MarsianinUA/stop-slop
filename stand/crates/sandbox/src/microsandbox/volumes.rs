@@ -9,7 +9,7 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
-use ::guest::{Command, TrimArgs};
+use ::guest::{Command, TRIM_NO_DISCARD, TrimArgs};
 use ::microsandbox as msb;
 use camino::{Utf8Path, Utf8PathBuf};
 use msb::sandbox::{MountBuilder, SandboxBuilder};
@@ -379,19 +379,48 @@ async fn trim(live: &Live) {
     }
     let mounts = live.owned.iter().map(PathBuf::from).collect();
     let args = Command::Trim(TrimArgs { mounts }).to_args();
-    let failure = match process::root(&live.vm, guest::BIN, args, TRIM).await {
-        Ok(output) if output.status().code == 0 => return,
-        Ok(output) => format!(
-            "exit {}: {}",
-            output.status().code,
-            String::from_utf8_lossy(output.stderr_bytes()).trim()
-        ),
-        Err(error) => error.to_string(),
+    let (end, said) = match process::root(&live.vm, guest::BIN, args, TRIM).await {
+        Ok(output) => match trim_end(output.status().code) {
+            TrimEnd::Trimmed => return,
+            end => (
+                end,
+                format!(
+                    "exit {}: {}",
+                    output.status().code,
+                    String::from_utf8_lossy(output.stderr_bytes()).trim()
+                ),
+            ),
+        },
+        Err(error) => (TrimEnd::Failed, error.to_string()),
     };
-    tracing::warn!(
-        vm = %live.name,
-        "stand-guest trim failed, the snapshot keeps the deleted blocks: {failure}"
-    );
+    if end == TrimEnd::NoDiscard {
+        tracing::debug!(
+            vm = %live.name,
+            "a disk takes no discard, the snapshot keeps its deleted blocks: {said}"
+        );
+    } else {
+        tracing::warn!(
+            vm = %live.name,
+            "stand-guest trim failed, the snapshot keeps the deleted blocks: {said}"
+        );
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum TrimEnd {
+    Trimmed,
+    /// Not worth a WARN, which T-14 puts on the user's stderr: the owned disks of VMs on CI's
+    /// Linux runner take no discard, so every snapshot there would warn.
+    NoDiscard,
+    Failed,
+}
+
+fn trim_end(code: i32) -> TrimEnd {
+    match code {
+        0 => TrimEnd::Trimmed,
+        code if code == i32::from(TRIM_NO_DISCARD) => TrimEnd::NoDiscard,
+        _ => TrimEnd::Failed,
+    }
 }
 
 /// Writable by any guest user: on Linux and macOS hosts a bind shows the host folder's owner and
@@ -420,4 +449,17 @@ fn mib(bytes: u64) -> u32 {
 
 fn secs(duration: Duration) -> u64 {
     duration.as_secs() + u64::from(duration.subsec_nanos() > 0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_disk_without_discard_is_not_a_failed_trim() {
+        assert_eq!(trim_end(0), TrimEnd::Trimmed);
+        let no_discard = i32::from(TRIM_NO_DISCARD);
+        assert_eq!(trim_end(no_discard), TrimEnd::NoDiscard);
+        assert_eq!(trim_end(125), TrimEnd::Failed);
+    }
 }

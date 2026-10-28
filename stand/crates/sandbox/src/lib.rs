@@ -66,7 +66,8 @@ pub trait Sandbox {
     /// Used bytes of each volume of `id`, by `du -sk` in the guest; after `stop`, before `snapshot`.
     fn volume_sizes(&self, id: &SandboxId) -> Result<Vec<(VolumeName, u64)>, SandboxError>;
     /// After `stop`, or the exit of the prepare service, before `destroy`. FITRIM on every owned disk first,
-    /// so deleted blocks stay out; a failed trim still snapshots. The snapshot carries the VM with its disks.
+    /// so deleted blocks stay out where the disk takes discards (not on CI's Linux runner); a failed trim
+    /// still snapshots. The snapshot carries the VM with its disks.
     fn snapshot(&self, id: &SandboxId) -> Result<SnapshotId, SandboxError>;
     /// Kills whatever still runs, and the VM's volumes go with it; destroying twice is not an error.
     fn destroy(&self, id: &SandboxId) -> Result<(), SandboxError>;
