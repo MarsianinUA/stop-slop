@@ -1,8 +1,8 @@
 {
   "nodes": [
     {"id":1,"callFrame":{"functionName":"(root)","scriptId":"0","url":"","lineNumber":-1,"columnNumber":-1},"hitCount":0,"children":[2,3]},
-    {"id":2,"callFrame":{"functionName":"parse","scriptId":"21","url":"{url}/src/legacy.js","lineNumber":2,"columnNumber":20},"hitCount":1},
-    {"id":3,"callFrame":{"functionName":"parse","scriptId":"22","url":"{url}/SRC/Legacy.js","lineNumber":2,"columnNumber":20},"hitCount":1}
+    {"id":2,"callFrame":{"functionName":"parse","scriptId":"21","url":"file:///w/app/src/legacy.js","lineNumber":2,"columnNumber":20},"hitCount":1},
+    {"id":3,"callFrame":{"functionName":"parse","scriptId":"22","url":"file:///w/app/SRC/Legacy.js","lineNumber":2,"columnNumber":20},"hitCount":1}
   ],
   "startTime": 1000000,
   "endTime": 1003000,

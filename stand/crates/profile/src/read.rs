@@ -16,8 +16,9 @@ use std::fs;
 use camino::{Utf8Path, Utf8PathBuf};
 use serde::Deserialize;
 
-use crate::maps::{self, Scripts};
-use crate::{HotLine, ModuleTime, ProfileError, Sampled, Samples};
+use crate::maps::Scripts;
+use crate::paths;
+use crate::{HotLine, ModuleTime, PathMap, ProfileError, Sampled, Samples};
 
 const TS_EXTENSIONS: [&str; 4] = ["ts", "tsx", "mts", "cts"];
 
@@ -69,7 +70,7 @@ struct Process {
 }
 
 /// Sums the profiles the preload left in `dir` by function of the original sources.
-pub fn read(dir: &Utf8Path, root: &Utf8Path) -> Result<Samples, ProfileError> {
+pub fn read(dir: &Utf8Path, paths: &PathMap) -> Result<Samples, ProfileError> {
     let processes = list(dir)?;
     let lost = processes
         .values()
@@ -78,8 +79,7 @@ pub fn read(dir: &Utf8Path, root: &Utf8Path) -> Result<Samples, ProfileError> {
     if lost == processes.len() {
         return Err(ProfileError::NoProfile);
     }
-    let root = camino::absolute_utf8(root).map_err(ProfileError::io(root))?;
-    let mut sums = Sums::new(&root);
+    let mut sums = Sums::new(paths);
     for process in processes.values() {
         let mut scripts = Scripts::load(&process.maps)?;
         for path in process.chunks.values() {
@@ -135,7 +135,7 @@ enum Frame {
     },
     /// Local `.ts` code that found no map.
     Unmapped,
-    /// Outside `root`, in `node_modules`, or not a file.
+    /// Not local, or not a file.
     Other,
 }
 
@@ -147,23 +147,30 @@ struct Function {
 }
 
 /// Microseconds until `finish`.
-#[derive(Default)]
-struct Sums {
-    root: Utf8PathBuf,
+struct Sums<'p> {
+    paths: &'p PathMap,
     total: f64,
     local: f64,
     unmapped: f64,
+    /// Paths from the repo root.
     files: Vec<Utf8PathBuf>,
+    /// By guest path.
     file_ids: HashMap<String, u32>,
     functions: HashMap<(u32, u32, u32), Function>,
     modules: HashMap<u32, f64>,
 }
 
-impl Sums {
-    fn new(root: &Utf8Path) -> Sums {
+impl Sums<'_> {
+    fn new(paths: &PathMap) -> Sums<'_> {
         Sums {
-            root: maps::normalize(root),
-            ..Sums::default()
+            paths,
+            total: 0.0,
+            local: 0.0,
+            unmapped: 0.0,
+            files: Vec::new(),
+            file_ids: HashMap::new(),
+            functions: HashMap::new(),
+            modules: HashMap::new(),
         }
     }
 
@@ -281,11 +288,8 @@ impl Sums {
                 (in_file == source).then_some(line + 1)
             });
         }
-        if file
-            .extension()
-            .is_some_and(|extension| TS_EXTENSIONS.contains(&extension))
-        {
-            return if self.is_local(file) {
+        if is_typescript(file) {
+            return if self.paths.local(file).is_some() {
                 Frame::Unmapped
             } else {
                 Frame::Other
@@ -300,7 +304,7 @@ impl Sums {
     /// `original` turns a line of the generated code, from 1, into one of the source.
     fn function(
         &mut self,
-        file: &Utf8Path,
+        file: &str,
         line: u32,
         column: u32,
         node: &Node<'_>,
@@ -322,41 +326,20 @@ impl Sums {
         }
     }
 
-    fn module(&mut self, file: &Utf8Path) -> Frame {
+    fn module(&mut self, file: &str) -> Frame {
         self.local_id(file)
             .map_or(Frame::Other, |file| Frame::Module { file })
     }
 
-    /// On Windows `src\Orders.js` and `src\orders.js`, as two `require`s may spell one file, get
-    /// one id and the first spelling.
-    fn local_id(&mut self, file: &Utf8Path) -> Option<u32> {
-        let key = if cfg!(windows) {
-            Cow::Owned(file.as_str().to_ascii_lowercase())
-        } else {
-            Cow::Borrowed(file.as_str())
-        };
-        if let Some(&id) = self.file_ids.get(&*key) {
+    fn local_id(&mut self, file: &str) -> Option<u32> {
+        if let Some(&id) = self.file_ids.get(file) {
             return Some(id);
         }
-        if !self.is_local(file) {
-            return None;
-        }
+        let local = self.paths.local(file)?;
         let id = count(self.files.len());
-        self.files.push(file.to_owned());
-        self.file_ids.insert(key.into_owned(), id);
+        self.files.push(local);
+        self.file_ids.insert(file.to_owned(), id);
         Some(id)
-    }
-
-    /// Under `root` and outside `node_modules`.
-    fn is_local(&self, file: &Utf8Path) -> bool {
-        let mut parts = file.components();
-        for root_part in self.root.components() {
-            match parts.next() {
-                Some(part) if same_name(part.as_str(), root_part.as_str()) => {}
-                _ => return false,
-            }
-        }
-        parts.all(|part| part.as_str() != "node_modules")
     }
 
     fn finish(self, processes: u32, lost_processes: u32) -> Samples {
@@ -403,13 +386,9 @@ impl Sums {
     }
 }
 
-/// Windows ignores the case of file names.
-fn same_name(a: &str, b: &str) -> bool {
-    if cfg!(windows) {
-        a.eq_ignore_ascii_case(b)
-    } else {
-        a == b
-    }
+/// Without a map, the positions in such a file are not its source's: it runs compiled.
+fn is_typescript(file: &str) -> bool {
+    paths::extension(file).is_some_and(|extension| TS_EXTENSIONS.contains(&extension))
 }
 
 fn count(n: usize) -> u32 {

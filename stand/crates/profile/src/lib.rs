@@ -4,9 +4,11 @@ use camino::{Utf8Path, Utf8PathBuf};
 
 mod env;
 mod maps;
+mod paths;
 mod read;
 
 pub use env::node_env;
+pub use paths::PathMap;
 pub use read::read;
 
 /// The file the caller writes as `<preload_dir>/preload.cjs` of `node_env`.
@@ -29,7 +31,7 @@ pub struct NodeEnv {
 #[derive(Debug)]
 pub struct Samples {
     pub total_ms: f64,
-    /// Samples whose top frame is a file under `root` outside `node_modules`.
+    /// Samples whose top frame is a local file (`PathMap`).
     pub local_ms: f64,
     /// The part of `local_ms` in `.ts`, `.tsx`, `.mts` and `.cts` files that found no source map.
     pub unmapped_ms: f64,
@@ -45,7 +47,7 @@ pub struct Samples {
 
 #[derive(Debug)]
 pub struct Sampled {
-    /// Absolute path of the original source, after the source map.
+    /// The original source after the source map, from the repo root and `/`-separated.
     pub file: Utf8PathBuf,
     /// From 1: where V8 puts the function start, the `(` of its parameters.
     pub line: u32,
@@ -67,6 +69,7 @@ pub struct HotLine {
 /// body at 1:1 and the helpers `tsc` puts before the first mapping (`__decorate`, `__exportStar`).
 #[derive(Debug)]
 pub struct ModuleTime {
+    /// From the repo root and `/`-separated.
     pub file: Utf8PathBuf,
     pub self_ms: f64,
 }
