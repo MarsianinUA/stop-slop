@@ -9,6 +9,7 @@
 //!                seal/            the sealed copy of the recipe
 //!                accepted.json
 //!                runs/<id>/run.json
+//!                cache/<digest>/  an entry of the setup cache
 //! ```
 
 use std::fs::{self, File, OpenOptions, TryLockError};
@@ -19,9 +20,11 @@ use camino::{Utf8Path, Utf8PathBuf};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 
+mod cache;
 mod seal;
 mod session;
 
+pub use cache::{CacheEntry, SetupKey, Slot};
 pub use seal::{Acceptance, JournalEntry, Sealed};
 pub use session::{PoolKey, RunPaths, RunRecord, Session};
 

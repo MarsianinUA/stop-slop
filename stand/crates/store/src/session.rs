@@ -10,6 +10,7 @@ use camino::{Utf8Path, Utf8PathBuf};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+use crate::cache::Slots;
 use crate::{
     Expired, JOURNAL, KeptScope, SESSIONS, Store, StoreError, hex, read_json, remove, write_json,
 };
@@ -39,6 +40,7 @@ pub(crate) struct SessionFile {
     used_at: SystemTime,
     /// The id of the kept run.
     kept: Option<String>,
+    pub(crate) cache: Slots,
 }
 
 /// `run.json`.
@@ -105,6 +107,7 @@ impl Store {
                 images,
                 used_at: now,
                 kept: None,
+                cache: Slots::default(),
             },
         };
         session.write(&state)?;
@@ -127,11 +130,12 @@ impl Store {
             .try_for_each(|expired| remove(&self.session_of(&expired.key).dir))
     }
 
-    /// Images of every session, which after `forget` are the ones not expired: a snapshot fixes
-    /// its image.
+    /// Images of every session and of its cache entries, which after `forget` are the sessions
+    /// not expired: a snapshot fixes its image.
     pub fn kept_images(&self) -> Result<Vec<String>, StoreError> {
         let mut images = BTreeSet::new();
         for (_, state) in self.sessions()? {
+            images.extend(state.cache.images().cloned());
             images.extend(state.images);
         }
         Ok(images.into_iter().collect())
@@ -187,7 +191,7 @@ impl Store {
     }
 }
 
-fn is_expired(state: &SessionFile, now: SystemTime) -> bool {
+pub(crate) fn is_expired(state: &SessionFile, now: SystemTime) -> bool {
     now.duration_since(state.used_at)
         .is_ok_and(|age| age >= TTL)
 }

@@ -5,8 +5,8 @@ use std::time::{Duration, SystemTime};
 use camino::{Utf8Path, Utf8PathBuf};
 use serde_json::{Value, json};
 use store::{
-    Acceptance, Clean, ConfigError, JournalEntry, KeptScope, PoolKey, RunPaths, Session, Store,
-    StorePaths,
+    Acceptance, CacheEntry, Clean, ConfigError, JournalEntry, KeptScope, PoolKey, RunPaths,
+    Session, SetupKey, Slot, Store, StorePaths,
 };
 use tempfile::TempDir;
 
@@ -73,6 +73,27 @@ fn pool_key(head: &str) -> PoolKey {
         head_tree: head.to_owned(),
         before_tree: Some("b".repeat(40)),
         digest: "d".repeat(64),
+    }
+}
+
+/// Two images; `tree` tells keys apart.
+fn setup_key(tree: &str) -> SetupKey {
+    SetupKey {
+        tree: tree.to_owned(),
+        recipe: "r".repeat(64),
+        images: vec![
+            ("node:22".to_owned(), "sha256:1".to_owned()),
+            ("postgres:17".to_owned(), "sha256:2".to_owned()),
+        ],
+        guest: "0.1.0".to_owned(),
+        tool: "0.1.0".to_owned(),
+    }
+}
+
+fn entry(dir: &Utf8Path, built_by: &str) -> CacheEntry {
+    CacheEntry {
+        dir: dir.to_owned(),
+        built_by: built_by.to_owned(),
     }
 }
 
@@ -419,6 +440,17 @@ fn the_ttl_forgets_a_session_and_what_it_keeps_but_not_its_journal() {
         accepted_at: at(3),
     })
     .unwrap();
+    let old_key = setup_key("old");
+    let old_entry = old.new_entry(&old_key).unwrap();
+    old.cache(Slot::Before, &old_key, entry(&old_entry, "run-1"))
+        .unwrap();
+    let live_key = SetupKey {
+        images: vec![("mysql:8".to_owned(), "sha256:3".to_owned())],
+        ..setup_key("live")
+    };
+    let live_entry = live.new_entry(&live_key).unwrap();
+    live.cache(Slot::Head, &live_key, entry(&live_entry, "run-2"))
+        .unwrap();
 
     assert!(
         home.store
@@ -434,8 +466,13 @@ fn the_ttl_forgets_a_session_and_what_it_keeps_but_not_its_journal() {
     assert!(old.sealed().unwrap().is_none());
     assert!(old.acceptances().unwrap().is_empty());
     assert!(!run.dir.exists());
+    assert!(!old_entry.exists());
+    assert!(live_entry.is_dir());
     assert_eq!(ids(&home.store.kept_runs().unwrap()), Vec::<&str>::new());
-    assert_eq!(home.store.kept_images().unwrap(), ["node:22", "redis:7"]);
+    assert_eq!(
+        home.store.kept_images().unwrap(),
+        ["mysql:8", "node:22", "redis:7"]
+    );
     let journal = home
         .root()
         .join("journal")
@@ -458,6 +495,10 @@ fn clean_sessions_keeps_the_install_and_the_journals_and_clean_all_keeps_the_loc
         .unwrap();
     two.seal(&home.dir.join("two").join("stand"), "digest-2", at(1))
         .unwrap();
+    let key = setup_key("tree");
+    let cached = one.new_entry(&key).unwrap();
+    one.cache(Slot::Head, &key, entry(&cached, "run-1"))
+        .unwrap();
     let trees = home.store.trees().unwrap();
     fs::write(&trees.head, "tar").unwrap();
 
@@ -466,6 +507,7 @@ fn clean_sessions_keeps_the_install_and_the_journals_and_clean_all_keeps_the_loc
         names_in(&root),
         BTreeSet::from(["guest", "journal", "lock", "msb"].map(str::to_owned))
     );
+    assert!(!cached.exists());
     for session in [&one, &two] {
         assert!(session.sealed().unwrap().is_none());
         let journal = root.join("journal").join(format!("{}.json", session.key()));
@@ -521,4 +563,170 @@ fn the_trees_are_two_tar_files_that_clear_trees_deletes() {
     home.store.clear_trees().unwrap();
     assert!(!trees.head.exists() && !trees.before.exists());
     home.store.clear_trees().unwrap();
+}
+
+#[test]
+fn a_setup_key_digest_changes_with_every_part() {
+    let key = setup_key("tree");
+    assert_eq!(key.digest(), setup_key("tree").digest());
+    assert_eq!(key.digest().len(), 64);
+    let mut other_image = key.clone();
+    other_image.images[1].1 = "sha256:9".to_owned();
+    let mut one_image_less = key.clone();
+    one_image_less.images.pop();
+    for other in [
+        SetupKey {
+            tree: "other".to_owned(),
+            ..key.clone()
+        },
+        SetupKey {
+            recipe: "s".repeat(64),
+            ..key.clone()
+        },
+        other_image,
+        one_image_less,
+        SetupKey {
+            guest: "dev-0123".to_owned(),
+            ..key.clone()
+        },
+        SetupKey {
+            tool: "0.2.0".to_owned(),
+            ..key.clone()
+        },
+    ] {
+        assert_ne!(other.digest(), key.digest(), "{other:?}");
+    }
+}
+
+#[test]
+fn a_cache_slot_names_one_entry_and_cache_gives_back_what_no_slot_names() {
+    let home = home();
+    let session = home.session("work", &[], at(0));
+    let (a, b, c) = (setup_key("a"), setup_key("b"), setup_key("c"));
+    assert!(session.cached(&a).unwrap().is_none());
+
+    let entry_a = session.new_entry(&a).unwrap();
+    assert_eq!(
+        entry_a,
+        home.root()
+            .join("sessions")
+            .join(session.key())
+            .join("cache")
+            .join(a.digest())
+    );
+    assert!(names_in(&entry_a).is_empty());
+    fs::write(entry_a.join("entry.json"), "{}").unwrap();
+    assert!(
+        session
+            .cache(Slot::Head, &a, entry(&entry_a, "run-1"))
+            .unwrap()
+            .is_empty()
+    );
+    // The head entry of a run without `--before` is the entry before of the next comparison.
+    let hit = session.cached(&a).unwrap().unwrap();
+    assert_eq!((&hit.dir, hit.built_by.as_str()), (&entry_a, "run-1"));
+    assert!(session.cache(Slot::Before, &a, hit).unwrap().is_empty());
+
+    let entry_b = session.new_entry(&b).unwrap();
+    assert!(
+        session
+            .cache(Slot::Head, &b, entry(&entry_b, "run-2"))
+            .unwrap()
+            .is_empty(),
+        "the slot before still names the entry of a"
+    );
+    assert_eq!(session.cached(&a).unwrap().unwrap().dir, entry_a);
+    assert_eq!(session.cached(&b).unwrap().unwrap().built_by, "run-2");
+    assert!(session.cached(&c).unwrap().is_none());
+
+    let entry_c = session.new_entry(&c).unwrap();
+    assert_eq!(
+        session
+            .cache(Slot::Head, &c, entry(&entry_c, "run-3"))
+            .unwrap(),
+        vec![entry_b.clone()]
+    );
+    fs::write(entry_c.join("entry.json"), "{}").unwrap();
+    assert_eq!(session.new_entry(&c).unwrap(), entry_c);
+    assert!(names_in(&entry_c).is_empty(), "a new entry starts empty");
+
+    home.store.clear_unused_entries().unwrap();
+    assert!(!entry_b.exists());
+    assert!(entry_a.join("entry.json").is_file() && entry_c.is_dir());
+
+    let state = json_of(
+        &home
+            .root()
+            .join("sessions")
+            .join(session.key())
+            .join("session.json"),
+    );
+    assert_eq!(
+        state["cache"]["head"],
+        json!({
+            "key": {
+                "tree": "c",
+                "recipe": "r".repeat(64),
+                "images": [["node:22", "sha256:1"], ["postgres:17", "sha256:2"]],
+                "guest": "0.1.0",
+                "tool": "0.1.0",
+            },
+            "digest": c.digest(),
+            "builtBy": "run-3",
+        })
+    );
+    assert_eq!(state["cache"]["before"]["builtBy"], "run-1");
+}
+
+#[test]
+fn cache_entries_skip_expired_sessions_and_drop_cache_forgets_by_scope() {
+    let home = home();
+    let old = home.session("old", &[], at(0));
+    let mine = home.session("mine", &[], at(0) + 2 * DAY);
+    let theirs = home.session("theirs", &[], at(0) + 2 * DAY);
+    let mut entries = Vec::new();
+    for (session, tree) in [(&old, "old"), (&mine, "mine"), (&theirs, "theirs")] {
+        let key = setup_key(tree);
+        let dir = session.new_entry(&key).unwrap();
+        session
+            .cache(Slot::Before, &key, entry(&dir, "run-1"))
+            .unwrap();
+        entries.push(dir);
+    }
+    let [old_entry, my_entry, their_entry] = <[Utf8PathBuf; 3]>::try_from(entries).unwrap();
+
+    let live: BTreeSet<Utf8PathBuf> = home
+        .store
+        .cache_entries(at(0) + 3 * DAY)
+        .unwrap()
+        .into_iter()
+        .collect();
+    assert_eq!(
+        live,
+        BTreeSet::from([my_entry.clone(), their_entry.clone()])
+    );
+
+    let dropped: BTreeSet<Utf8PathBuf> = home
+        .store
+        .drop_cache(KeptScope::OtherThan(mine.key().to_owned()))
+        .unwrap()
+        .into_iter()
+        .collect();
+    assert_eq!(
+        dropped,
+        BTreeSet::from([old_entry.clone(), their_entry.clone()])
+    );
+    assert!(mine.cached(&setup_key("mine")).unwrap().is_some());
+    assert!(theirs.cached(&setup_key("theirs")).unwrap().is_none());
+    assert!(their_entry.is_dir(), "the folder goes after its snapshots");
+
+    assert_eq!(
+        home.store.drop_cache(KeptScope::All).unwrap(),
+        vec![my_entry.clone()]
+    );
+    assert!(mine.cached(&setup_key("mine")).unwrap().is_none());
+    home.store.clear_unused_entries().unwrap();
+    for entry in [old_entry, my_entry, their_entry] {
+        assert!(!entry.exists(), "{entry}");
+    }
 }
