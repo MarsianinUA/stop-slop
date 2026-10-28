@@ -398,12 +398,16 @@ impl Sandbox for Fake {
             host: host.to_owned(),
         });
         let vm = state.vm(id)?;
+        if fs::read_dir(host).map_err(io_error(host))?.next().is_some() {
+            return Err(backend(format!(
+                "fake: {host}: not empty, copy_out takes an empty folder"
+            )));
+        }
         if !scratch_holds(&vm.launch, guest) {
             return Err(backend(format!(
                 "fake: `{guest}` is not in a Scratch folder of `{id}`, and only those hold files"
             )));
         }
-        fs::create_dir_all(host).map_err(io_error(host))?;
         for (path, bytes) in &vm.scratch {
             if let Some(rest) = under(path, guest).filter(|rest| !rest.is_empty()) {
                 write_file(&host.join(rest), bytes)?;

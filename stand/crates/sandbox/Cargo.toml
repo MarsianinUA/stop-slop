@@ -13,7 +13,9 @@ microsandbox = [
     "dep:microsandbox",
     "dep:reqwest",
     "dep:sha2",
+    "dep:tar",
     "dep:tokio",
+    "dep:tracing",
 ]
 
 [dependencies]
@@ -24,7 +26,11 @@ guest = { path = "../guest", optional = true }
 microsandbox = { workspace = true, optional = true }
 reqwest = { workspace = true, optional = true }
 sha2 = { workspace = true, optional = true }
-tokio = { workspace = true, optional = true }
+# Unpacks what `copy_out` brings.
+tar = { workspace = true, optional = true }
+tokio = { workspace = true, optional = true, features = ["fs", "io-util"] }
+# The adapter never writes to stderr; `cli` decides where its log goes.
+tracing = { workspace = true, optional = true }
 
 [dev-dependencies]
 sandbox = { path = ".", features = ["fake"] }

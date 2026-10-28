@@ -1,4 +1,5 @@
-//! The service under `stand-guest run`, its `stop`, and healthcheck attempts.
+//! The service under `stand-guest run`, its `stop`, healthcheck attempts, `Scratch` folders and
+//! `copy_out`.
 //!
 //! A VM gets no env of its own, fresh or restored (a snapshot carries none, plan row 87): the env,
 //! the workdir and the command of the `Launch` go into the exec of the service, and the same env
@@ -12,7 +13,7 @@ use ::guest::{Command, RunArgs, RunStatus, StopArgs, StopReport};
 use ::microsandbox as msb;
 use camino::{Utf8Path, Utf8PathBuf};
 use msb::jobs::{Job, JobInfo, JobLogOptions, JobState};
-use msb::sandbox::ExecOptionsBuilder;
+use msb::sandbox::{ExecOptionsBuilder, FsSetAttrs};
 
 use super::{GUEST_CALL, Live, POLL, backend, guest, within};
 use crate::{Launch, SandboxError, Stopped};
@@ -23,6 +24,9 @@ pub(super) const RUN_DIR: &str = "/stand/run";
 const STATUS: &str = "status.json";
 /// Room for `stand-guest` to act at its own deadline and report before the SDK gives up.
 const MARGIN: Duration = Duration::from_secs(10);
+/// Outside any folder a service would ask for, and gone right after the copy.
+const COPY_TAR: &str = "/tmp/stop-slop-stand-copy.tar";
+const COPY: Duration = Duration::from_secs(300);
 
 /// The host side of `RUN_DIR` in the adapter's folder of a VM.
 pub(super) fn run_dir(folder: &Utf8Path) -> Utf8PathBuf {
@@ -182,6 +186,104 @@ pub(super) async fn stop(live: &Live) -> Result<Stopped, SandboxError> {
     })
 }
 
+/// uid and gid.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct Owner(u32, u32);
+
+/// Whom the agent runs an exec as by default, the image's user: `id` resolves it in the guest as
+/// the service's processes see it, whatever form `USER` has in the image.
+pub(super) async fn owner(vm: &msb::Sandbox) -> Result<Owner, SandboxError> {
+    let call = vm.exec_with("id", |options| options.timeout(GUEST_CALL));
+    let output = within(GUEST_CALL + MARGIN, "id", call)
+        .await?
+        .map_err(backend)?;
+    let text = String::from_utf8_lossy(output.stdout_bytes());
+    match parse_id(&text) {
+        Some(owner) if output.status().code == 0 => Ok(owner),
+        _ => Err(guest_failed("id", &output)),
+    }
+}
+
+/// `uid=101(nginx) gid=101(nginx) groups=...`, as GNU and busybox `id` print it.
+fn parse_id(text: &str) -> Option<Owner> {
+    let number = |key: &str| {
+        let value = text
+            .split_whitespace()
+            .find_map(|word| word.strip_prefix(key))?;
+        let digits = value.split(|c: char| !c.is_ascii_digit()).next()?;
+        digits.parse().ok()
+    };
+    Some(Owner(number("uid=")?, number("gid=")?))
+}
+
+/// Through the agent, which is root.
+pub(super) async fn give(
+    vm: &msb::Sandbox,
+    path: &str,
+    Owner(uid, gid): Owner,
+) -> Result<(), SandboxError> {
+    let attrs = FsSetAttrs {
+        uid: Some(uid),
+        gid: Some(gid),
+        ..FsSetAttrs::default()
+    };
+    let fs = vm.fs();
+    within(GUEST_CALL, "give a folder", fs.set_stat(path, false, attrs))
+        .await?
+        .map_err(|error| backend(format!("give {path} to {uid}:{gid}: {error}")))
+}
+
+/// Empty and the image user's in every VM: the root disk of a VM from a snapshot may still hold
+/// the folder of the VM it was taken from.
+pub(super) async fn make_scratch(
+    vm: &msb::Sandbox,
+    folders: &[&str],
+    owner: Owner,
+) -> Result<(), SandboxError> {
+    let fs = vm.fs();
+    for &folder in folders {
+        let found = within(GUEST_CALL, "look for a scratch folder", fs.exists(folder)).await?;
+        if found.map_err(backend)? {
+            within(GUEST_CALL, "empty a scratch folder", fs.remove_dir(folder))
+                .await?
+                .map_err(backend)?;
+        }
+        within(GUEST_CALL, "make a scratch folder", fs.mkdir(folder))
+            .await?
+            .map_err(backend)?;
+        give(vm, folder, owner).await?;
+    }
+    Ok(())
+}
+
+/// Packed by root, which reads every file of the folder whoever wrote it.
+pub(super) async fn copy_out(
+    live: &Live,
+    guest: &str,
+    host: &Utf8Path,
+) -> Result<(), SandboxError> {
+    let mut entries =
+        std::fs::read_dir(host).map_err(|error| backend(format!("{host}: {error}")))?;
+    if entries.next().is_some() {
+        return Err(backend(format!(
+            "{host}: not empty, copy_out takes an empty folder"
+        )));
+    }
+    let args = ["-c", "-f", COPY_TAR, "-C", guest, "."].map(str::to_owned);
+    let packed = root(&live.vm, "tar", args.to_vec(), COPY).await?;
+    if packed.status().code != 0 {
+        return Err(guest_failed(&format!("tar -c of {guest}"), &packed));
+    }
+    let staged = live.folder.join("copy.tar");
+    let fs = live.vm.fs();
+    let copied = within(COPY, "copy a tar out", fs.copy_to_host(COPY_TAR, &staged)).await;
+    let _ = within(GUEST_CALL, "remove the copied tar", fs.remove(COPY_TAR)).await;
+    copied?.map_err(backend)?;
+    let unpacked = std::fs::File::open(&staged).and_then(|tar| tar::Archive::new(tar).unpack(host));
+    let _ = std::fs::remove_file(&staged);
+    unpacked.map_err(|error| backend(format!("unpack {guest} into {host}: {error}")))
+}
+
 pub(super) async fn root(
     vm: &msb::Sandbox,
     program: &str,
@@ -285,6 +387,15 @@ mod tests {
             max_duration: Duration::from_secs(600),
             seed: None,
         }
+    }
+
+    #[test]
+    fn id_gives_the_uid_and_gid_of_gnu_and_busybox() {
+        let gnu = "uid=1000(node) gid=1000(node) groups=1000(node)\n";
+        assert_eq!(parse_id(gnu), Some(Owner(1000, 1000)));
+        let unnamed = "uid=101 gid=0(root) groups=0(root)";
+        assert_eq!(parse_id(unnamed), Some(Owner(101, 0)));
+        assert_eq!(parse_id("id: unknown user"), None);
     }
 
     #[test]

@@ -3,8 +3,8 @@
 //! The SDK is async; each port call blocks on a private runtime and runs its future as a task on a
 //! worker with a 16 MiB stack, since the SDK's futures overflow the 1 MiB main thread of a Windows
 //! debug build. `home` is microsandbox's own home (runtime, images, VMs, snapshots) and holds the
-//! adapter's `vm/<vm>/` (the host side of the VM's `/stand/run` and `/stand/net`) and
-//! `guest/<version>/` (`/stand/bin`).
+//! adapter's `vm/<vm>/` (the host side of the VM's `/stand/run` and `/stand/net`, and the tar of
+//! `copy_out` on its way) and `guest/<version>/` (`/stand/bin`).
 
 mod guest;
 mod network;
@@ -63,6 +63,8 @@ struct Live {
     launch: Launch,
     image: process::ImageDefaults,
     folder: Utf8PathBuf,
+    /// Guest paths of the disks the VM owns: its volumes and the version disk.
+    owned: Vec<String>,
     service: Job,
     execs: Mutex<BTreeMap<String, Job>>,
     peak: Arc<AtomicU64>,
@@ -172,13 +174,11 @@ impl Sandbox for Microsandbox {
         })
     }
 
-    fn copy_out(
-        &self,
-        _id: &SandboxId,
-        _guest: &str,
-        _host: &Utf8Path,
-    ) -> Result<(), SandboxError> {
-        Err(not_built("copy_out"))
+    fn copy_out(&self, id: &SandboxId, guest: &str, host: &Utf8Path) -> Result<(), SandboxError> {
+        let (id, guest, host) = (id.clone(), guest.to_owned(), host.to_owned());
+        self.block(
+            |inner| async move { process::copy_out(&*inner.live(&id)?, &guest, &host).await },
+        )
     }
 
     fn volume_sizes(&self, id: &SandboxId) -> Result<Vec<(VolumeName, u64)>, SandboxError> {
@@ -333,9 +333,6 @@ impl Inner {
     }
 
     async fn create(self: &Arc<Self>, batch: Vec<Launch>) -> Result<Vec<SandboxId>, SandboxError> {
-        for launch in &batch {
-            built(launch)?;
-        }
         let wired = {
             let mut ports = self.ports.lock().unwrap();
             let wire = |launch: &Launch| network::wire(&mut ports, launch);
@@ -379,8 +376,8 @@ impl Inner {
             .collect())
     }
 
-    /// The VM, its network, then the service under `stand-guest run`. Returns once the service's
-    /// command runs.
+    /// The VM, its scratch folders and version tree, its network, then the service under
+    /// `stand-guest run`. Returns once the service's command runs.
     async fn start(
         &self,
         name: String,
@@ -409,8 +406,8 @@ impl Inner {
             }
             _ => volumes::fresh(&name, &launch, &wiring.published, &folder, binary).await,
         };
-        let vm = match made {
-            Ok(vm) => vm,
+        let (vm, owned) = match made {
+            Ok(made) => made,
             Err(error) => {
                 remove_folder(&folder);
                 return Err(error);
@@ -419,6 +416,7 @@ impl Inner {
         // The image's config is read once the VM is made, since its create pulls a missing image.
         let started = async {
             let image = process::image_defaults(&launch).await?;
+            lay_out(&vm, &launch).await?;
             network::start(&vm, &wiring, &folder).await?;
             let service = process::start_service(&vm, &launch, &image, &folder).await?;
             Ok((image, service))
@@ -433,6 +431,7 @@ impl Inner {
                     launch,
                     image,
                     folder,
+                    owned,
                     service,
                     execs: Mutex::new(BTreeMap::new()),
                     peak,
@@ -605,17 +604,27 @@ impl Live {
     }
 }
 
-/// Stage 3 of T-11 has no version tree and no scratch folders yet.
-fn built(launch: &Launch) -> Result<(), SandboxError> {
-    if matches!(launch.seed, Some(Seed::Tree { .. })) {
-        return Err(not_built("a version tree"));
-    }
-    if launch
+/// The scratch folders and the version tree, before the service starts.
+async fn lay_out(vm: &msb::Sandbox, launch: &Launch) -> Result<(), SandboxError> {
+    let scratch: Vec<&str> = launch
         .mounts
         .iter()
-        .any(|mount| matches!(mount, Mount::Scratch { .. }))
-    {
-        return Err(not_built("scratch folders"));
+        .filter_map(|mount| match mount {
+            Mount::Scratch { guest } => Some(guest.as_str()),
+            _ => None,
+        })
+        .collect();
+    let tree = match &launch.seed {
+        Some(Seed::Tree { tar, at }) => Some((tar, at)),
+        _ => None,
+    };
+    if scratch.is_empty() && tree.is_none() {
+        return Ok(());
+    }
+    let owner = process::owner(vm).await?;
+    process::make_scratch(vm, &scratch, owner).await?;
+    if let Some((tar, at)) = tree {
+        volumes::seed_tree(vm, tar, at, owner).await?;
     }
     Ok(())
 }

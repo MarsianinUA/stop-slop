@@ -51,7 +51,8 @@ pub trait Sandbox {
     // `metrics`, `logs`, `copy_out` work only before `destroy`; after it they are `Gone`.
     fn metrics(&self, id: &SandboxId) -> Result<Metrics, SandboxError>;
     fn logs(&self, id: &SandboxId) -> Result<Vec<u8>, SandboxError>;
-    /// The guest folder as one tar packed in the guest, one SDK copy, unpacked into the empty folder `host`.
+    /// The guest folder as one tar packed in the guest, one SDK copy, unpacked into `host`, which must be an
+    /// existing empty folder (`Backend` otherwise).
     fn copy_out(&self, id: &SandboxId, guest: &str, host: &Utf8Path) -> Result<(), SandboxError>;
     /// Used bytes of each volume of `id`, by `du -sk` in the guest; after `stop`, before `snapshot`.
     fn volume_sizes(&self, id: &SandboxId) -> Result<Vec<(VolumeName, u64)>, SandboxError>;

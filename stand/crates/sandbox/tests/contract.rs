@@ -364,6 +364,11 @@ fn copy_out_brings_the_scratch_folder(sandbox: &impl Sandbox) {
     sandbox.stop(&id).unwrap();
     let host = dir.join("profile");
     fs::create_dir(&host).unwrap();
+    let refused = sandbox.copy_out(&id, "/stand/profile", &dir);
+    assert!(
+        matches!(refused, Err(SandboxError::Backend { .. })),
+        "into a folder that is not empty: {refused:?}"
+    );
     sandbox.copy_out(&id, "/stand/profile", &host).unwrap();
     assert_eq!(read(&host.join("a.txt")), "one\n");
     assert_eq!(read(&host.join("sub").join("b.txt")), "two\n");
@@ -899,6 +904,7 @@ fn write_tree(path: &Utf8Path) {
 mod live {
     use std::fs;
     use std::io::Write as _;
+    use std::path::Path;
     use std::sync::OnceLock;
     use std::sync::atomic::{AtomicU32, Ordering};
     use std::time::{Duration, Instant};
@@ -907,7 +913,7 @@ mod live {
     use camino::{Utf8Path, Utf8PathBuf};
     use sandbox::{
         Exposed, ImageRef, Launch, Metrics, Microsandbox, Outbound, Peer, PortStats, Sandbox,
-        SandboxError, SandboxId, Seed, VolumeName, Waitable,
+        SandboxError, SandboxId, Seed, SnapshotId, VolumeName, Waitable,
     };
     use tempfile::TempDir;
 
@@ -1103,6 +1109,8 @@ mod live {
         pull_of_an_unknown_image_is_not_found,
         pull_gives_digests_in_order,
         a_snapshot_outlives_its_vm,
+        tree_lands_before_the_command,
+        copy_out_brings_the_scratch_folder,
     );
 
     /// Row 88, a stop rule of T-11: without a digest the setup cache key cannot see a new image
@@ -1598,28 +1606,116 @@ Promise.all(Array.from({ length: 32 }, lane));
         case.finish(&[]);
     }
 
-    const WHO_SERVER: &str =
-        "require('http').createServer((q, s) => s.end(process.env.WHO)).listen(3000, '0.0.0.0');";
+    /// What the prepare service of a Node app leaves on its version disk: `install.js` stands in
+    /// for the package manager (44 packages of random bytes, about 450 MiB, and the one the server
+    /// needs) and the build.
+    const INSTALL: &str = r#"
+const fs = require('fs'), crypto = require('crypto');
+for (let p = 0; p < 44; p++) {
+  const dir = `node_modules/pkg-${p}/lib`;
+  fs.mkdirSync(dir, { recursive: true });
+  for (let f = 0; f < 100; f++) fs.writeFileSync(`${dir}/${f}.bin`, crypto.randomBytes(105 << 10));
+}
+fs.mkdirSync('node_modules/who', { recursive: true });
+fs.writeFileSync('node_modules/who/index.js', 'module.exports = () => process.env.WHO;');
+fs.mkdirSync('dist', { recursive: true });
+fs.copyFileSync('src/server.js', 'dist/server.js');
+"#;
+    const WHO_SERVER: &str = "const who = require('who');\n\
+         require('http').createServer((q, s) => s.end(who())).listen(3000, '0.0.0.0');\n";
 
-    /// Rows 86 and 87, a stop rule of T-11: a VM of another service from a snapshot keeps the root
-    /// disk of the snapshot and takes its own limits, network, port, bind, env and command. Stage 4
-    /// turns it into the case of the version snapshot (a tree on the version disk, about 0.6 GiB).
+    /// No folder entries, as `source::archive` writes a tree: `tar -x` makes the folders.
+    fn version_tree(path: &Utf8Path) {
+        let mut tar = tar::Builder::new(fs::File::create(path).unwrap());
+        let files = [
+            ("package.json", r#"{"name": "version", "private": true}"#),
+            ("scripts/install.js", INSTALL),
+            ("src/server.js", WHO_SERVER),
+        ];
+        for (name, text) in files {
+            let mut header = tar::Header::new_gnu();
+            header.set_size(text.len() as u64);
+            header.set_mode(0o644);
+            header.set_cksum();
+            tar.append_data(&mut header, name, text.as_bytes()).unwrap();
+        }
+        tar.finish().unwrap();
+    }
+
+    /// What the snapshot takes on the host's disk: the allocated blocks of its files, as `du`
+    /// counts them, since its disk layers are sparse files as big as the disks.
+    fn snapshot_bytes(snapshot: &SnapshotId) -> u64 {
+        let digest = snapshot.as_str().to_owned();
+        let folder = sdk(async move {
+            let all = msb::Snapshot::list().await.unwrap();
+            let found = all.into_iter().find(|listed| listed.digest() == digest);
+            found.expect("listed").path().unwrap().to_owned()
+        });
+        allocated_under(&folder)
+    }
+
+    fn allocated_under(path: &Path) -> u64 {
+        let meta = fs::symlink_metadata(path).unwrap();
+        if meta.is_dir() {
+            let entries = fs::read_dir(path).unwrap();
+            entries
+                .map(|entry| allocated_under(&entry.unwrap().path()))
+                .sum()
+        } else {
+            allocated(path, &meta)
+        }
+    }
+
+    #[cfg(unix)]
+    fn allocated(_: &Path, meta: &fs::Metadata) -> u64 {
+        use std::os::unix::fs::MetadataExt;
+        meta.blocks() * 512
+    }
+
+    #[cfg(windows)]
+    fn allocated(path: &Path, _: &fs::Metadata) -> u64 {
+        use std::os::windows::ffi::OsStrExt;
+        #[link(name = "kernel32")]
+        unsafe extern "system" {
+            fn GetCompressedFileSizeW(name: *const u16, high: *mut u32) -> u32;
+        }
+        let wide: Vec<u16> = path.as_os_str().encode_wide().chain([0]).collect();
+        let mut high = 0;
+        // SAFETY: `wide` is a path ending with NUL, and `high` lives through the call.
+        let low = unsafe { GetCompressedFileSizeW(wide.as_ptr(), &mut high) };
+        (u64::from(high) << 32) | u64::from(low)
+    }
+
+    /// Rows 86 and 87, a stop rule of T-11: the prepare service installs and builds on its version
+    /// disk, and its snapshot (about 0.6 GiB, as spike restore's) seeds a VM of another service,
+    /// which sees the tree with its dependencies and build and takes its own limits, network, port,
+    /// bind, env, workdir and command. The restore time goes into the PR description.
     #[test]
-    fn live_a_vm_from_a_snapshot_takes_its_own_launch() {
+    fn live_the_version_snapshot_seeds_another_service() {
         let Some(case) = Case::start() else { return };
         let (_first, first) = folder();
-        fs::write(first.join("who.js"), WHO_SERVER).unwrap();
+        let tar = first.join("tree.tar");
+        version_tree(&tar);
         let mut prepare = launch("prepare", NODE);
         prepare.memory = 1 << 30;
         prepare.outbound = Outbound::Public;
         prepare.env.insert("WHO".into(), "prepare".into());
+        prepare.seed = Some(Seed::Tree {
+            tar,
+            at: "/w/app".into(),
+        });
+        prepare.workdir = Some("/w/app".into());
         prepare.mounts = vec![out(&first)];
-        prepare.command =
-            sh("mkdir -p /srv && cp /stand/out/who.js /srv/ && echo $WHO > /stand/out/who");
+        prepare.command = sh("node scripts/install.js && echo $WHO > /stand/out/who");
         let prepare = case.create(vec![prepare]).remove(0);
         assert_eq!(wait_exit(case.sandbox, &prepare), Some(0));
         let snapshot = case.sandbox.snapshot(&prepare).unwrap();
         case.sandbox.destroy(&prepare).unwrap();
+        let size = snapshot_bytes(&snapshot);
+        assert!(
+            size > 400 << 20,
+            "the version disk in the snapshot: {size} bytes"
+        );
 
         let peers = [peer("api", 1, &[3000]), peer("client", 1, &[])];
         let mut api = launch("api", NODE);
@@ -1629,23 +1725,28 @@ Promise.all(Array.from({ length: 32 }, lane));
         api.ports = vec![Exposed(3000)];
         api.peers = peers.to_vec();
         api.mounts = vec![out(case.out())];
-        api.command = sh("echo $WHO > /stand/out/who && exec node /srv/who.js");
+        api.workdir = Some("/w/app".into());
+        api.command = sh("echo $WHO > /stand/out/who && exec node dist/server.js");
         let started = Instant::now();
         let api = case.create(vec![api]).remove(0);
         let restored = started.elapsed();
         case.until_passes(&api, "wget -q -O- http://127.0.0.1:3000/");
         note(&format!(
-            "node from a snapshot of another service: service started {restored:?}, ready {:?}",
+            "the version snapshot ({} MiB) in another service: service started {restored:?}, \
+             ready {:?}",
+            size >> 20,
             started.elapsed()
         ));
-        let limits = r#"nproc; awk '/^MemTotal/ {print int($2 / 1024)}' /proc/meminfo; echo $WHO"#;
+        let limits = r#"nproc; awk '/^MemTotal/ {print int($2 / 1024)}' /proc/meminfo; echo $WHO
+ls node_modules | wc -l"#;
         let (_, facts) = case.plain(&api, limits);
-        let facts: Vec<&str> = facts.lines().collect();
-        let [cpus, mib, who] = facts.as_slice() else {
-            panic!("`<vCPUs> <MiB> <who>`: {facts:?}");
+        let facts: Vec<&str> = facts.lines().map(str::trim).collect();
+        let [cpus, mib, who, packages] = facts.as_slice() else {
+            panic!("`<vCPUs> <MiB> <who> <packages>`: {facts:?}");
         };
         let mib: u32 = mib.parse().unwrap();
         assert!(*cpus == "2" && mib < 600 && *who == "api", "{facts:?}");
+        assert_eq!(*packages, "45", "the dependencies from the version disk");
         let (_, outside) = case.plain(&api, FETCH);
         assert!(outside.starts_with("ERR"), "`Off` of the Launch: {outside}");
         assert_eq!(case.read("who"), "api\n");
@@ -1662,6 +1763,56 @@ Promise.all(Array.from({ length: 32 }, lane));
             case.sandbox.destroy(id).unwrap();
         }
         case.sandbox.drop_snapshot(&snapshot).unwrap();
+        case.finish(&[]);
+    }
+
+    /// 64 MiB of random bytes on the volume, synced to its disk, then deleted.
+    const DELETED: &str =
+        "head -c 67108864 /dev/urandom > /data/junk && sync && rm /data/junk && sync";
+
+    /// The blueprint's live check of FITRIM: the blocks of deleted files stay out of the snapshot,
+    /// and a trim that fails still snapshots. A tmpfs over the mount point makes it fail: FITRIM
+    /// reaches the tmpfs, which has none, and the disk under it keeps its deleted blocks.
+    #[test]
+    fn live_trim_keeps_deleted_blocks_out_and_a_failed_trim_still_snapshots() {
+        let Some(case) = Case::start() else { return };
+        let data = VolumeName::new("data");
+        let mut trimmed = launch("trimmed", ALPINE);
+        trimmed.mounts = vec![volume(&data, "/data")];
+        trimmed.command = sh(DELETED);
+        let mut untrimmed = launch("untrimmed", ALPINE);
+        untrimmed.mounts = vec![volume(&data, "/data"), out(case.out())];
+        untrimmed.command = sh(&format!("{DELETED} && mount -t tmpfs tmpfs /data"));
+        let ids = case.create(vec![trimmed, untrimmed]);
+        for id in &ids {
+            assert_eq!(wait_exit(case.sandbox, id), Some(0), "{}", case.log(id));
+        }
+        let (code, said) = case.plain(&ids[1], "/stand/bin/stand-guest trim --mount /data");
+        assert!(
+            code == Some(125) && said.contains("not supported by its file system"),
+            "the trim of the untrimmed VM: {code:?} {said}"
+        );
+        let snapshots: Vec<SnapshotId> = ids
+            .iter()
+            .map(|id| case.sandbox.snapshot(id).unwrap())
+            .collect();
+        for id in &ids {
+            case.sandbox.destroy(id).unwrap();
+        }
+        let with = snapshot_bytes(&snapshots[0]);
+        let without = snapshot_bytes(&snapshots[1]);
+        note(&format!(
+            "a snapshot after 64 MiB deleted: {} MiB with trim, {} MiB after a failed trim",
+            with >> 20,
+            without >> 20
+        ));
+        assert!(
+            without >= with + (48 << 20),
+            "with trim {with} bytes, after a failed trim {without}"
+        );
+        for snapshot in &snapshots {
+            case.sandbox.drop_snapshot(snapshot).unwrap();
+        }
         case.finish(&[]);
     }
 }
