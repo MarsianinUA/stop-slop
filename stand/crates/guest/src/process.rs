@@ -8,9 +8,11 @@
 use std::fs::{self, File};
 use std::io::{self, Read, Write};
 use std::os::unix::process::{CommandExt, ExitStatusExt};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Command as Process, ExitCode, ExitStatus, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -22,14 +24,21 @@ use guest::{
 const POLL: Duration = Duration::from_millis(5);
 /// How long `stop` waits for `run` to record the code once the command is gone or killed.
 const CODE_WAIT: Duration = Duration::from_secs(2);
-/// How long `run` passes on what its command wrote after it ended.
+/// How long `run` goes on writing into the log what its command wrote before it ended.
 const DRAIN: Duration = Duration::from_secs(1);
 
 pub fn run(args: &RunArgs) -> ExitCode {
     const WHO: &str = "stand-guest run";
-    // The agent's pipes are root's and open to root only, so a command of another user could not
-    // reopen its stdout or stderr by name, as nginx opens `/dev/stderr` for its log. Docker gives
-    // the container's user its stdio; here pipes of this process's user carry it.
+    // The agent keeps only the last MiB of a job's output, so the command's goes into a file of
+    // its own, made first, so that a command that does not start says why there too.
+    let mut file = match File::create(&args.log) {
+        Ok(file) => file,
+        Err(error) => return crate::failed(WHO, format!("create {}: {error}", args.log.display())),
+    };
+    // Pipes, not the file: a command may reopen `/dev/stdout` by name, as nginx opens
+    // `/dev/stderr` for its log, and a file opened anew would write over the log from its start.
+    // The agent's own pipes are root's and open to root only, so they would refuse such a command
+    // of another user.
     let spawned = command(&args.command)
         .process_group(0)
         .stdout(Stdio::piped())
@@ -37,11 +46,20 @@ pub fn run(args: &RunArgs) -> ExitCode {
         .spawn();
     let mut child = match spawned {
         Ok(child) => child,
-        Err(error) => return not_started(WHO, &args.command[0], &error),
+        Err(error) => {
+            let (why, _) = start_failure(&args.command[0], &error);
+            let _ = writeln!(file, "{WHO}: {why}");
+            return not_started(WHO, &args.command[0], &error);
+        }
     };
+    let log = Arc::new(Log {
+        file: Mutex::new(file),
+        path: args.log.clone(),
+        failed: AtomicBool::new(false),
+    });
     let relays = [
-        child.stdout.take().map(|out| relay(out, io::stdout())),
-        child.stderr.take().map(|err| relay(err, io::stderr())),
+        child.stdout.take().map(|out| relay(out, Arc::clone(&log))),
+        child.stderr.take().map(|err| relay(err, Arc::clone(&log))),
     ];
     let pid = child.id() as libc::pid_t;
     let mut status = RunStatus {
@@ -73,22 +91,36 @@ pub fn run(args: &RunArgs) -> ExitCode {
     ExitCode::from(code)
 }
 
-/// Copies `from` into `to` until its end, and tells when it got there. Once `to` refuses a write,
-/// the rest is read and dropped, so the command never blocks on a full pipe.
-fn relay(
-    mut from: impl Read + Send + 'static,
-    mut to: impl Write + Send + 'static,
-) -> Receiver<()> {
+/// The command's stdout and stderr in one file, each read written whole under the lock, so the two
+/// interleave as they come.
+struct Log {
+    file: Mutex<File>,
+    path: PathBuf,
+    failed: AtomicBool,
+}
+
+impl Log {
+    /// A failed write is told once on `run`'s stderr, which the agent keeps, and the relays go on
+    /// reading: the service must neither block on a full pipe nor die for its log.
+    fn write(&self, bytes: &[u8]) {
+        let mut file = self.file.lock().unwrap_or_else(PoisonError::into_inner);
+        if let Err(error) = file.write_all(bytes)
+            && !self.failed.swap(true, Ordering::Relaxed)
+        {
+            eprintln!("stand-guest run: write {}: {error}", self.path.display());
+        }
+    }
+}
+
+/// Copies `from` into `log` until its end, and tells when it got there.
+fn relay(mut from: impl Read + Send + 'static, log: Arc<Log>) -> Receiver<()> {
     let (done, finished) = mpsc::channel();
     thread::spawn(move || {
-        let mut buf = [0; 8192];
-        let mut passing = true;
+        let mut buf = vec![0; 1 << 16];
         loop {
             match from.read(&mut buf) {
                 Ok(0) => break,
-                Ok(n) => {
-                    passing = passing && to.write_all(&buf[..n]).and_then(|()| to.flush()).is_ok()
-                }
+                Ok(n) => log.write(&buf[..n]),
                 Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
                 Err(_) => break,
             }

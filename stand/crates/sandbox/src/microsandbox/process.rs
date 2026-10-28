@@ -19,10 +19,11 @@ use msb::sandbox::{ExecOptionsBuilder, FsSetAttrs};
 use super::{GUEST_CALL, Live, POLL, backend, exec_error, guest, guest_error, network, within};
 use crate::{ExecOutcome, ImageRef, Launch, Mount, SandboxError, Stopped};
 
-/// Where `run` keeps its status file: the service's user writes it, so it is a bind of its own and
-/// `/stand/net`, which root writes, stays out of that user's reach.
+/// Where `run` keeps its status file and the service's output: the service's user writes them, so
+/// it is a bind of its own and `/stand/net`, which root writes, stays out of that user's reach.
 pub(super) const RUN_DIR: &str = "/stand/run";
 const STATUS: &str = "status.json";
+const LOG: &str = "output.log";
 /// Room for `stand-guest` to act at its own deadline and report before the SDK gives up.
 const MARGIN: Duration = Duration::from_secs(10);
 /// In `/stand/net`, where only root writes: a link the service's user put at a name in a folder of
@@ -30,7 +31,7 @@ const MARGIN: Duration = Duration::from_secs(10);
 const COPY_TAR: &str = "copy.tar";
 const STOP_SIGNAL: &str = "SIGTERM";
 const COPY: Duration = Duration::from_secs(300);
-/// `run` passes on its command's output for at most 1 s after the end.
+/// `run` writes its command's last output into the log for at most 1 s after the end.
 const RUN_END: Duration = Duration::from_secs(5);
 
 /// The host side of `RUN_DIR` in the adapter's folder of a VM.
@@ -172,6 +173,7 @@ pub(super) async fn start_service(
 ) -> Result<Job, SandboxError> {
     let run = RunArgs {
         status: status_in_guest(),
+        log: PathBuf::from(format!("{RUN_DIR}/{LOG}")),
         command: command(launch, image)?,
     };
     let args = Command::Run(run).to_args();
@@ -260,9 +262,9 @@ pub(super) async fn stop(live: &Live) -> Result<Stopped, SandboxError> {
     }
     let report = StopReport::parse(&String::from_utf8_lossy(output.stdout_bytes()))
         .map_err(|error| guest_error(error.to_string()))?;
-    // `run` passes on the command's last output after it records the code, and `logs` reads what
-    // the job passed on, so the stop returns once the job has ended too. Without a code `run`
-    // still waits for the command, and the stop does not.
+    // `run` writes the command's last output into the log after it records the code, so the stop
+    // returns once the job has ended too, and `logs` has it all. Without a code `run` still waits
+    // for the command, and the stop does not.
     if report.code.is_some() {
         let ended = async {
             loop {
@@ -507,8 +509,15 @@ pub(super) async fn wait_for_file(
     }
 }
 
-/// What the job wrote on stdout and stderr, in order.
-pub(super) async fn log(job: &Job) -> Result<Vec<u8>, SandboxError> {
+/// What the service wrote on stdout and stderr, whole, as `run` keeps it in the VM's run folder.
+pub(super) fn service_log(live: &Live) -> Result<Vec<u8>, SandboxError> {
+    let path = run_dir(&live.folder).join(LOG);
+    std::fs::read(&path).map_err(|error| backend(format!("{path}: {error}")))
+}
+
+/// What a job of `stand-guest` itself said, from the agent's record of it, which keeps the last
+/// MiB: enough for why it failed.
+async fn log(job: &Job) -> Result<Vec<u8>, SandboxError> {
     let entries = within(
         GUEST_CALL,
         "read a log",

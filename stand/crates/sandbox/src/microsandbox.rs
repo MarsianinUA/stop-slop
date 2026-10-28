@@ -188,8 +188,8 @@ impl Sandbox for Microsandbox {
     }
 
     fn logs(&self, id: &SandboxId) -> Result<Vec<u8>, SandboxError> {
-        let id = id.clone();
-        self.block(|inner| async move { process::log(&inner.live(&id)?.service).await })
+        let live = self.inner.live(id)?;
+        process::service_log(&live)
     }
 
     fn copy_out(&self, id: &SandboxId, guest: &str, host: &Utf8Path) -> Result<(), SandboxError> {

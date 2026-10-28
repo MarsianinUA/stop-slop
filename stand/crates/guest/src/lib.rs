@@ -63,10 +63,11 @@ pub struct UnexposedName {
 }
 
 /// `stand-guest run`: runs the command in its own process group, as the user of the exec, its stdout and
-/// stderr through pipes of that user, which it passes on; exits with its code.
+/// stderr through pipes of that user into `log`, as they come; exits with its code.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RunArgs {
     pub status: PathBuf,
+    pub log: PathBuf,
     pub command: Vec<String>,
 }
 
@@ -131,6 +132,7 @@ impl Command {
             Command::Run(run) => {
                 args.word("run");
                 args.path("--status", &run.status);
+                args.path("--log", &run.log);
                 args.rest(&run.command);
             }
             Command::Stop(stop) => {
@@ -180,6 +182,7 @@ impl Command {
             }),
             "run" => Command::Run(RunArgs {
                 status: flags.one("--status")?.into(),
+                log: flags.one("--log")?.into(),
                 command: flags.command()?,
             }),
             "stop" => Command::Stop(StopArgs {

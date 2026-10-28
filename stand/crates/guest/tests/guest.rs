@@ -78,6 +78,7 @@ fn argument_round_trip_for_every_subcommand() {
         }),
         Command::Run(RunArgs {
             status: "/stand/run/status.json".into(),
+            log: "/stand/run/output.log".into(),
             command: vec!["node".into(), "server.js".into()],
         }),
         Command::Stop(StopArgs {
@@ -833,11 +834,50 @@ mod process {
             .gid(4321)
             .output()
             .unwrap();
-        let said = [output.stdout, output.stderr].map(|bytes| String::from_utf8(bytes).unwrap());
-        assert_eq!(
-            (output.status.code(), said),
-            (Some(0), ["out\n".to_owned(), "err\n".to_owned()])
+        let log = fs::read_to_string(temp.path().join("output.log")).unwrap();
+        // Two pipes: the two lines come in either order.
+        let mut lines: Vec<&str> = log.lines().collect();
+        lines.sort_unstable();
+        assert_eq!((output.status.code(), lines), (Some(0), vec!["err", "out"]));
+    }
+
+    /// Beyond the last MiB that the agent keeps of a job, both streams, and none on `run`'s own.
+    #[test]
+    fn run_keeps_the_whole_output_of_its_command_in_its_log() {
+        let temp = tempfile::tempdir().unwrap();
+        let status = temp.path().join("status.json");
+        let script = "echo first; sleep 0.2; echo err >&2; sleep 0.2; \
+                      head -c 3145728 /dev/zero | tr '\\0' x; echo; echo last";
+        let output = guest(&run(&status, script, &[])).output().unwrap();
+        assert_eq!(output.status.code(), Some(0));
+        assert!(output.stdout.is_empty() && output.stderr.is_empty());
+        let log = fs::read_to_string(temp.path().join("output.log")).unwrap();
+        let x = "x".repeat(3 << 20);
+        assert!(
+            log == format!("first\nerr\n{x}\nlast\n"),
+            "{} bytes",
+            log.len()
         );
+    }
+
+    /// The service goes on when its log refuses a write: `/dev/full` takes none.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn run_tells_a_failed_log_write_once_and_its_command_runs_on() {
+        let temp = tempfile::tempdir().unwrap();
+        let status = temp.path().join("status.json");
+        let script = "head -c 1048576 /dev/zero; echo err >&2; exit 3";
+        let output = guest(&Command::Run(RunArgs {
+            status: status.clone(),
+            log: "/dev/full".into(),
+            command: sh(script, &[]),
+        }))
+        .output()
+        .unwrap();
+        let stderr = String::from_utf8(output.stderr).unwrap();
+        assert_eq!(output.status.code(), Some(3), "{stderr}");
+        assert_eq!(recorded(&status)["code"], 3);
+        assert_eq!(stderr.matches("write /dev/full").count(), 1, "{stderr}");
     }
 
     /// `sh -c <script>` with `$1`, `$2`... set to `args`.
@@ -847,9 +887,11 @@ mod process {
         shell.into_iter().chain(args).collect()
     }
 
+    /// The log beside the status file.
     fn run(status: &Path, script: &str, args: &[&Path]) -> Command {
         Command::Run(RunArgs {
             status: status.into(),
+            log: status.with_file_name("output.log"),
             command: sh(script, args),
         })
     }

@@ -1305,6 +1305,27 @@ mod live {
         case.finish(&ids);
     }
 
+    /// The agent keeps only the last MiB of a job's output; `logs` has the service's from its
+    /// first line, both streams.
+    #[test]
+    fn live_logs_keep_the_whole_output_of_a_service() {
+        let Some(case) = Case::start() else { return };
+        let mut chatty = launch("chatty", ALPINE);
+        chatty.command = sh("echo first; sleep 0.2; echo err >&2; sleep 0.2; \
+             head -c 3145728 /dev/zero | tr '\\0' x; echo; echo last");
+        let id = case.create(vec![chatty]).remove(0);
+        assert_eq!(wait_exit(case.sandbox, &id), Some(0));
+        let log = case.log(&id);
+        let x = "x".repeat(3 << 20);
+        let start = &log[..log.len().min(40)];
+        assert!(
+            log == format!("first\nerr\n{x}\nlast\n"),
+            "{} bytes from {start:?}",
+            log.len()
+        );
+        case.finish(&[id]);
+    }
+
     fn peer(service: &str, replicas: u32, ports: &[u16]) -> Peer {
         Peer {
             service: service.into(),
