@@ -53,19 +53,17 @@ The agent fixes everything at once, with no approval step. The run ends when `ch
 
 The working tree stays as it is. The run ends on a draft that the user edits.
 
-1. `gh pr view <n> --json baseRefName,headRefOid,title`.
-2. Fetch the PR head and its base without a checkout: `git fetch origin +refs/pull/<n>/head:refs/stop-slop/pr-<n> +refs/heads/<base>:refs/remotes/origin/<base>`. When the fetched head is not `headRefOid`, the PR has moved, and the run starts again.
-3. `stop-slop check --rev refs/stop-slop/pr-<n> --base origin/<base> --json`. The program reads the files straight from git.
-4. The agent reads `stop-slop rules --json`, and the project's conventions as they are at the PR head. `active` in `rules --json` still comes from the `package.json` files of the working tree, not of the PR.
-5. The agent drops:
+1. `stop-slop check --pr <n> --json`. The program asks `gh pr view <n>` for the head, the base and the title of the PR, fetches the head into `refs/stop-slop/pr-<n>` and the base into `origin/<base>` without a checkout, and reads the files straight from git. When the fetched head is not the one `gh` named, the PR moved during the fetch: the program exits with 2, and the agent runs it again.
+2. The agent reads `stop-slop rules --json`, and the project's conventions as they are at the PR head. `active` in `rules --json` still comes from the `package.json` files of the working tree, not of the PR.
+3. The agent drops:
    - false positives: a candidate its hint clears, or an error the code proves wrong;
    - what the project's conventions allow;
    - what is not the author's: an old finding with `inHunk: false` in a function the PR left alone, unless the PR made it worse. The PR touched a function when its diff changes a line of the function's code, not only a comment.
 
    When most of the codebase follows a habit a rule flags and no convention mentions it, the agent keeps the finding and points it out to the user.
-6. The agent checks each active `agent` rule in what the PR adds or changes.
-7. The agent writes a comment for every finding left, except a `parse-error`, which goes to the user. Findings of one rule in one function share a comment.
-8. The agent writes the draft to `<common>/info/stop-slop/reviews/pr-<n>.md`, see [Where the files live](#where-the-files-live). The user deletes the blocks they disagree with, edits the text, and tells the agent to send.
+4. The agent checks each active `agent` rule in what the PR adds or changes.
+5. The agent writes a comment for every finding left, except a `parse-error`, which goes to the user. Findings of one rule in one function share a comment.
+6. The agent writes the draft to `<common>/info/stop-slop/reviews/pr-<n>.md`, see [Where the files live](#where-the-files-live). Its header holds the `number`, `title` and `head` of `pr` from the output of `check`. The user deletes the blocks they disagree with, edits the text, and tells the agent to send.
 
 A review comment:
 
