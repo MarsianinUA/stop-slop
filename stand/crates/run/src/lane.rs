@@ -10,11 +10,11 @@ use std::time::{Duration, Instant};
 
 use camino::Utf8Path;
 use report::{
-    BeforeOutcome, Cause, Failure, InstanceOutput, Phase, ProbeRule, Raw, RepeatOutput, Role,
-    Setup, SetupSide,
+    BeforeOutcome, Cause, Failure, InstanceOutput, Phase, ProbeRan, ProbeRule, Raw, RepeatOutput,
+    Role, Setup, SetupSide,
 };
 use sandbox::{Sandbox, SnapshotId};
-use spec::{Condition, ServiceKind, ServiceName, Stand};
+use spec::{Condition, ServiceKind, ServiceName, Stand, Tap};
 
 use crate::drain;
 use crate::launch::{self, Frame, Seeds};
@@ -196,14 +196,15 @@ fn build<S: Sandbox>(
     let mut fleet = Fleet::default();
     let mut seeds = Seeds::default();
     let deadline = ctx.sandbox.now() + ctx.stand.setup_timeout.get();
-    let side = |sizes| SetupSide {
+    let side = |probes, sizes| SetupSide {
         sizes,
-        probes: Vec::new(),
+        probes,
         out_dir: out.to_owned(),
     };
     let halt = match start_setup(ctx, &mut fleet, &mut seeds, version, out, deadline) {
         Ok(()) => {
-            let sizes = finish_setup(ctx, &mut fleet, &mut seeds, dir).map_err(|fault| {
+            let ended = finish_setup(ctx, &mut fleet, &mut seeds, dir, out);
+            let (probes, sizes) = ended.map_err(|fault| {
                 torn(
                     ctx.sandbox,
                     &mut fleet,
@@ -211,13 +212,13 @@ fn build<S: Sandbox>(
                     Stop::Fault(Phase::Setup, fault),
                 )
             })?;
-            return Ok((side(sizes), Ok(seeds)));
+            return Ok((side(probes, sizes), Ok(seeds)));
         }
         Err(halt) => halt,
     };
     let (service, cause) = fell(&fleet, halt, Cause::SetupTimeout, Phase::Setup)
         .map_err(|stop| torn(ctx.sandbox, &mut fleet, dir, stop))?;
-    fail_setup(ctx, &mut fleet, &seeds, dir).map_err(|fault| {
+    let probes = fail_setup(ctx, &mut fleet, &seeds, dir, out).map_err(|fault| {
         torn(
             ctx.sandbox,
             &mut fleet,
@@ -231,9 +232,9 @@ fn build<S: Sandbox>(
         repeat: None,
         cause,
         logs: Some(dir.to_owned()),
-        probes: Vec::new(),
+        probes: probes.iter().map(|probe| probe.out.clone()).collect(),
     };
-    Ok((side(BTreeMap::new()), Err(failure)))
+    Ok((side(probes, BTreeMap::new()), Err(failure)))
 }
 
 /// The services of setup by levels, each after what it waits for; the version snapshot right after
@@ -316,17 +317,20 @@ fn wait_for<S: Sandbox>(
     Ok(())
 }
 
-/// After every setup service exited 0: the cut, the clean stop, the sizes and the snapshot of
-/// each VM with a volume, the drain. `metrics.json` of setup shows what the prepare service took
-/// of its limits; no measure reads it.
+/// After every setup service exited 0: the cut, the `after-setup` probes, the clean stop, the
+/// sizes and the snapshot of each VM with a volume, the drain. `metrics.json` of setup shows what
+/// the prepare service took of its limits; no measure reads it.
 fn finish_setup<S: Sandbox>(
     ctx: &mut Ctx<S>,
     fleet: &mut Fleet,
     seeds: &mut Seeds,
     dir: &Utf8Path,
-) -> Result<BTreeMap<String, u64>, StandFault> {
+    out: &Utf8Path,
+) -> Result<(Vec<ProbeRan>, BTreeMap<String, u64>), StandFault> {
     let (stand, sandbox) = (ctx.stand, ctx.sandbox);
     let cut = drain::cut(sandbox, fleet).map_err(StandFault::Sandbox)?;
+    let probes =
+        probes::run(sandbox, stand, fleet, Tap::AfterSetup, out).map_err(StandFault::Sandbox)?;
     let stopped = drain::stop(sandbox, fleet).map_err(StandFault::Sandbox)?;
     let mut sizes = BTreeMap::new();
     for member in fleet
@@ -341,18 +345,22 @@ fn finish_setup<S: Sandbox>(
     }
     drain::write_metrics(dir, fleet, &cut, &stopped)?;
     drain::drain(sandbox, fleet, dir)?;
-    Ok(sizes)
+    Ok((probes, sizes))
 }
 
-/// A failed setup: the cut, the clean stop, the drain; the snapshots it took go at once.
+/// A failed setup: the cut, the `on-failure` probes, the clean stop, the drain; the snapshots it
+/// took go at once.
 fn fail_setup<S: Sandbox>(
     ctx: &mut Ctx<S>,
     fleet: &mut Fleet,
     seeds: &Seeds,
     dir: &Utf8Path,
-) -> Result<(), StandFault> {
+    out: &Utf8Path,
+) -> Result<Vec<ProbeRan>, StandFault> {
     let sandbox = ctx.sandbox;
     let cut = drain::cut(sandbox, fleet).map_err(StandFault::Sandbox)?;
+    let probes =
+        probes::run(sandbox, ctx.stand, fleet, Tap::OnFailure, out).map_err(StandFault::Sandbox)?;
     let stopped = drain::stop(sandbox, fleet).map_err(StandFault::Sandbox)?;
     drain::write_metrics(dir, fleet, &cut, &stopped)?;
     drain::drain(sandbox, fleet, dir)?;
@@ -362,7 +370,7 @@ fn fail_setup<S: Sandbox>(
             .map_err(StandFault::Sandbox)?;
         ctx.loose.retain(|loose| loose != snapshot);
     }
-    Ok(())
+    Ok(probes)
 }
 
 /// Repeat `repeat` of `lane`, unless it already failed; a failed repeat turns it `Failed`.
@@ -386,9 +394,10 @@ fn measure<S: Sandbox>(
 }
 
 /// One measured repeat (architecture plan, «Тома, снимки и деревья», steps 3 and 4): the services
-/// by levels, the workload to its exit, then the cut, the clean stop and the drain, also when it
-/// failed. Its deadline is `timeout` from its start, readiness included. The phase is `Ready`
-/// until the `create` with the workload returned, `Workload` from then on.
+/// by levels, the workload to its exit, then the cut, the `after-workload` probes (`on-failure`
+/// when it failed), the clean stop and the drain. Its deadline is `timeout` from its start,
+/// readiness included. The phase is `Ready` until the `create` with the workload returned,
+/// `Workload` from then on.
 fn run_repeat<S: Sandbox>(
     ctx: &Ctx<S>,
     side: Side,
@@ -435,7 +444,11 @@ fn run_repeat<S: Sandbox>(
     let wall = started.map_or(Duration::ZERO, |started| {
         ended.saturating_duration_since(started)
     });
-    let instances = end_repeat(ctx.sandbox, &mut fleet, &dir)
+    let tap = match failing {
+        Some(_) => Tap::OnFailure,
+        None => Tap::AfterWorkload,
+    };
+    let (instances, probes) = end_repeat(ctx, &mut fleet, tap, &dir, &out)
         .map_err(|fault| torn(ctx.sandbox, &mut fleet, &dir, Stop::Fault(phase, fault)))?;
     let failure = failing.map(|(service, cause)| Failure {
         phase,
@@ -443,13 +456,13 @@ fn run_repeat<S: Sandbox>(
         repeat: Some(repeat),
         cause,
         logs: Some(dir.clone()),
-        probes: Vec::new(),
+        probes: probes.iter().map(|probe| probe.out.clone()).collect(),
     });
     let output = RepeatOutput {
         repeat,
         wall,
         instances,
-        probes: Vec::new(),
+        probes,
         out_dir: out,
     };
     Ok((output, failure))
@@ -476,12 +489,16 @@ fn start_repeat<S: Sandbox>(
     Ok(())
 }
 
-fn end_repeat(
-    sandbox: &impl Sandbox,
+fn end_repeat<S: Sandbox>(
+    ctx: &Ctx<S>,
     fleet: &mut Fleet,
+    tap: Tap,
     dir: &Utf8Path,
-) -> Result<Vec<InstanceOutput>, StandFault> {
+    out: &Utf8Path,
+) -> Result<(Vec<InstanceOutput>, Vec<ProbeRan>), StandFault> {
+    let sandbox = ctx.sandbox;
     let cut = drain::cut(sandbox, fleet).map_err(StandFault::Sandbox)?;
+    let probes = probes::run(sandbox, ctx.stand, fleet, tap, out).map_err(StandFault::Sandbox)?;
     let stopped = drain::stop(sandbox, fleet).map_err(StandFault::Sandbox)?;
     drain::write_metrics(dir, fleet, &cut, &stopped)?;
     let instances = fleet.members.iter().zip(cut).enumerate();
@@ -500,7 +517,7 @@ fn end_repeat(
     });
     let instances = instances.collect();
     drain::drain(sandbox, fleet, dir)?;
-    Ok(instances)
+    Ok((instances, probes))
 }
 
 /// What a halt says about the app; `Err` when the run itself stops instead.

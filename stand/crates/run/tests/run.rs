@@ -7,7 +7,7 @@ use std::fs;
 use std::time::{Duration, Instant};
 
 use camino::{Utf8Path, Utf8PathBuf};
-use report::{BeforeOutcome, Cause, Phase, Raw, Role};
+use report::{BeforeOutcome, Cause, Phase, ProbeRan, Raw, Role};
 use run::{Cancel, RunError, SetupCache, Side, StandFault, Version, Versions};
 use sandbox::{
     Call, ExecId, ExecOutcome, Exited, Fake, Fault, ImageRef, Launch, Leftovers, Metrics, Mount,
@@ -173,6 +173,10 @@ fn stops(after: Duration) -> Script {
     }
 }
 
+fn probe(file: &str, bytes: &[u8]) -> (String, ExecOutcome, Vec<u8>) {
+    (file.into(), ExecOutcome::Exited(0), bytes.to_vec())
+}
+
 /// The scripts of `EXAMPLE` where everything passes: `prepare` takes 20 s, `migrate` 2 s, `load` 30 s.
 fn example_rules() -> Vec<Rule> {
     vec![
@@ -180,13 +184,26 @@ fn example_rules() -> Vec<Rule> {
             "db",
             Script {
                 volume_bytes: 4096,
+                probes: vec![
+                    probe("probe.schema.jsonl", b"{\"table\":\"orders\"}\n"),
+                    probe("probe.orders.jsonl", b"{\"id\":1}\n"),
+                ],
                 ..stops(300 * Duration::from_millis(1))
             },
         ),
         rule("prepare", exits(0, 20 * SECOND)),
         rule("migrate", exits(0, 2 * SECOND)),
         rule("api", stops(100 * Duration::from_millis(1))),
-        rule("load", exits(0, 30 * SECOND)),
+        rule(
+            "load",
+            Script {
+                writes: vec![(
+                    "/stand/out/orders.jsonl".into(),
+                    b"{\"ok\":true}\n".to_vec(),
+                )],
+                ..exits(0, 30 * SECOND)
+            },
+        ),
     ]
 }
 
@@ -664,16 +681,25 @@ fn each_launch_has_span_as_its_max_duration_and_the_stop_of_its_service() {
 
 /// The `Fake` with what a script cannot say: `cancel` set once a `create` starts `cancel_at`
 /// (Ctrl+C in the middle of a phase); `hang`: the `n`-th VM of a service, from 1, never ends,
-/// its exit kept out of every `wait`; `fail_stop`: every `stop` is a `Backend` error.
+/// its exit kept out of every `wait`; `fail_stop`: every `stop` is a `Backend` error;
+/// `logs_grow`: each `logs` of a VM is one line longer than the one before, as the output of a
+/// running service grows; `latency`: a `wait` that saw an exit returns this much after it, as
+/// the adapter's poll does, while `Exited.at` keeps when it ended.
 struct Hooked<'f> {
     fake: &'f Fake,
     cancel_at: Option<&'static str>,
     cancel: Cancel,
     hang: Option<(&'static str, usize)>,
     fail_stop: bool,
+    logs_grow: bool,
+    latency: Duration,
     /// VMs of the service of `hang` so far.
     made: Cell<usize>,
     hidden: RefCell<Vec<SandboxId>>,
+    /// `logs` calls so far, by VM.
+    reads: RefCell<Vec<(SandboxId, usize)>>,
+    /// The time each `exec` had left at its call.
+    deadlines: RefCell<Vec<Duration>>,
 }
 
 impl<'f> Hooked<'f> {
@@ -684,9 +710,17 @@ impl<'f> Hooked<'f> {
             cancel: Cancel::new(),
             hang: None,
             fail_stop: false,
+            logs_grow: false,
+            latency: Duration::ZERO,
             made: Cell::new(0),
             hidden: RefCell::new(Vec::new()),
+            reads: RefCell::new(Vec::new()),
+            deadlines: RefCell::new(Vec::new()),
         }
+    }
+
+    fn run(&self, case: &Case, versions: &Versions) -> Result<Raw, RunError> {
+        run::run(&case.stand, self, versions, &case.run_dir(), &self.cancel)
     }
 }
 
@@ -729,7 +763,12 @@ impl Sandbox for Hooked<'_> {
             .filter(|waited| !matches!(waited, Waitable::Sandbox(id) if hidden.contains(id)))
             .cloned()
             .collect();
-        self.fake.wait(&what, deadline)
+        let exited = self.fake.wait(&what, deadline)?;
+        if exited.is_some() && !self.latency.is_zero() {
+            // Nothing to wait for: the `Fake` moves its clock to the deadline.
+            self.fake.wait(&[], self.fake.now() + self.latency)?;
+        }
+        Ok(exited)
     }
     fn exec(
         &self,
@@ -738,6 +777,8 @@ impl Sandbox for Hooked<'_> {
         deadline: Instant,
         stdout: &Utf8Path,
     ) -> Result<ExecOutcome, SandboxError> {
+        let left = deadline.saturating_duration_since(self.fake.now());
+        self.deadlines.borrow_mut().push(left);
         self.fake.exec(id, argv, deadline, stdout)
     }
     fn stop(&self, id: &SandboxId) -> Result<Stopped, SandboxError> {
@@ -754,7 +795,23 @@ impl Sandbox for Hooked<'_> {
         self.fake.metrics(id)
     }
     fn logs(&self, id: &SandboxId) -> Result<Vec<u8>, SandboxError> {
-        self.fake.logs(id)
+        let bytes = self.fake.logs(id)?;
+        if !self.logs_grow {
+            return Ok(bytes);
+        }
+        let mut reads = self.reads.borrow_mut();
+        let lines = match reads.iter_mut().find(|(read, _)| read == id) {
+            Some((_, lines)) => {
+                *lines += 1;
+                *lines
+            }
+            None => {
+                reads.push((id.clone(), 1));
+                1
+            }
+        };
+        let log: String = (1..=lines).map(|line| format!("{id} {line}\n")).collect();
+        Ok(log.into_bytes())
     }
     fn copy_out(&self, id: &SandboxId, guest: &str, host: &Utf8Path) -> Result<(), SandboxError> {
         self.fake.copy_out(id, guest, host)
@@ -827,13 +884,7 @@ x-stand: { workload: load }
         cancel_at: Some("migrate"),
         ..Hooked::new(&fake)
     };
-    let result = run::run(
-        &case.stand,
-        &sandbox,
-        &case.versions(true),
-        &case.run_dir(),
-        &sandbox.cancel,
-    );
+    let result = sandbox.run(&case, &case.versions(true));
     assert!(
         matches!(
             result,
@@ -1120,14 +1171,19 @@ fn with_before_the_repeats_take_turns_and_the_harness_is_the_same() {
 
 #[test]
 fn wall_runs_from_the_create_of_the_workload_to_its_exit() {
-    // `api` gets healthy at its second attempt: the workload starts 2 s into each repeat.
+    // `api` gets healthy at its second attempt, so the workload starts some seconds into each
+    // repeat, and each `wait` returns 250 ms after the exit it saw: `wall` is still 30 s.
     let case = Case::new(EXAMPLE);
     let api = Script {
         health: vec![Some(1), Some(0)],
         ..stops(SECOND)
     };
     let fake = fake(with("api", api));
-    let raw = case.run(&fake, &case.versions(false)).unwrap();
+    let sandbox = Hooked {
+        latency: 250 * Duration::from_millis(1),
+        ..Hooked::new(&fake)
+    };
+    let raw = sandbox.run(&case, &case.versions(false)).unwrap();
     let journal = fake.journal();
     let api: Vec<SandboxId> = created(&journal)
         .into_iter()
@@ -1214,13 +1270,7 @@ fn a_failure_of_the_head_in_a_repeat_ends_the_run_with_what_it_collected() {
         hang: Some(("load", 2)),
         ..Hooked::new(&fake)
     };
-    let result = run::run(
-        &case.stand,
-        &sandbox,
-        &case.versions(false),
-        &case.run_dir(),
-        &sandbox.cancel,
-    );
+    let result = sandbox.run(&case, &case.versions(false));
     let failed = app_failure(result);
     let failure = &failed.failure;
     assert_eq!(
@@ -1385,13 +1435,7 @@ fn cancel_in_a_repeat_destroys_the_vms_and_leaves_the_raw_outputs() {
             cancel_at: Some(at),
             ..Hooked::new(&fake)
         };
-        let result = run::run(
-            &case.stand,
-            &sandbox,
-            &case.versions(false),
-            &case.run_dir(),
-            &sandbox.cancel,
-        );
+        let result = sandbox.run(&case, &case.versions(false));
         assert!(
             matches!(&result, Err(RunError::Cancelled { phase: own }) if *own == phase),
             "{result:?}"
@@ -1489,13 +1533,7 @@ fn a_stand_fault_in_a_repeat_tears_it_down_in_its_phase() {
             fail_stop: true,
             ..Hooked::new(&fake)
         };
-        let result = run::run(
-            &case.stand,
-            &sandbox,
-            &case.versions(false),
-            &case.run_dir(),
-            &sandbox.cancel,
-        );
+        let result = sandbox.run(&case, &case.versions(false));
         assert!(
             matches!(
                 &result,
@@ -1508,5 +1546,338 @@ fn a_stand_fault_in_a_repeat_tears_it_down_in_its_phase() {
         );
         assert!(case.run_dir().join("repeat-1-head/db-1.log").is_file());
         assert_left(&fake, &[]);
+    }
+}
+
+// --- probes and the cut ------------------------------------------------------------------------
+
+/// `EXAMPLE` with an `on-failure` probe in `api`, which no setup starts.
+fn traced() -> String {
+    EXAMPLE.replace(
+        "  probes:\n",
+        "  probes:\n    trace: { in: api, at: on-failure, run: [\"cat\", \"/tmp/trace\"] }\n",
+    )
+}
+
+/// Each `Exec` of `journal`: its index, its `stdout` and its VM as `service-replica`.
+fn execs(journal: &[Call]) -> Vec<(usize, Utf8PathBuf, String)> {
+    let made = created(journal);
+    let mut execs = Vec::new();
+    for (index, call) in journal.iter().enumerate() {
+        if let Call::Exec { id, stdout, .. } = call {
+            let (launch, _) = made.iter().find(|(_, made)| made == id).unwrap();
+            let vm = format!("{}-{}", launch.service, launch.replica);
+            execs.push((index, stdout.clone(), vm));
+        }
+    }
+    execs
+}
+
+fn ran(probes: &[ProbeRan]) -> Vec<&str> {
+    probes.iter().map(|probe| probe.name.as_str()).collect()
+}
+
+/// No `Stop` from the last `Create` before `index` to `index`: a probe there comes before the
+/// stops of its phase.
+fn before_the_stops(journal: &[Call], index: usize) -> bool {
+    let phase = journal[..index]
+        .iter()
+        .rposition(|call| matches!(call, Call::Create { .. }));
+    let phase = &journal[phase.unwrap()..index];
+    !phase.iter().any(|call| matches!(call, Call::Stop(_)))
+}
+
+#[test]
+fn probes_run_at_their_taps_and_write_into_out() {
+    let case = Case::new(EXAMPLE);
+    let fake = fake(example_rules());
+    let sandbox = Hooked::new(&fake);
+    let raw = sandbox.run(&case, &case.versions(true)).unwrap();
+    let setups = [
+        (Side::Head, &raw.setup.head),
+        (Side::Before, raw.setup.before.as_ref().unwrap()),
+    ];
+    for (side, setup) in setups {
+        assert_eq!(ran(&setup.probes), ["schema"], "{side}");
+        let schema = &setup.probes[0];
+        let out = case.run_dir().join(format!("setup-{side}/out"));
+        assert_eq!(schema.out, out.join("probe.schema.jsonl"));
+        assert_eq!(schema.outcome, ExecOutcome::Exited(0));
+        assert_eq!(fs::read(&schema.out).unwrap(), b"{\"table\":\"orders\"}\n");
+        assert!(
+            out.join("probe.schema.jsonl.err").is_file(),
+            "its stderr beside it"
+        );
+    }
+    let Some(BeforeOutcome::Passed(before)) = &raw.before else {
+        panic!("{:?}", raw.before)
+    };
+    for output in raw.head.iter().chain(before) {
+        assert_eq!(ran(&output.probes), ["orders"], "repeat {}", output.repeat);
+        let orders = &output.probes[0];
+        assert_eq!(orders.out, output.out_dir.join("probe.orders.jsonl"));
+        assert_eq!(fs::read(&orders.out).unwrap(), b"{\"id\":1}\n");
+        assert!(
+            output.out_dir.join("orders.jsonl").is_file(),
+            "the workload's file"
+        );
+    }
+    let files: Vec<&str> = raw.probes.keys().map(String::as_str).collect();
+    assert_eq!(
+        files,
+        [
+            "probe.last.jsonl",
+            "probe.orders.jsonl",
+            "probe.schema.jsonl"
+        ]
+    );
+    let orders = &raw.probes["probe.orders.jsonl"];
+    assert_eq!(
+        (orders.key.as_deref(), orders.ignore.as_slice()),
+        (Some("/id"), ["/at".to_owned()].as_slice())
+    );
+    // Each in replica 1 of `db` with its own `run` and 30 s to go, before the stops of its phase:
+    // `schema` once per setup, `orders` in each repeat, `last` never.
+    let journal = fake.journal();
+    let mut phases = Vec::new();
+    for (index, stdout, vm) in execs(&journal) {
+        assert_eq!(vm, "db-1");
+        assert!(before_the_stops(&journal, index), "{stdout}");
+        let Call::Exec { argv, .. } = &journal[index] else {
+            unreachable!()
+        };
+        let phase = stdout.parent().unwrap().parent().unwrap().file_name();
+        phases.push((phase.unwrap().to_owned(), argv[3].as_str()));
+    }
+    let mut expected = vec![
+        ("setup-before".to_owned(), "select 1"),
+        ("setup-head".to_owned(), "select 1"),
+    ];
+    for repeat in 1..=3 {
+        for side in ["before", "head"] {
+            expected.push((format!("repeat-{repeat}-{side}"), "select 2"));
+        }
+    }
+    assert_eq!(phases, expected);
+    assert_eq!(*sandbox.deadlines.borrow(), [30 * SECOND; 2 + 2 * 3]);
+    assert_clean(&fake, &[]);
+}
+
+#[test]
+fn the_cut_reads_every_instance_before_the_first_probe() {
+    let case = Case::new(EXAMPLE);
+    let fake = fake(example_rules());
+    let sandbox = Hooked {
+        logs_grow: true,
+        ..Hooked::new(&fake)
+    };
+    let raw = sandbox.run(&case, &case.versions(false)).unwrap();
+    let journal = fake.journal();
+    let made = created(&journal);
+    let probes: Vec<usize> = execs(&journal).iter().map(|(index, ..)| *index).collect();
+    let mut cuts = Vec::new();
+    for probe in probes {
+        let before = &journal[..probe];
+        // The measured window ends with the last `wait`: the exit of the workload, or of the last
+        // setup service.
+        let window = before
+            .iter()
+            .rposition(|call| matches!(call, Call::Wait { .. }));
+        let cut = &before[window.unwrap()..];
+        let mut read = Vec::new();
+        for (launch, id) in &made {
+            let live = before
+                .iter()
+                .any(|call| matches!(call, Call::Create { ids, .. } if ids.contains(id)))
+                && !before
+                    .iter()
+                    .any(|call| matches!(call, Call::Destroy(gone) if gone == id));
+            if !live {
+                continue;
+            }
+            let metrics = cut
+                .iter()
+                .any(|call| matches!(call, Call::Metrics(of) if of == id));
+            let logs = cut
+                .iter()
+                .any(|call| matches!(call, Call::Logs(of) if of == id));
+            assert!(metrics && logs, "{}-{}", launch.service, launch.replica);
+            read.push(format!("{}-{}", launch.service, launch.replica));
+        }
+        cuts.push(read);
+    }
+    let repeat = ["db-1", "api-1", "api-2", "load-1"];
+    assert_eq!(
+        cuts,
+        [
+            &["db-1", "prepare-1", "migrate-1"][..],
+            &repeat,
+            &repeat,
+            &repeat
+        ]
+    );
+    // Each read of a log is a line longer than the one before: the cut read one line, the drain
+    // wrote it with what came after.
+    let first_line = |log: &Utf8Path| {
+        let bytes = fs::read(log).unwrap();
+        let line = bytes.iter().position(|&byte| byte == b'\n').unwrap() + 1;
+        assert!(bytes.len() > line, "{log} has what came after the cut");
+        line as u64
+    };
+    for output in &raw.head {
+        let dir = output.out_dir.parent().unwrap();
+        let text = fs::read_to_string(dir.join("metrics.json")).unwrap();
+        let metrics: serde_json::Value = serde_json::from_str(&text).unwrap();
+        let written = metrics.as_array().unwrap();
+        for (instance, written) in output.instances.iter().zip(written) {
+            assert_eq!(instance.log_cut, first_line(&instance.log), "{dir}");
+            assert_eq!(written["logCut"], instance.log_cut);
+        }
+    }
+    let setup = case.run_dir().join("setup-head");
+    let text = fs::read_to_string(setup.join("metrics.json")).unwrap();
+    let metrics: serde_json::Value = serde_json::from_str(&text).unwrap();
+    for written in metrics.as_array().unwrap() {
+        let vm = format!(
+            "{}-{}",
+            written["service"].as_str().unwrap(),
+            written["replica"]
+        );
+        let log = setup.join(format!("{vm}.log"));
+        assert_eq!(written["logCut"], first_line(&log), "{vm}");
+    }
+    assert_clean(&fake, &[]);
+}
+
+#[test]
+fn on_failure_probes_run_before_the_stop_and_their_outputs_are_in_the_failure() {
+    // The workload fails in the first repeat: `last` in `db` and `trace` in replica 1 of `api`
+    // run there instead of `orders`.
+    let case = Case::new(&traced());
+    let failing = fake(with("load", exits(4, SECOND)));
+    let failed = app_failure(case.run(&failing, &case.versions(false)));
+    let out = case.run_dir().join("repeat-1-head/out");
+    let outputs = [out.join("probe.last.jsonl"), out.join("probe.trace.jsonl")];
+    assert_eq!(failed.failure.probes, outputs);
+    assert_eq!(ran(&failed.raw.head[0].probes), ["last", "trace"]);
+    let journal = failing.journal();
+    let probed = execs(&journal);
+    let vms: Vec<(&str, &str)> = probed
+        .iter()
+        .map(|(_, stdout, vm)| (stdout.file_name().unwrap(), vm.as_str()))
+        .collect();
+    assert_eq!(
+        vms,
+        [
+            ("probe.schema.jsonl", "db-1"),
+            ("probe.last.jsonl", "db-1"),
+            ("probe.trace.jsonl", "api-1")
+        ]
+    );
+    for (index, stdout, _) in &probed {
+        assert!(before_the_stops(&journal, *index), "{stdout}");
+    }
+    assert_clean(&failing, &[]);
+
+    // `migrate` fails in setup: `last` runs, `trace` does not, since no setup starts `api`.
+    let case = Case::new(&traced());
+    let failing = fake(with("migrate", exits(1, 2 * SECOND)));
+    let failed = app_failure(case.run(&failing, &case.versions(false)));
+    let out = case.run_dir().join("setup-head/out/probe.last.jsonl");
+    assert_eq!(failed.failure.probes, [out]);
+    assert_eq!(ran(&failed.raw.setup.head.probes), ["last"]);
+    let journal = failing.journal();
+    let probed = execs(&journal);
+    assert_eq!(probed.len(), 1);
+    let (index, _, vm) = &probed[0];
+    assert_eq!(vm, "db-1");
+    assert!(before_the_stops(&journal, *index));
+    assert_clean(&failing, &[]);
+}
+
+#[test]
+fn a_probe_that_times_out_or_exits_nonzero_is_what_it_saw() {
+    let case = Case::new(EXAMPLE);
+    let db = Script {
+        volume_bytes: 4096,
+        probes: vec![
+            (
+                "probe.schema.jsonl".into(),
+                ExecOutcome::Exited(2),
+                b"half\n".to_vec(),
+            ),
+            (
+                "probe.orders.jsonl".into(),
+                ExecOutcome::TimedOut,
+                Vec::new(),
+            ),
+            ("probe.last.jsonl".into(), ExecOutcome::TimedOut, Vec::new()),
+        ],
+        ..stops(SECOND)
+    };
+    let saw = fake(with("db", db.clone()));
+    let raw = case.run(&saw, &case.versions(false)).unwrap();
+    let schema = &raw.setup.head.probes[0];
+    assert_eq!(schema.outcome, ExecOutcome::Exited(2));
+    assert_eq!(fs::read(&schema.out).unwrap(), b"half\n");
+    assert_eq!(raw.head.len(), 3, "the run goes on");
+    for output in &raw.head {
+        assert_eq!(output.probes[0].outcome, ExecOutcome::TimedOut);
+        assert!(output.probes[0].out.is_file());
+    }
+    assert_clean(&saw, &[]);
+
+    // An `on-failure` probe past its deadline is still an output of the failure.
+    let case = Case::new(EXAMPLE);
+    let mut rules = with("db", db);
+    rules.retain(|rule| rule.service != "load");
+    rules.push(rule("load", exits(4, SECOND)));
+    let saw = fake(rules);
+    let failed = app_failure(case.run(&saw, &case.versions(false)));
+    let last = case.run_dir().join("repeat-1-head/out/probe.last.jsonl");
+    assert_eq!(failed.failure.probes, [last]);
+    assert_eq!(failed.raw.head[0].probes[0].outcome, ExecOutcome::TimedOut);
+    assert_clean(&saw, &[]);
+}
+
+#[test]
+fn stand_out_goes_to_the_workload_and_every_service_with_a_probe() {
+    let cases = [
+        (EXAMPLE.to_owned(), &["db", "load"][..]),
+        (traced(), &["api", "db", "load"][..]),
+    ];
+    for (recipe, probed) in cases {
+        let case = Case::new(&recipe);
+        let fake = fake(example_rules());
+        case.run(&fake, &case.versions(true)).unwrap();
+        let mut bound = BTreeSet::new();
+        for (launch, _) in created(&fake.journal()) {
+            let outs: Vec<(&Utf8Path, bool)> = launch
+                .mounts
+                .iter()
+                .filter_map(|mount| match mount {
+                    Mount::Bind {
+                        host,
+                        guest,
+                        read_only,
+                    } if guest == "/stand/out" => Some((host.as_path(), *read_only)),
+                    _ => None,
+                })
+                .collect();
+            match outs.as_slice() {
+                [] => {}
+                // The `out/` of its phase, writable.
+                [(host, false)] => {
+                    assert_eq!(host.file_name(), Some("out"));
+                    let phase = host.parent().unwrap();
+                    assert_eq!(phase.parent(), Some(case.run_dir().as_path()));
+                    bound.insert(launch.service.as_str().to_owned());
+                }
+                other => panic!("{}: {other:?}", launch.service),
+            }
+        }
+        let probed: BTreeSet<String> = probed.iter().map(|name| name.to_string()).collect();
+        assert_eq!(bound, probed);
+        assert_clean(&fake, &[]);
     }
 }
