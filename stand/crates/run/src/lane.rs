@@ -1,8 +1,9 @@
 //! The lane of each version (architecture plan, row 10) and the steps of one repeat. Each version
-//! is set up, "before" first, then the measured repeats go in turns, "before" first, then the
-//! coverage repeat of the head. A failure of "before" stops its lane only; a failure of the head
-//! ends the run. Only one phase has VMs at a time, so no two live VMs share a service and a
-//! replica: the adapter keeps one host port per (service, replica, port) (plan T-11, decision 7).
+//! is set up or taken from its cache entry, "before" first, then the measured repeats go in turns,
+//! "before" first, then the coverage repeat of the head. A failure of "before" stops its lane
+//! only; a failure of the head ends the run. Only one phase has VMs at a time, so no two live VMs
+//! share a service and a replica: the adapter keeps one host port per (service, replica, port)
+//! (plan T-11, decision 7).
 
 use std::collections::btree_map::Entry;
 use std::collections::{BTreeMap, BTreeSet};
@@ -21,7 +22,9 @@ use spec::{Condition, ServiceKind, ServiceName, Stand, Tap};
 use crate::drain;
 use crate::launch::{self, Frame, Seeds};
 use crate::ready::{Fleet, Halt, Member};
-use crate::{Cancel, Failed, RunError, Side, StandFault, Version, Versions, probes, span};
+use crate::{
+    Cancel, Failed, RunError, SetupCache, Side, StandFault, Version, Versions, cache, probes, span,
+};
 
 /// The run stops in `Phase`: a breakage of the stand, or `Cancel`.
 enum Stop {
@@ -194,6 +197,7 @@ fn raw(
     }
 }
 
+/// From the cache entry on a hit; else setup as without a cache, and its entry once it passed.
 fn set_up<S: Sandbox>(
     ctx: &mut Ctx<S>,
     side: Side,
@@ -202,15 +206,29 @@ fn set_up<S: Sandbox>(
     if ctx.cancel.is_cancelled() {
         return Err(Stop::Cancelled(Phase::Setup));
     }
+    let fault = |fault| Stop::Fault(Phase::Setup, fault);
     let dir = ctx.run_dir.join(format!("setup-{side}"));
     let out = dir.join("out");
+    let outputs = Vec::new();
+    let entry = match &version.setup {
+        SetupCache::Hit(entry) => {
+            let (seeds, setup) = cache::hit(ctx.stand, entry, &out).map_err(fault)?;
+            return Ok((setup, Lane::Ready { seeds, outputs }));
+        }
+        SetupCache::Build(entry) => entry,
+    };
     fs::create_dir_all(&out)
         .map_err(StandFault::io(&out))
-        .map_err(|fault| Stop::Fault(Phase::Setup, fault))?;
+        .map_err(fault)?;
     let (setup, built) = build(ctx, version, &dir, &out)?;
-    let outputs = Vec::new();
     let lane = match built {
-        Ok(seeds) => Lane::Ready { seeds, outputs },
+        Ok(seeds) => {
+            cache::write(entry, &seeds, &setup).map_err(fault)?;
+            // The entry holds them now; `cli` drops them with the entry.
+            ctx.loose
+                .retain(|loose| !seeds.snapshots().any(|own| own == loose));
+            Lane::Ready { seeds, outputs }
+        }
         Err(failure) => Lane::Failed { failure, outputs },
     };
     Ok((setup, lane))

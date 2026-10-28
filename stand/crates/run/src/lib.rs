@@ -15,11 +15,14 @@ use sandbox::{Sandbox, SandboxError};
 use serde::{Deserialize, Serialize};
 use spec::Stand;
 
+mod cache;
 mod drain;
 mod lane;
 mod launch;
 mod probes;
 mod ready;
+
+pub use cache::cached_ids;
 
 /// Over the sum of the timeouts in `span`: readiness, stops, drains and snapshots between them.
 const SPAN_MARGIN: Duration = Duration::from_secs(10 * 60);
@@ -163,6 +166,14 @@ impl StandFault {
         move |source| StandFault::Io {
             path: path.to_owned(),
             source,
+        }
+    }
+
+    /// A file of `run` that is missing or does not read.
+    fn bad(path: &Utf8Path, message: impl fmt::Display) -> StandFault {
+        StandFault::Io {
+            path: path.to_owned(),
+            source: io::Error::new(io::ErrorKind::InvalidData, message.to_string()),
         }
     }
 }

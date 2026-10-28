@@ -2,7 +2,7 @@
 //! `spec` builds its newtypes), runs it, and reads the journal of the `Fake`.
 
 use std::cell::{Cell, RefCell};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::time::{Duration, Instant};
 
@@ -123,6 +123,13 @@ impl Case {
 
     fn entry(&self, side: Side) -> Utf8PathBuf {
         self.root.join(format!("entry-{side}"))
+    }
+
+    /// The snapshots the entries list: a run leaves them to `cli`, which drops them with an entry.
+    fn cached(&self) -> Vec<SnapshotId> {
+        let sides = [Side::Head, Side::Before];
+        let lists = sides.map(|side| run::cached_ids(&self.entry(side)).unwrap());
+        lists.into_iter().flatten().flatten().collect()
     }
 
     fn version(&self, side: Side) -> Version {
@@ -285,6 +292,31 @@ fn app_failure(result: Result<Raw, RunError>) -> Box<run::Failed> {
     }
 }
 
+fn names_in(dir: &Utf8Path) -> Vec<String> {
+    let names = fs::read_dir(dir).unwrap().map(|entry| {
+        let name = entry.unwrap().file_name();
+        name.into_string().unwrap()
+    });
+    let mut names: Vec<String> = names.collect();
+    names.sort();
+    names
+}
+
+/// The files under `dir` with their bytes, by their path from it.
+fn files_in(dir: &Utf8Path) -> BTreeMap<String, Vec<u8>> {
+    let mut files = BTreeMap::new();
+    for name in names_in(dir) {
+        let path = dir.join(&name);
+        if path.is_dir() {
+            let nested = files_in(&path).into_iter();
+            files.extend(nested.map(|(inner, bytes)| (format!("{name}/{inner}"), bytes)));
+        } else {
+            files.insert(name, fs::read(&path).unwrap());
+        }
+    }
+    files
+}
+
 // --- setup -------------------------------------------------------------------------------------
 
 #[test]
@@ -373,7 +405,7 @@ fn the_prepare_service_unpacks_the_tree_and_its_snapshot_seeds_the_other_tree_se
         );
         assert!(taken < migrate);
     }
-    assert_clean(&fake, &[]);
+    assert_clean(&fake, &case.cached());
 }
 
 /// No prepare service: the profiled `api` runs in setup, for `fill`, and in every repeat; the
@@ -434,7 +466,7 @@ fn without_a_prepare_service_every_tree_service_unpacks_the_tree() {
             .iter()
             .any(|call| matches!(call, Call::Snapshot { .. }))
     );
-    assert_clean(&fake, &[]);
+    assert_clean(&fake, &case.cached());
 }
 
 #[test]
@@ -487,7 +519,7 @@ fn setup_stops_each_volume_vm_then_takes_its_size_and_snapshot() {
         [("db", true), ("prepare", false), ("migrate", false)]
     );
     assert!(case.run_dir().join("setup-head/db-1.log").is_file());
-    assert_clean(&fake, &[]);
+    assert_clean(&fake, &case.cached());
 }
 
 #[test]
@@ -512,6 +544,9 @@ fn a_failed_setup_is_an_app_failure_that_drops_its_snapshots_and_writes_no_entry
     );
     assert!(failed.kept.is_empty());
     assert!(failed.raw.head.is_empty());
+    let entry = case.entry(Side::Head);
+    assert_eq!(run::cached_ids(&entry).unwrap(), None);
+    assert!(names_in(&entry).is_empty(), "nothing in the entry");
     let journal = fake.journal();
     let version = journal.iter().find_map(|call| match call {
         Call::Snapshot { snapshot, .. } => snapshot.clone(),
@@ -523,7 +558,7 @@ fn a_failed_setup_is_an_app_failure_that_drops_its_snapshots_and_writes_no_entry
             .iter()
             .any(|call| matches!(call, Call::DropSnapshot(id) if *id == version))
     );
-    assert_clean(&fake, &[]);
+    assert_clean(&fake, &case.cached());
 }
 
 #[test]
@@ -537,7 +572,7 @@ fn setup_fails_at_its_timeout_and_on_an_unhealthy_database() {
         (Phase::Setup, Some("prepare"), Cause::SetupTimeout)
     );
     assert_eq!(hung.now() - start, 10 * 60 * SECOND);
-    assert_clean(&hung, &[]);
+    assert_clean(&hung, &case.cached());
 
     let case = Case::new(EXAMPLE);
     let sick = fake(with(
@@ -552,7 +587,7 @@ fn setup_fails_at_its_timeout_and_on_an_unhealthy_database() {
         (failure.phase, failure.service.as_deref(), failure.cause),
         (Phase::Setup, Some("db"), Cause::Unhealthy)
     );
-    assert_clean(&sick, &[]);
+    assert_clean(&sick, &case.cached());
 
     // Each attempt hangs until the guest kills it at the default `timeout` of 30 s: three failed
     // attempts with 1 s between them.
@@ -580,7 +615,7 @@ fn setup_fails_at_its_timeout_and_on_an_unhealthy_database() {
         })
         .collect();
     assert_eq!(attempts, [30 * SECOND; 3]);
-    assert_clean(&hanging, &[]);
+    assert_clean(&hanging, &case.cached());
 
     // The deadline cuts the second attempt short: that is the setup timeout, not its last retry.
     let recipe = EXAMPLE
@@ -604,7 +639,7 @@ fn setup_fails_at_its_timeout_and_on_an_unhealthy_database() {
         (Some("db"), Cause::SetupTimeout)
     );
     assert_eq!(cut.now() - start, 50 * SECOND);
-    assert_clean(&cut, &[]);
+    assert_clean(&cut, &case.cached());
 
     // Failures before `start_period` do not count: seven fail, the five in its first 5 s are free.
     let case = Case::new(&EXAMPLE.replace(
@@ -621,7 +656,7 @@ fn setup_fails_at_its_timeout_and_on_an_unhealthy_database() {
         },
     ));
     case.run(&starting, &case.versions(false)).unwrap();
-    assert_clean(&starting, &[]);
+    assert_clean(&starting, &case.cached());
 }
 
 #[test]
@@ -652,7 +687,7 @@ fn a_healthcheck_attempt_waits_with_every_running_vm_and_a_neighbour_dies_in_it(
         what.contains(&Waitable::Sandbox(prepare)),
         "the prepare VM runs beside db"
     );
-    assert_clean(&fake, &[]);
+    assert_clean(&fake, &case.cached());
 
     // `db` never gets healthy and `prepare` crashes meanwhile: the crash ends setup, not the deadline.
     let case = Case::new(EXAMPLE);
@@ -671,7 +706,7 @@ fn a_healthcheck_attempt_waits_with_every_running_vm_and_a_neighbour_dies_in_it(
         (failure.service.as_deref(), failure.cause),
         (Some("prepare"), Cause::Exit(2))
     );
-    assert_clean(&crashing, &[]);
+    assert_clean(&crashing, &case.cached());
 }
 
 #[test]
@@ -696,7 +731,7 @@ fn each_launch_has_span_as_its_max_duration_and_the_stop_of_its_service() {
         );
         assert_eq!(launch.peers.len(), 5, "every service resolves");
     }
-    assert_clean(&fake, &[]);
+    assert_clean(&fake, &case.cached());
 }
 
 /// The `Fake` with what a script cannot say: `cancel` set once a `create` starts `cancel_at`
@@ -704,7 +739,8 @@ fn each_launch_has_span_as_its_max_duration_and_the_stop_of_its_service() {
 /// its exit kept out of every `wait`; `fail_stop`: every `stop` is a `Backend` error;
 /// `logs_grow`: each `logs` of a VM is one line longer than the one before, as the output of a
 /// running service grows; `latency`: a `wait` that saw an exit returns this much after it, as
-/// the adapter's poll does, while `Exited.at` keeps when it ended.
+/// the adapter's poll does, while `Exited.at` keeps when it ended; `entry`: a file whose
+/// presence each `create` and `destroy` notes in `seen`, by VM.
 struct Hooked<'f> {
     fake: &'f Fake,
     cancel_at: Option<&'static str>,
@@ -720,6 +756,8 @@ struct Hooked<'f> {
     reads: RefCell<Vec<(SandboxId, usize)>>,
     /// The time each `exec` had left at its call.
     deadlines: RefCell<Vec<Duration>>,
+    entry: Option<Utf8PathBuf>,
+    seen: RefCell<Vec<(SandboxId, bool)>>,
 }
 
 impl<'f> Hooked<'f> {
@@ -736,6 +774,14 @@ impl<'f> Hooked<'f> {
             hidden: RefCell::new(Vec::new()),
             reads: RefCell::new(Vec::new()),
             deadlines: RefCell::new(Vec::new()),
+            entry: None,
+            seen: RefCell::new(Vec::new()),
+        }
+    }
+
+    fn note(&self, id: &SandboxId) {
+        if let Some(entry) = &self.entry {
+            self.seen.borrow_mut().push((id.clone(), entry.exists()));
         }
     }
 
@@ -754,6 +800,7 @@ impl Sandbox for Hooked<'_> {
     fn create(&self, batch: &[Launch]) -> Result<Vec<SandboxId>, SandboxError> {
         let ids = self.fake.create(batch)?;
         for (launch, id) in batch.iter().zip(&ids) {
+            self.note(id);
             if self.cancel_at == Some(launch.service.as_str()) {
                 self.cancel.cancel();
             }
@@ -843,6 +890,7 @@ impl Sandbox for Hooked<'_> {
         self.fake.snapshot(id)
     }
     fn destroy(&self, id: &SandboxId) -> Result<(), SandboxError> {
+        self.note(id);
         self.fake.destroy(id)
     }
     fn drop_snapshot(&self, snapshot: &SnapshotId) -> Result<(), SandboxError> {
@@ -895,7 +943,7 @@ x-stand: { workload: load }
         "{result:?}"
     );
     assert!(case.run_dir().join("setup-head/db-1.log").is_file());
-    assert_left(&fault, &[]);
+    assert_left(&fault, &case.cached());
 
     // Ctrl+C once `migrate` is created: the version snapshot is taken, and it goes too.
     let case = Case::new(EXAMPLE);
@@ -925,7 +973,7 @@ x-stand: { workload: load }
             .iter()
             .any(|call| matches!(call, Call::Snapshot { .. }))
     );
-    assert_left(&fake, &[]);
+    assert_left(&fake, &case.cached());
 
     // `preload` in the run folder is a file: the preload of `api` cannot be written, and nothing
     // starts.
@@ -998,7 +1046,11 @@ fn a_failure_of_before_stops_only_its_lane() {
     assert!(dropped < head_starts);
     assert_eq!(raw.head.len(), 3);
     assert!(!case.run_dir().join("repeat-1-before").exists());
-    assert_clean(&fake, &[]);
+    // Only the setup that passed has an entry.
+    assert!(names_in(&case.entry(Side::Before)).is_empty());
+    let head = run::cached_ids(&case.entry(Side::Head)).unwrap();
+    assert_eq!(head.map(|ids| ids.len()), Some(2));
+    assert_clean(&fake, &case.cached());
 
     // `api` of the before tree dies in its first repeat: "before" runs no other repeat.
     let case = Case::new(EXAMPLE);
@@ -1038,7 +1090,7 @@ fn a_failure_of_before_stops_only_its_lane() {
     ];
     assert_eq!(workload_folders(&case, &dying.journal()), repeats);
     assert!(case.run_dir().join("repeat-1-before/api-1.log").is_file());
-    assert_clean(&dying, &[]);
+    assert_clean(&dying, &case.cached());
 }
 
 // --- the measured repeats ----------------------------------------------------------------------
@@ -1141,7 +1193,7 @@ fn setup_runs_once_and_the_repeats_start_from_its_snapshots_by_levels() {
         assert!(output.instances[1].log.is_file());
         assert!(dir.join("metrics.json").is_file());
     }
-    assert_clean(&fake, &[]);
+    assert_clean(&fake, &case.cached());
 }
 
 #[test]
@@ -1208,7 +1260,7 @@ fn with_before_the_repeats_take_turns_and_the_harness_is_the_same() {
         .collect();
     assert_eq!(harness.len(), 1, "one harness folder for both versions");
     assert_eq!(raw.harness, ["/harness"]);
-    assert_clean(&fake, &[]);
+    assert_clean(&fake, &case.cached());
 }
 
 #[test]
@@ -1240,7 +1292,7 @@ fn wall_runs_from_the_create_of_the_workload_to_its_exit() {
     for output in &raw.head {
         assert_eq!(output.wall, 30 * SECOND, "repeat {}", output.repeat);
     }
-    assert_clean(&fake, &[]);
+    assert_clean(&fake, &case.cached());
 }
 
 #[test]
@@ -1297,7 +1349,7 @@ fn a_failure_of_the_head_in_a_repeat_ends_the_run_with_what_it_collected() {
         let head: Vec<u32> = failed.raw.head.iter().map(|output| output.repeat).collect();
         assert_eq!(head, [1], "the failed repeat is in the raw outputs");
         assert!(!case.run_dir().join("repeat-2-head").exists());
-        assert_clean(&fake, &[]);
+        assert_clean(&fake, &case.cached());
     }
 
     // The workload of the second repeat never ends: the run ends with both repeats, at `timeout`
@@ -1341,7 +1393,7 @@ fn a_failure_of_the_head_in_a_repeat_ends_the_run_with_what_it_collected() {
         .collect();
     // The first wait ends a chunk of 1 s after the start, the last one at the deadline.
     assert_eq!(*waits.iter().max().unwrap() - waits[0], 299 * SECOND);
-    assert_clean(&fake, &[]);
+    assert_clean(&fake, &case.cached());
 }
 
 #[test]
@@ -1405,7 +1457,7 @@ fn every_repeat_ends_with_the_stop_of_each_long_running_service_dependents_first
         stopped,
         [("db", true), ("api", true), ("api", true), ("load", false)]
     );
-    assert_clean(&fake, &[]);
+    assert_clean(&fake, &case.cached());
 }
 
 #[test]
@@ -1444,7 +1496,7 @@ fn everything_made_is_destroyed_on_every_path() {
         let case = Case::new(EXAMPLE);
         let fake = fake(rules(&case));
         drop(case.run(&fake, &case.versions(true)));
-        assert_clean(&fake, &[]);
+        assert_clean(&fake, &case.cached());
     }
 }
 
@@ -1488,7 +1540,7 @@ fn cancel_in_a_repeat_destroys_the_vms_and_leaves_the_raw_outputs() {
         let setup = case.run_dir().join("setup-head");
         assert!(setup.join("db-1.log").is_file());
         assert!(setup.join("metrics.json").is_file());
-        assert_left(&fake, &[]);
+        assert_left(&fake, &case.cached());
     }
 }
 
@@ -1554,7 +1606,7 @@ fn a_stand_fault_in_a_repeat_tears_it_down_in_its_phase() {
         );
         let repeat = case.run_dir().join("repeat-1-head");
         assert_eq!(logs_in(&repeat), names(logs), "{missing}");
-        assert_left(&fake, &[]);
+        assert_left(&fake, &case.cached());
     }
 
     // The stop at the end of the repeat breaks: after the workload exited, and after `db` stayed
@@ -1588,7 +1640,7 @@ fn a_stand_fault_in_a_repeat_tears_it_down_in_its_phase() {
             "{health:?}: {result:?}"
         );
         assert!(case.run_dir().join("repeat-1-head/db-1.log").is_file());
-        assert_left(&fake, &[]);
+        assert_left(&fake, &case.cached());
     }
 }
 
@@ -1703,7 +1755,7 @@ fn probes_run_at_their_taps_and_write_into_out() {
     }
     assert_eq!(phases, expected);
     assert_eq!(*sandbox.deadlines.borrow(), [30 * SECOND; 2 + 2 * 3]);
-    assert_clean(&fake, &[]);
+    assert_clean(&fake, &case.cached());
 }
 
 #[test]
@@ -1789,7 +1841,7 @@ fn the_cut_reads_every_instance_before_the_first_probe() {
         let log = setup.join(format!("{vm}.log"));
         assert_eq!(written["logCut"], first_line(&log), "{vm}");
     }
-    assert_clean(&fake, &[]);
+    assert_clean(&fake, &case.cached());
 }
 
 #[test]
@@ -1820,7 +1872,7 @@ fn on_failure_probes_run_before_the_stop_and_their_outputs_are_in_the_failure() 
     for (index, stdout, _) in &probed {
         assert!(before_the_stops(&journal, *index), "{stdout}");
     }
-    assert_clean(&failing, &[]);
+    assert_clean(&failing, &case.cached());
 
     // `migrate` fails in setup: `last` runs, `trace` does not, since no setup starts `api`.
     let case = Case::new(&traced());
@@ -1835,7 +1887,7 @@ fn on_failure_probes_run_before_the_stop_and_their_outputs_are_in_the_failure() 
     let (index, _, vm) = &probed[0];
     assert_eq!(vm, "db-1");
     assert!(before_the_stops(&journal, *index));
-    assert_clean(&failing, &[]);
+    assert_clean(&failing, &case.cached());
 }
 
 #[test]
@@ -1868,7 +1920,7 @@ fn a_probe_that_times_out_or_exits_nonzero_is_what_it_saw() {
         assert_eq!(output.probes[0].outcome, ExecOutcome::TimedOut);
         assert!(output.probes[0].out.is_file());
     }
-    assert_clean(&saw, &[]);
+    assert_clean(&saw, &case.cached());
 
     // An `on-failure` probe past its deadline is still an output of the failure.
     let case = Case::new(EXAMPLE);
@@ -1880,7 +1932,7 @@ fn a_probe_that_times_out_or_exits_nonzero_is_what_it_saw() {
     let last = case.run_dir().join("repeat-1-head/out/probe.last.jsonl");
     assert_eq!(failed.failure.probes, [last]);
     assert_eq!(failed.raw.head[0].probes[0].outcome, ExecOutcome::TimedOut);
-    assert_clean(&saw, &[]);
+    assert_clean(&saw, &case.cached());
 }
 
 #[test]
@@ -1921,7 +1973,7 @@ fn stand_out_goes_to_the_workload_and_every_service_with_a_probe() {
         }
         let probed: BTreeSet<String> = probed.iter().map(|name| name.to_string()).collect();
         assert_eq!(bound, probed);
-        assert_clean(&fake, &[]);
+        assert_clean(&fake, &case.cached());
     }
 }
 
@@ -1973,6 +2025,29 @@ fn snapshot_of(journal: &[Call], id: &SandboxId) -> SnapshotId {
     taken.unwrap_or_else(|| panic!("no snapshot of {id}"))
 }
 
+/// The setup snapshot of `db` and the version snapshot that `case` took for `side`, by the
+/// setup VMs of `journal`: `db` with its `/stand/out` in `setup-<side>`, `prepare` on its tree.
+fn setup_snapshots(case: &Case, journal: &[Call], side: Side) -> (SnapshotId, SnapshotId) {
+    let setup = case.run_dir().join(format!("setup-{side}"));
+    let made = created(journal);
+    let in_setup = |service: &str| {
+        let found = made.iter().find(|(launch, _)| {
+            launch.service == service
+                && match &launch.seed {
+                    Some(Seed::Tree { tar, .. }) => *tar == case.tar(side),
+                    None => out_of(launch).is_some_and(|out| out.starts_with(&setup)),
+                    Some(Seed::Snapshot(_)) => false,
+                }
+        });
+        found
+            .unwrap_or_else(|| panic!("{service} in the setup of {side}"))
+            .1
+            .clone()
+    };
+    let db = snapshot_of(journal, &in_setup("db"));
+    (db, snapshot_of(journal, &in_setup("prepare")))
+}
+
 #[test]
 fn a_profiled_service_gets_the_preload_its_chunks_folder_and_its_node_options_after_the_preload() {
     let case = Case::new(EXAMPLE);
@@ -2006,7 +2081,7 @@ fn a_profiled_service_gets_the_preload_its_chunks_folder_and_its_node_options_af
     let mut expected = vec!["cpu"; 2 * 6];
     expected.extend(["coverage"; 2]);
     assert_eq!(modes, expected);
-    assert_clean(&fake, &[]);
+    assert_clean(&fake, &case.cached());
 
     // `api` gets no preload in setup, and the setup service `fill` never does.
     let case = Case::new(NO_PREPARE);
@@ -2043,7 +2118,7 @@ fn a_profiled_service_gets_the_preload_its_chunks_folder_and_its_node_options_af
         .map(|(service, scratch)| (service.to_string(), *scratch))
         .collect();
     assert_eq!(profiled, expected);
-    assert_clean(&fake, &[]);
+    assert_clean(&fake, &case.cached());
 }
 
 #[test]
@@ -2092,7 +2167,7 @@ fn the_chunks_come_out_before_destroy_and_an_empty_folder_is_no_profile() {
             }
         }
     }
-    assert_clean(&fake, &[]);
+    assert_clean(&fake, &case.cached());
 
     // A chunk comes out and is read on the host, with paths from the repo root; a failed repeat
     // brings its chunks out too.
@@ -2135,7 +2210,7 @@ fn the_chunks_come_out_before_destroy_and_an_empty_folder_is_no_profile() {
                 assert_eq!(samples.processes, 1);
             }
         }
-        assert_clean(&fake, &[]);
+        assert_clean(&fake, &case.cached());
     }
 
     // A chunk the host cannot read breaks the stand: in the first measured repeat, and, as a
@@ -2158,7 +2233,7 @@ fn the_chunks_come_out_before_destroy_and_an_empty_folder_is_no_profile() {
             ),
             "{file}: {result:?}"
         );
-        assert_clean(&fake, &[]);
+        assert_clean(&fake, &case.cached());
     }
 }
 
@@ -2199,20 +2274,7 @@ fn the_coverage_repeat_runs_once_for_the_head_with_its_longer_timeout() {
         .collect();
     assert_eq!(names, ["db-1", "api-1", "api-2", "load-1"]);
     assert_eq!(out_of(&last[3].0), Some(coverage.join("out").as_path()));
-    let setup_head = case.run_dir().join("setup-head");
-    let in_setup = |service: &str| {
-        let found = made.iter().find(|(launch, _)| {
-            launch.service == service
-                && match &launch.seed {
-                    Some(Seed::Tree { tar, .. }) => *tar == case.tar(Side::Head),
-                    None => out_of(launch).is_some_and(|out| out.starts_with(&setup_head)),
-                    Some(Seed::Snapshot(_)) => false,
-                }
-        });
-        found.unwrap().1.clone()
-    };
-    let db = snapshot_of(&journal, &in_setup("db"));
-    let version = snapshot_of(&journal, &in_setup("prepare"));
+    let (db, version) = setup_snapshots(&case, &journal, Side::Head);
     for ((launch, _), seed) in last[..3].iter().zip([&db, &version, &version]) {
         let restores = matches!(&launch.seed, Some(Seed::Snapshot(id)) if id == seed);
         assert!(restores, "{}-{}", launch.service, launch.replica);
@@ -2234,7 +2296,7 @@ fn the_coverage_repeat_runs_once_for_the_head_with_its_longer_timeout() {
     assert!(coverage.join("metrics.json").is_file());
     assert!(coverage.join("api-2.log").is_file());
     assert!(coverage.join("profile/api-2/1.0.coverage.json").is_file());
-    assert_clean(&fake, &[]);
+    assert_clean(&fake, &case.cached());
 
     // Its workload never ends: the repeat ends at 1.5 x `timeout` from its start.
     let case = Case::new(EXAMPLE);
@@ -2260,7 +2322,7 @@ fn the_coverage_repeat_runs_once_for_the_head_with_its_longer_timeout() {
         .collect();
     // The first wait ends a chunk of 1 s after the start, the last one at the deadline.
     assert_eq!(*waits.iter().max().unwrap() - waits[0], (450 - 1) * SECOND);
-    assert_clean(&fake, &[]);
+    assert_clean(&fake, &case.cached());
 }
 
 #[test]
@@ -2299,7 +2361,7 @@ fn a_coverage_repeat_past_one_and_a_half_timeout_is_a_fact_and_the_run_passes() 
     assert!(coverage.join("load-1.log").is_file());
     assert!(coverage.join("metrics.json").is_file());
     assert!(coverage.join("profile/api-1/1.0.coverage.json").is_file());
-    assert_clean(&fake, &[]);
+    assert_clean(&fake, &case.cached());
 }
 
 #[test]
@@ -2335,6 +2397,298 @@ fn without_a_profiled_service_there_is_no_coverage_repeat() {
         );
         let mut instances = raw.head.iter().flat_map(|output| &output.instances);
         assert!(instances.all(|instance| instance.profile.is_none()));
-        assert_clean(&fake, &[]);
+        assert_clean(&fake, &case.cached());
     }
+}
+
+// --- the setup cache ---------------------------------------------------------------------------
+
+/// `side` of `case` on a hit of the entry `built` made.
+fn hit(case: &Case, built: &Case, side: Side) -> Version {
+    Version {
+        tar: case.tar(side),
+        setup: SetupCache::Hit(built.entry(side)),
+    }
+}
+
+/// The snapshot each `db` of the measured repeats of `side` of `case` starts from.
+fn repeat_seeds(case: &Case, journal: &[Call], side: Side) -> Vec<SnapshotId> {
+    let mut seeds = Vec::new();
+    for (launch, _) in created(journal) {
+        let folder = out_of(&launch).and_then(Utf8Path::parent);
+        let Some(folder) =
+            folder.filter(|folder| folder.parent() == Some(case.run_dir().as_path()))
+        else {
+            continue;
+        };
+        let name = folder.file_name().unwrap();
+        if launch.service == "db"
+            && name.starts_with("repeat-")
+            && name.ends_with(&side.to_string())
+        {
+            match &launch.seed {
+                Some(Seed::Snapshot(id)) => seeds.push(id.clone()),
+                other => panic!("{name}: {other:?}"),
+            }
+        }
+    }
+    seeds
+}
+
+#[test]
+fn a_build_writes_out_and_entry_json_after_the_whole_setup_and_nothing_else() {
+    // `db` leaves a folder in `/stand/out` beside the output of `schema`.
+    let case = Case::new(EXAMPLE);
+    let mut rules = example_rules();
+    let db = rules.iter_mut().find(|rule| rule.service == "db").unwrap();
+    let rows = ("/stand/out/dump/rows.json".to_owned(), b"[]".to_vec());
+    db.script.writes.push(rows);
+    let fake = fake(rules);
+    case.run(&fake, &case.versions(true)).unwrap();
+    let journal = fake.journal();
+    for side in [Side::Before, Side::Head] {
+        let entry = case.entry(side);
+        assert_eq!(names_in(&entry), ["entry.json", "out"], "{side}");
+        let copied = files_in(&entry.join("out"));
+        let names: Vec<&str> = copied.keys().map(String::as_str).collect();
+        let schema = ["probe.schema.jsonl", "probe.schema.jsonl.err"];
+        assert_eq!(names, [&["dump/rows.json"][..], &schema].concat());
+        let out = case.run_dir().join(format!("setup-{side}/out"));
+        assert_eq!(copied, files_in(&out), "{side}");
+        // Read back, the ids are the ones the port gave.
+        let (db, version) = setup_snapshots(&case, &journal, side);
+        let ids = run::cached_ids(&entry).unwrap().unwrap();
+        assert!(
+            ids.len() == 2 && ids.contains(&db) && ids.contains(&version),
+            "{ids:?}"
+        );
+    }
+    // The VMs mount nothing of an entry: setup binds `/stand/out` in the run folder, as without a
+    // cache.
+    let entries = [case.entry(Side::Head), case.entry(Side::Before)];
+    for (launch, _) in created(&journal) {
+        for mount in &launch.mounts {
+            if let Mount::Bind { host, .. } = mount {
+                assert!(
+                    !entries.iter().any(|entry| host.starts_with(entry)),
+                    "{host}"
+                );
+            }
+        }
+    }
+    assert_eq!(run::cached_ids(&case.root.join("recipe")).unwrap(), None);
+    assert_clean(&fake, &case.cached());
+
+    // `entry.json` comes once the whole setup is over: no setup VM sees it, up to its `destroy`;
+    // the first VM of the repeats does.
+    let case = Case::new(EXAMPLE);
+    let fake = crate::fake(example_rules());
+    let sandbox = Hooked {
+        entry: Some(case.entry(Side::Head).join("entry.json")),
+        ..Hooked::new(&fake)
+    };
+    sandbox.run(&case, &case.versions(false)).unwrap();
+    let made = created(&fake.journal());
+    let setup: Vec<&SandboxId> = made[..3].iter().map(|(_, id)| id).collect();
+    let seen = sandbox.seen.borrow();
+    assert!(
+        seen[..6]
+            .iter()
+            .all(|(id, there)| setup.contains(&id) && !there),
+        "{seen:?}"
+    );
+    assert_eq!(seen[6], (made[3].1.clone(), true));
+    assert_clean(&fake, &case.cached());
+}
+
+/// A link a service leaves in `/stand/out` stays out of the entry: a copy would read what it
+/// points at on the host.
+#[cfg(unix)]
+#[test]
+fn a_build_copies_no_link_into_the_entry() {
+    let case = Case::new(EXAMPLE);
+    let out = case.run_dir().join("setup-head/out");
+    fs::create_dir_all(&out).unwrap();
+    let secret = case.root.join("secret");
+    fs::write(&secret, b"host").unwrap();
+    std::os::unix::fs::symlink(&secret, out.join("leak")).unwrap();
+    let fake = fake(example_rules());
+    case.run(&fake, &case.versions(false)).unwrap();
+    let copied = names_in(&case.entry(Side::Head).join("out"));
+    assert_eq!(copied, ["probe.schema.jsonl", "probe.schema.jsonl.err"]);
+    assert_clean(&fake, &case.cached());
+}
+
+#[test]
+fn a_hit_starts_no_setup_vm_and_holds_after_the_run_folder_that_built_it_is_gone() {
+    // `db` binds the harness too, and `schema` exits 2: a hit gives that outcome back.
+    let recipe = EXAMPLE.replace(
+        r#"volumes: ["pgdata:/var/lib/postgresql/data"]"#,
+        r#"volumes: ["pgdata:/var/lib/postgresql/data", ".:/harness:ro"]"#,
+    );
+    let db = Script {
+        volume_bytes: 4096,
+        probes: vec![
+            (
+                "probe.schema.jsonl".into(),
+                ExecOutcome::Exited(2),
+                b"half\n".to_vec(),
+            ),
+            probe("probe.orders.jsonl", b"{\"id\":1}\n"),
+        ],
+        ..stops(SECOND)
+    };
+    let first = Case::new(&recipe);
+    let fake = fake(with("db", db));
+    first.run(&fake, &first.versions(true)).unwrap();
+    let built = fake.journal();
+    let seeds = [Side::Before, Side::Head].map(|side| setup_snapshots(&first, &built, side));
+    let cached = first.cached();
+    // Of the first run only its entries stay.
+    fs::remove_dir_all(first.run_dir()).unwrap();
+    fs::remove_dir_all(first.root.join("recipe")).unwrap();
+
+    let second = Case::new(&recipe);
+    let versions = Versions {
+        head: hit(&second, &first, Side::Head),
+        before: Some(hit(&second, &first, Side::Before)),
+    };
+    let raw = second.run(&fake, &versions).unwrap();
+    let journal = fake.journal();
+    let later = &journal[built.len()..];
+    // Only repeats: three of each version and the coverage repeat of the head.
+    let repeat = ["db-1", "api-1", "api-2", "load-1"];
+    assert_eq!(services(later), repeat.repeat(2 * 3 + 1));
+    // Each from the entry of its version: `db` from its setup snapshot with the harness of this
+    // run, `api` from the version snapshot.
+    for vms in created(later).chunks(4) {
+        let (db, _) = &vms[0];
+        let folder = out_of(db).unwrap().parent().unwrap().file_name().unwrap();
+        let (setup, version) = &seeds[usize::from(!folder.ends_with("before"))];
+        assert!(
+            matches!(&db.seed, Some(Seed::Snapshot(id)) if id == setup),
+            "{folder}"
+        );
+        for (api, _) in &vms[1..3] {
+            assert!(matches!(&api.seed, Some(Seed::Snapshot(id)) if id == version));
+        }
+        let harness = db.mounts.iter().find_map(|mount| match mount {
+            Mount::Bind { host, guest, .. } if guest == "/harness" => Some(host),
+            _ => None,
+        });
+        assert!(harness.is_some_and(|host| host.starts_with(&second.root)));
+    }
+    let setups = [
+        (Side::Head, &raw.setup.head),
+        (Side::Before, raw.setup.before.as_ref().unwrap()),
+    ];
+    for (side, setup) in setups {
+        let out = second.run_dir().join(format!("setup-{side}/out"));
+        assert_eq!(setup.out_dir, out);
+        assert_eq!(setup.sizes, [("pgdata".to_owned(), 4096)].into());
+        let probes: Vec<(&str, ExecOutcome, &Utf8Path)> = setup
+            .probes
+            .iter()
+            .map(|probe| (probe.name.as_str(), probe.outcome, probe.out.as_path()))
+            .collect();
+        let schema = out.join("probe.schema.jsonl");
+        assert_eq!(
+            probes,
+            [("schema", ExecOutcome::Exited(2), schema.as_path())]
+        );
+        assert_eq!(fs::read(&schema).unwrap(), b"half\n");
+        assert_eq!(files_in(&out), files_in(&first.entry(side).join("out")));
+        assert_eq!(
+            names_in(out.parent().unwrap()),
+            ["out"],
+            "no setup ran in {side}"
+        );
+    }
+    assert!(matches!(&raw.before, Some(BeforeOutcome::Passed(before)) if before.len() == 3));
+    assert_clean(&fake, &cached);
+
+    // The head built anew beside a hit of "before", as in the live check: one setup runs, the
+    // head's, and its entry stays beside the first ones.
+    let third = Case::new(&recipe);
+    let versions = Versions {
+        head: third.version(Side::Head),
+        before: Some(hit(&third, &first, Side::Before)),
+    };
+    let mark = fake.journal().len();
+    let raw = third.run(&fake, &versions).unwrap();
+    let journal = fake.journal();
+    let names = services(&journal[mark..]);
+    assert_eq!(&names[..3], ["db-1", "prepare-1", "migrate-1"]);
+    let setup = names.iter().filter(|name| !repeat.contains(&name.as_str()));
+    assert_eq!(setup.count(), 2, "one prepare and one migrate");
+    let before = repeat_seeds(&third, &journal[mark..], Side::Before);
+    assert_eq!(
+        before,
+        vec![seeds[0].0.clone(); 3],
+        "from the entry of the first run"
+    );
+    let sizes = &raw.setup.before.as_ref().unwrap().sizes;
+    assert_eq!(*sizes, [("pgdata".to_owned(), 4096)].into());
+    let mut left = cached;
+    left.extend(third.cached());
+    assert_eq!(left.len(), 3 * 2);
+    assert_clean(&fake, &left);
+}
+
+#[test]
+fn a_fault_in_writing_or_reading_an_entry_is_a_stand_fault_in_setup() {
+    // The entry of the head is a file: its setup passes, the entry cannot be written, no repeat
+    // starts, and the snapshots of that setup go.
+    let case = Case::new(EXAMPLE);
+    let entry = case.entry(Side::Head);
+    fs::remove_dir(&entry).unwrap();
+    fs::write(&entry, b"").unwrap();
+    let fake = fake(example_rules());
+    let result = case.run(&fake, &case.versions(false));
+    assert!(
+        matches!(
+            &result,
+            Err(RunError::Stand {
+                phase: Phase::Setup,
+                fault: StandFault::Io { path, .. },
+            }) if path.starts_with(&entry)
+        ),
+        "{result:?}"
+    );
+    assert_eq!(
+        services(&fake.journal()),
+        ["db-1", "prepare-1", "migrate-1"]
+    );
+    assert_clean(&fake, &[]);
+
+    // A hit on an entry without `entry.json`, then on one that does not read: nothing starts.
+    let case = Case::new(EXAMPLE);
+    let fake = crate::fake(example_rules());
+    let versions = Versions {
+        head: hit(&case, &case, Side::Head),
+        before: None,
+    };
+    let file = case.entry(Side::Head).join("entry.json");
+    for bytes in [None, Some(b"{".as_slice())] {
+        if let Some(bytes) = bytes {
+            fs::write(&file, bytes).unwrap();
+        }
+        let result = case.run(&fake, &versions);
+        assert!(
+            matches!(
+                &result,
+                Err(RunError::Stand {
+                    phase: Phase::Setup,
+                    fault: StandFault::Io { path, .. },
+                }) if *path == file
+            ),
+            "{result:?}"
+        );
+    }
+    assert!(fake.journal().is_empty());
+    let read = run::cached_ids(&case.entry(Side::Head));
+    assert!(
+        matches!(&read, Err(StandFault::Io { path, .. }) if *path == file),
+        "{read:?}"
+    );
 }
