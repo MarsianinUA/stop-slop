@@ -11,6 +11,7 @@ fake = []
 microsandbox = [
     "dep:guest",
     "dep:microsandbox",
+    "dep:microsandbox-image",
     "dep:reqwest",
     "dep:sha2",
     "dep:tar",
@@ -24,6 +25,7 @@ serde.workspace = true
 thiserror.workspace = true
 guest = { path = "../guest", optional = true }
 microsandbox = { workspace = true, optional = true }
+microsandbox-image = { workspace = true, optional = true }
 reqwest = { workspace = true, optional = true }
 sha2 = { workspace = true, optional = true }
 # Unpacks what `copy_out` brings.

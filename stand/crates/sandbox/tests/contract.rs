@@ -794,7 +794,7 @@ fn launch(service: &str, image: &str) -> Launch {
         ports: Vec::new(),
         peers: Vec::new(),
         outbound: Outbound::Off,
-        stop_signal: "SIGTERM".into(),
+        stop_signal: None,
         stop_grace: Duration::from_secs(5),
         max_duration: Duration::from_secs(15 * 60),
         seed: None,
@@ -1174,7 +1174,7 @@ mod live {
         );
         let mut quitter = launch("quitter", ALPINE);
         quitter.command = sh("trap 'exit 0' QUIT; echo ready; while true; do sleep 0.1; done");
-        quitter.stop_signal = "SIGQUIT".into();
+        quitter.stop_signal = Some("SIGQUIT".into());
         let mut stubborn = launch("stubborn", ALPINE);
         stubborn.command = sh("trap '' TERM; echo ready; while true; do sleep 0.1; done");
         stubborn.stop_grace = Duration::from_secs(2);
@@ -1724,18 +1724,28 @@ const dial = () => new Promise(ok => {
     const PG_READY: &str = "pg_isready -h 127.0.0.1 -U postgres";
 
     /// A clean stop before the snapshot spares every start from it the recovery, 1.4-1.6 s
-    /// (spike state). `SIGINT` is the fast shutdown, the image's `STOPSIGNAL`.
+    /// (spike state). Without a `stop_signal` the stop sends the image's `STOPSIGNAL`, `SIGINT`,
+    /// Postgres's fast shutdown, as Docker does; `SIGTERM` would wait for every client to leave.
     #[test]
     fn live_postgres_starts_from_its_snapshot_without_recovery() {
         let Some(case) = Case::start() else { return };
         let mut db = launch("db", POSTGRES);
         db.env.insert("POSTGRES_PASSWORD".into(), "pw".into());
-        db.stop_signal = "SIGINT".into();
         db.mounts = vec![volume(&VolumeName::new("pg"), PGDATA), out(case.out())];
         let first = case.create(vec![db.clone()]).remove(0);
         case.until_passes(&first, PG_READY);
         let stopped = case.sandbox.stop(&first).unwrap();
-        assert!(!stopped.killed, "{stopped:?}");
+        let fast = stopped.after < db.stop_grace;
+        assert!(!stopped.killed && fast, "{stopped:?}");
+        let log = case.log(&first);
+        assert!(log.contains("received fast shutdown request"), "{log}");
+        let inspected = sdk(async {
+            let detail = msb::Image::inspect(POSTGRES).await.unwrap();
+            detail.config.and_then(|config| config.stop_signal)
+        });
+        note(&format!(
+            "STOPSIGNAL of {POSTGRES} in the SDK's Image::inspect: {inspected:?}"
+        ));
         let sizes = case.sandbox.volume_sizes(&first).unwrap();
         let data = match sizes.as_slice() {
             [(name, bytes)] if name.as_str() == "pg" && *bytes > 1 << 20 => *bytes,

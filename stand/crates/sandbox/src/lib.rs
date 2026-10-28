@@ -88,7 +88,8 @@ pub struct Launch {
     /// Every service of the version, with and without `expose`.
     pub peers: Vec<Peer>,
     pub outbound: Outbound,
-    pub stop_signal: String,
+    /// `None`: the image's `STOPSIGNAL`, else `SIGTERM`, as Docker does.
+    pub stop_signal: Option<String>,
     pub stop_grace: Duration,
     /// `run::span(&Stand)`.
     pub max_duration: Duration,

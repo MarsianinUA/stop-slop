@@ -12,6 +12,8 @@ camino = "1"
 humantime = "2"
 libc = "0.2"
 microsandbox = { version = "=0.7.8", default-features = false, features = ["local", "net"] }
+# The SDK's own image cache, which holds the `STOPSIGNAL` the SDK's `Image::inspect` drops.
+microsandbox-image = "=0.7.8"
 oxc_sourcemap = "9"
 # 0.13 defaults to rustls, the TLS stack the SDK already pulls in.
 reqwest = "0.13"

@@ -12,11 +12,12 @@ use std::time::{Duration, Instant};
 use ::guest::{Command, ExecArgs, ExecEnd, ExecStatus, RunArgs, RunStatus, StopArgs, StopReport};
 use ::microsandbox as msb;
 use camino::{Utf8Component, Utf8Path, Utf8PathBuf};
+use microsandbox_image::{GlobalCache, Reference};
 use msb::jobs::{Job, JobInfo, JobLogOptions, JobState};
 use msb::sandbox::{ExecOptionsBuilder, FsSetAttrs};
 
 use super::{GUEST_CALL, Live, POLL, backend, guest, within};
-use crate::{ExecOutcome, Launch, Mount, SandboxError, Stopped};
+use crate::{ExecOutcome, ImageRef, Launch, Mount, SandboxError, Stopped};
 
 /// Where `run` keeps its status file: the service's user writes it, so it is a bind of its own and
 /// `/stand/net`, which root writes, stays out of that user's reach.
@@ -26,6 +27,7 @@ const STATUS: &str = "status.json";
 const MARGIN: Duration = Duration::from_secs(10);
 /// Outside any folder a service would ask for, and gone right after the copy.
 const COPY_TAR: &str = "/tmp/stop-slop-stand-copy.tar";
+const STOP_SIGNAL: &str = "SIGTERM";
 const COPY: Duration = Duration::from_secs(300);
 
 /// The host side of `RUN_DIR` in the adapter's folder of a VM.
@@ -45,14 +47,34 @@ pub(super) struct ImageDefaults {
     pub workdir: Option<String>,
     pub entrypoint: Vec<String>,
     pub cmd: Vec<String>,
+    /// What `stop` sends: the `Launch`'s, else the image's `STOPSIGNAL`, else `SIGTERM`, as Docker.
+    pub stop_signal: String,
 }
 
-pub(super) async fn image_defaults(launch: &Launch) -> Result<ImageDefaults, SandboxError> {
+pub(super) async fn image_defaults(
+    local: &msb::LocalBackend,
+    launch: &Launch,
+) -> Result<ImageDefaults, SandboxError> {
     let detail = msb::Image::inspect(launch.image.as_str())
         .await
         .map_err(backend)?;
+    let stop_signal = match &launch.stop_signal {
+        Some(signal) => signal.clone(),
+        None => image_stop_signal(local, &launch.image)
+            .await?
+            .unwrap_or_else(|| STOP_SIGNAL.to_owned()),
+    };
+    // At the start rather than at the stop, after the work of a whole repeat.
+    if ::guest::signal_number(&stop_signal).is_none() {
+        return Err(backend(format!(
+            "`{}` would stop with `{stop_signal}`, which stand-guest does not send; set its \
+             `stop_signal`",
+            launch.service
+        )));
+    }
     let config = detail.config;
     Ok(ImageDefaults {
+        stop_signal,
         user: config
             .as_ref()
             .and_then(|c| c.user.clone())
@@ -67,6 +89,27 @@ pub(super) async fn image_defaults(launch: &Launch) -> Result<ImageDefaults, San
             .unwrap_or_default(),
         cmd: config.and_then(|c| c.cmd).unwrap_or_default(),
     })
+}
+
+/// SDK 0.7.8 never stores `STOPSIGNAL` in its image database, so `Image::inspect` gives `None` for
+/// every image; the image's metadata in the SDK's cache has it, and the SDK's own reader finds it.
+async fn image_stop_signal(
+    local: &msb::LocalBackend,
+    image: &ImageRef,
+) -> Result<Option<String>, SandboxError> {
+    let reference: Reference = image
+        .as_str()
+        .parse()
+        .map_err(|error| backend(format!("`{image}`: {error}")))?;
+    let cache = GlobalCache::new(&local.cache_dir()).map_err(backend)?;
+    let metadata = cache.read_image_metadata_async(&reference).await;
+    let metadata = metadata
+        .map_err(backend)?
+        .ok_or_else(|| backend(format!("no metadata of `{image}` in the image cache")))?;
+    Ok(metadata
+        .config
+        .stop_signal
+        .filter(|signal| !signal.is_empty()))
 }
 
 /// As Compose combines them: a new `entrypoint` drops the image's CMD unless `command` is set too.
@@ -176,7 +219,7 @@ pub(super) async fn stop(live: &Live) -> Result<Stopped, SandboxError> {
     let grace = live.launch.stop_grace;
     let args = Command::Stop(StopArgs {
         status: status_in_guest(),
-        signal: live.launch.stop_signal.clone(),
+        signal: live.image.stop_signal.clone(),
         grace,
     })
     .to_args();
@@ -462,7 +505,7 @@ mod tests {
             ports: Vec::new(),
             peers: Vec::new(),
             outbound: crate::Outbound::Off,
-            stop_signal: "SIGTERM".into(),
+            stop_signal: None,
             stop_grace: Duration::from_secs(10),
             max_duration: Duration::from_secs(600),
             seed: None,
@@ -508,6 +551,7 @@ mod tests {
         let image = ImageDefaults {
             user: String::new(),
             workdir: None,
+            stop_signal: "SIGTERM".into(),
             entrypoint: vec!["docker-entrypoint.sh".into()],
             cmd: vec!["postgres".into()],
         };

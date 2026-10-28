@@ -425,7 +425,7 @@ impl Inner {
         };
         // The image's config is read once the VM is made, since its create pulls a missing image.
         let started = async {
-            let image = process::image_defaults(&launch).await?;
+            let image = process::image_defaults(self.local().await?, &launch).await?;
             lay_out(&vm, &launch).await?;
             network::start(&vm, &wiring, &folder).await?;
             let service = process::start_service(&vm, &launch, &image, &folder).await?;
