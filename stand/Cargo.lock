@@ -145,6 +145,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "gitcmd"
+version = "0.1.0"
+dependencies = [
+ "thiserror",
+]
+
+[[package]]
 name = "hashbrown"
 version = "0.17.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -438,6 +445,18 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f8fadd59c855ef2080decdef8ff161eb6661b86933c9d82e5ba29dc602a55aba"
 
 [[package]]
+name = "source"
+version = "0.1.0"
+dependencies = [
+ "camino",
+ "gitcmd",
+ "sha2",
+ "tempfile",
+ "testkit",
+ "thiserror",
+]
+
+[[package]]
 name = "spec"
 version = "0.1.0"
 dependencies = [
@@ -511,6 +530,13 @@ dependencies = [
  "once_cell",
  "rustix",
  "windows-sys",
+]
+
+[[package]]
+name = "testkit"
+version = "0.1.0"
+dependencies = [
+ "tempfile",
 ]
 
 [[package]]
