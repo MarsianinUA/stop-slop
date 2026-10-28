@@ -67,7 +67,7 @@ pub(crate) fn has_volume(member: &Member) -> bool {
         .any(|mount| matches!(mount, Mount::Volume { .. }))
 }
 
-fn log_path(dir: &Utf8Path, member: &Member) -> Utf8PathBuf {
+pub(crate) fn log_path(dir: &Utf8Path, member: &Member) -> Utf8PathBuf {
     dir.join(format!(
         "{}-{}.log",
         member.launch.service, member.launch.replica

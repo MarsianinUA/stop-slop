@@ -1,14 +1,18 @@
-//! The lane of each version (architecture plan, row 10). Each version is set up, "before" first;
-//! a failure of "before" stops its lane only, a failure of the head ends the run. Only one phase
-//! has VMs at a time, so no two live VMs share a service and a replica: the adapter keeps one host
-//! port per (service, replica, port) (plan T-11, decision 7).
+//! The lane of each version (architecture plan, row 10) and the steps of one repeat. Each version
+//! is set up, "before" first, then the measured repeats go in turns, "before" first. A failure of
+//! "before" stops its lane only; a failure of the head ends the run. Only one phase has VMs at a
+//! time, so no two live VMs share a service and a replica: the adapter keeps one host port per
+//! (service, replica, port) (plan T-11, decision 7).
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::time::{Duration, Instant};
 
 use camino::Utf8Path;
-use report::{BeforeOutcome, Cause, Failure, Phase, ProbeRule, Raw, Setup, SetupSide};
+use report::{
+    BeforeOutcome, Cause, Failure, InstanceOutput, Phase, ProbeRule, Raw, RepeatOutput, Role,
+    Setup, SetupSide,
+};
 use sandbox::{Sandbox, SnapshotId};
 use spec::{Condition, ServiceKind, ServiceName, Stand};
 
@@ -30,6 +34,20 @@ impl From<Stop> for RunError {
             Stop::Cancelled(phase) => RunError::Cancelled { phase },
         }
     }
+}
+
+/// A version's lane once its setup is over.
+enum Lane {
+    /// The repeats start from `seeds`; `outputs` are its measured repeats so far.
+    Ready {
+        seeds: Seeds,
+        outputs: Vec<RepeatOutput>,
+    },
+    /// What stopped it, and the repeats it ran, the failed one included.
+    Failed {
+        failure: Failure,
+        outputs: Vec<RepeatOutput>,
+    },
 }
 
 struct Ctx<'r, S> {
@@ -73,16 +91,25 @@ fn lanes<S: Sandbox>(ctx: &mut Ctx<S>, versions: &Versions) -> Result<Raw, RunEr
         Some(version) => Some(set_up(ctx, Side::Before, version)?),
         None => None,
     };
-    let (head_setup, head) = set_up(ctx, Side::Head, &versions.head)?;
-    let (before_setup, before) = before.unzip();
-    let before = before.map(|lane| match lane {
-        Ok(_) => BeforeOutcome::Passed(Vec::new()),
-        Err(failure) => BeforeOutcome::Failed(failure),
-    });
-    let raw = raw(ctx.stand, head_setup, before_setup, before);
-    match head {
-        Ok(_) => Ok(raw),
-        Err(failure) => Err(RunError::App(Box::new(Failed {
+    let (head_setup, mut head) = set_up(ctx, Side::Head, &versions.head)?;
+    let (before_setup, mut before) = before.unzip();
+    for repeat in 1..=ctx.stand.repeat.get() {
+        if let Lane::Failed { .. } = head {
+            break;
+        }
+        if let (Some(version), Some(lane)) = (&versions.before, before.as_mut()) {
+            measure(ctx, Side::Before, version, lane, repeat)?;
+        }
+        measure(ctx, Side::Head, &versions.head, &mut head, repeat)?;
+    }
+    let (outputs, failure) = match head {
+        Lane::Ready { outputs, .. } => (outputs, None),
+        Lane::Failed { failure, outputs } => (outputs, Some(failure)),
+    };
+    let raw = raw(ctx.stand, head_setup, outputs, before_setup, before);
+    match failure {
+        None => Ok(raw),
+        Some(failure) => Err(RunError::App(Box::new(Failed {
             failure,
             raw,
             kept: Vec::new(),
@@ -93,8 +120,9 @@ fn lanes<S: Sandbox>(ctx: &mut Ctx<S>, versions: &Versions) -> Result<Raw, RunEr
 fn raw(
     stand: &Stand,
     head_setup: SetupSide,
+    head: Vec<RepeatOutput>,
     before_setup: Option<SetupSide>,
-    before: Option<BeforeOutcome>,
+    before: Option<Lane>,
 ) -> Raw {
     let harness: BTreeSet<String> = stand
         .services
@@ -127,18 +155,20 @@ fn raw(
             head: head_setup,
             before: before_setup,
         },
-        head: Vec::new(),
-        before,
+        head,
+        before: before.map(|lane| match lane {
+            Lane::Ready { outputs, .. } => BeforeOutcome::Passed(outputs),
+            Lane::Failed { failure, .. } => BeforeOutcome::Failed(failure),
+        }),
         coverage: None,
     }
 }
 
-/// The setup of a version: the seeds of its repeats, or the failure of its app.
 fn set_up<S: Sandbox>(
     ctx: &mut Ctx<S>,
     side: Side,
     version: &Version,
-) -> Result<(SetupSide, Result<Seeds, Failure>), Stop> {
+) -> Result<(SetupSide, Lane), Stop> {
     if ctx.cancel.is_cancelled() {
         return Err(Stop::Cancelled(Phase::Setup));
     }
@@ -147,7 +177,13 @@ fn set_up<S: Sandbox>(
     fs::create_dir_all(&out)
         .map_err(StandFault::io(&out))
         .map_err(|fault| Stop::Fault(Phase::Setup, fault))?;
-    build(ctx, version, &dir, &out)
+    let (setup, built) = build(ctx, version, &dir, &out)?;
+    let outputs = Vec::new();
+    let lane = match built {
+        Ok(seeds) => Lane::Ready { seeds, outputs },
+        Err(failure) => Lane::Failed { failure, outputs },
+    };
+    Ok((setup, lane))
 }
 
 /// Setup as without a cache (architecture plan, «Тома, снимки и деревья», step 2).
@@ -327,6 +363,144 @@ fn fail_setup<S: Sandbox>(
         ctx.loose.retain(|loose| loose != snapshot);
     }
     Ok(())
+}
+
+/// Repeat `repeat` of `lane`, unless it already failed; a failed repeat turns it `Failed`.
+fn measure<S: Sandbox>(
+    ctx: &Ctx<S>,
+    side: Side,
+    version: &Version,
+    lane: &mut Lane,
+    repeat: u32,
+) -> Result<(), Stop> {
+    let Lane::Ready { seeds, outputs } = lane else {
+        return Ok(());
+    };
+    let (output, failure) = run_repeat(ctx, side, version, seeds, repeat)?;
+    outputs.push(output);
+    if let Some(failure) = failure {
+        let outputs = std::mem::take(outputs);
+        *lane = Lane::Failed { failure, outputs };
+    }
+    Ok(())
+}
+
+/// One measured repeat (architecture plan, «Тома, снимки и деревья», steps 3 and 4): the services
+/// by levels, the workload to its exit, then the cut, the clean stop and the drain, also when it
+/// failed. Its deadline is `timeout` from its start, readiness included. The phase is `Ready`
+/// until the `create` with the workload returned, `Workload` from then on.
+fn run_repeat<S: Sandbox>(
+    ctx: &Ctx<S>,
+    side: Side,
+    version: &Version,
+    seeds: &Seeds,
+    repeat: u32,
+) -> Result<(RepeatOutput, Option<Failure>), Stop> {
+    if ctx.cancel.is_cancelled() {
+        return Err(Stop::Cancelled(Phase::Ready));
+    }
+    let stand = ctx.stand;
+    let dir = ctx.run_dir.join(format!("repeat-{repeat}-{side}"));
+    let out = dir.join("out");
+    fs::create_dir_all(&out)
+        .map_err(StandFault::io(&out))
+        .map_err(|fault| Stop::Fault(Phase::Ready, fault))?;
+    let mut fleet = Fleet::default();
+    let deadline = ctx.sandbox.now() + stand.timeout.get();
+    let frame = Frame {
+        out: &out,
+        tar: &version.tar,
+        seeds,
+        span: ctx.span,
+    };
+    let mut started = None;
+    let ran = start_repeat(ctx, &mut fleet, &frame, deadline, &mut started)
+        .and_then(|()| fleet.finished(ctx.sandbox, deadline, ctx.cancel));
+    let phase = match started {
+        Some(_) => Phase::Workload,
+        None => Phase::Ready,
+    };
+    let (ended, failing) = match ran {
+        Ok((Some(0), at)) => (at, None),
+        Ok((code, at)) => {
+            let workload = Some(stand.workload.as_str().to_owned());
+            (at, Some((workload, code.map_or(Cause::Died, Cause::Exit))))
+        }
+        Err(halt) => {
+            let fell = fell(&fleet, halt, Cause::Timeout, phase)
+                .map_err(|stop| torn(ctx.sandbox, &mut fleet, &dir, stop))?;
+            (ctx.sandbox.now(), Some(fell))
+        }
+    };
+    let wall = started.map_or(Duration::ZERO, |started| {
+        ended.saturating_duration_since(started)
+    });
+    let instances = end_repeat(ctx.sandbox, &mut fleet, &dir)
+        .map_err(|fault| torn(ctx.sandbox, &mut fleet, &dir, Stop::Fault(phase, fault)))?;
+    let failure = failing.map(|(service, cause)| Failure {
+        phase,
+        service,
+        repeat: Some(repeat),
+        cause,
+        logs: Some(dir.clone()),
+        probes: Vec::new(),
+    });
+    let output = RepeatOutput {
+        repeat,
+        wall,
+        instances,
+        probes: Vec::new(),
+        out_dir: out,
+    };
+    Ok((output, failure))
+}
+
+/// `started`: when the `create` with the workload returned, the start of `wall`.
+fn start_repeat<S: Sandbox>(
+    ctx: &Ctx<S>,
+    fleet: &mut Fleet,
+    frame: &Frame,
+    deadline: Instant,
+    started: &mut Option<Instant>,
+) -> Result<(), Halt> {
+    let stand = ctx.stand;
+    for level in launch::levels(stand, |_, service| service.kind != ServiceKind::Setup) {
+        for name in &level {
+            wait_for(ctx, fleet, name, deadline)?;
+        }
+        let created = fleet.start(ctx.sandbox, launch::starts(stand, &level, frame))?;
+        if level.contains(&&stand.workload) {
+            *started = Some(created);
+        }
+    }
+    Ok(())
+}
+
+fn end_repeat(
+    sandbox: &impl Sandbox,
+    fleet: &mut Fleet,
+    dir: &Utf8Path,
+) -> Result<Vec<InstanceOutput>, StandFault> {
+    let cut = drain::cut(sandbox, fleet).map_err(StandFault::Sandbox)?;
+    let stopped = drain::stop(sandbox, fleet).map_err(StandFault::Sandbox)?;
+    drain::write_metrics(dir, fleet, &cut, &stopped)?;
+    let instances = fleet.members.iter().zip(cut).enumerate();
+    let instances = instances.map(|(index, (member, cut))| InstanceOutput {
+        service: member.launch.service.clone(),
+        replica: member.launch.replica,
+        role: match member.kind {
+            ServiceKind::Workload => Role::Workload,
+            ServiceKind::LongRunning | ServiceKind::Setup => Role::LongRunning,
+        },
+        metrics: cut.metrics,
+        log: drain::log_path(dir, member),
+        log_cut: cut.log,
+        stopped: stopped.get(&index).copied(),
+        profile: None,
+    });
+    let instances = instances.collect();
+    drain::drain(sandbox, fleet, dir)?;
+    Ok(instances)
 }
 
 /// What a halt says about the app; `Err` when the run itself stops instead.

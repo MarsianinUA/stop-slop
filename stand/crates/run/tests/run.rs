@@ -1,16 +1,17 @@
 //! `run` on a `Fake` with its virtual clock. Each case loads a recipe with `spec::load` (only
 //! `spec` builds its newtypes), runs it, and reads the journal of the `Fake`.
 
+use std::cell::{Cell, RefCell};
 use std::collections::BTreeSet;
 use std::fs;
 use std::time::{Duration, Instant};
 
 use camino::{Utf8Path, Utf8PathBuf};
-use report::{BeforeOutcome, Cause, Phase, Raw};
+use report::{BeforeOutcome, Cause, Phase, Raw, Role};
 use run::{Cancel, RunError, SetupCache, Side, StandFault, Version, Versions};
 use sandbox::{
-    Call, ExecId, ExecOutcome, Exited, Fake, Fault, ImageRef, Launch, Leftovers, Metrics, Pulled,
-    Rule, Sandbox, SandboxError, SandboxId, Scenario, Script, Seed, SnapshotId, Stopped,
+    Call, ExecId, ExecOutcome, Exited, Fake, Fault, ImageRef, Launch, Leftovers, Metrics, Mount,
+    Pulled, Rule, Sandbox, SandboxError, SandboxId, Scenario, Script, Seed, SnapshotId, Stopped,
     VolumeName, Waitable,
 };
 use spec::{Policy, Stand};
@@ -331,7 +332,11 @@ fn the_prepare_service_unpacks_the_tree_and_its_snapshot_seeds_the_other_tree_se
             .filter(|(launch, _)| restores(launch))
             .map(|(launch, _)| launch.service.as_str())
             .collect();
-        assert_eq!(seeded, BTreeSet::from(["migrate"]), "{side}");
+        assert_eq!(seeded, BTreeSet::from(["api", "migrate"]), "{side}");
+        let api = made
+            .iter()
+            .filter(|(launch, _)| launch.service == "api" && restores(launch));
+        assert_eq!(api.count(), 2 * 3, "replicas x repeats");
         // The version snapshot comes after the prepare service exited, before `migrate` starts.
         let taken = index_of(
             &journal,
@@ -348,7 +353,7 @@ fn the_prepare_service_unpacks_the_tree_and_its_snapshot_seeds_the_other_tree_se
 
 #[test]
 fn without_a_prepare_service_every_tree_service_unpacks_the_tree() {
-    // `api` runs in setup, for `fill`; no setup service mounts the tree.
+    // `api` runs in setup, for `fill`, and in both repeats; no setup service mounts the tree.
     let recipe = r#"
 services:
   api:
@@ -383,7 +388,7 @@ x-stand: { workload: load, repeat: 2 }
         .into_iter()
         .filter(|(launch, _)| launch.service == "api")
         .collect();
-    assert_eq!(api.len(), 1);
+    assert_eq!(api.len(), 1 + 2);
     for (launch, _) in api {
         assert!(matches!(launch.seed, Some(Seed::Tree { tar, .. }) if tar == case.tar(Side::Head)));
     }
@@ -610,6 +615,7 @@ fn a_healthcheck_attempt_waits_with_every_running_vm_and_a_neighbour_dies_in_it(
         what.contains(&Waitable::Sandbox(prepare)),
         "the prepare VM runs beside db"
     );
+    assert_clean(&fake, &[]);
 
     // `db` never gets healthy and `prepare` crashes meanwhile: the crash ends setup, not the deadline.
     let case = Case::new(EXAMPLE);
@@ -653,14 +659,21 @@ fn each_launch_has_span_as_its_max_duration_and_the_stop_of_its_service() {
         );
         assert_eq!(launch.peers.len(), 5, "every service resolves");
     }
+    assert_clean(&fake, &[]);
 }
 
 /// The `Fake` with what a script cannot say: `cancel` set once a `create` starts `cancel_at`
-/// (Ctrl+C in the middle of a phase).
+/// (Ctrl+C in the middle of a phase); `hang`: the `n`-th VM of a service, from 1, never ends,
+/// its exit kept out of every `wait`; `fail_stop`: every `stop` is a `Backend` error.
 struct Hooked<'f> {
     fake: &'f Fake,
     cancel_at: Option<&'static str>,
     cancel: Cancel,
+    hang: Option<(&'static str, usize)>,
+    fail_stop: bool,
+    /// VMs of the service of `hang` so far.
+    made: Cell<usize>,
+    hidden: RefCell<Vec<SandboxId>>,
 }
 
 impl<'f> Hooked<'f> {
@@ -669,6 +682,10 @@ impl<'f> Hooked<'f> {
             fake,
             cancel_at: None,
             cancel: Cancel::new(),
+            hang: None,
+            fail_stop: false,
+            made: Cell::new(0),
+            hidden: RefCell::new(Vec::new()),
         }
     }
 }
@@ -682,11 +699,18 @@ impl Sandbox for Hooked<'_> {
     }
     fn create(&self, batch: &[Launch]) -> Result<Vec<SandboxId>, SandboxError> {
         let ids = self.fake.create(batch)?;
-        if batch
-            .iter()
-            .any(|launch| self.cancel_at == Some(launch.service.as_str()))
-        {
-            self.cancel.cancel();
+        for (launch, id) in batch.iter().zip(&ids) {
+            if self.cancel_at == Some(launch.service.as_str()) {
+                self.cancel.cancel();
+            }
+            if let Some((service, n)) = self.hang
+                && launch.service == service
+            {
+                self.made.set(self.made.get() + 1);
+                if self.made.get() == n {
+                    self.hidden.borrow_mut().push(id.clone());
+                }
+            }
         }
         Ok(ids)
     }
@@ -699,7 +723,13 @@ impl Sandbox for Hooked<'_> {
         self.fake.exec_detached(id, argv, timeout)
     }
     fn wait(&self, what: &[Waitable], deadline: Instant) -> Result<Option<Exited>, SandboxError> {
-        self.fake.wait(what, deadline)
+        let hidden = self.hidden.borrow();
+        let what: Vec<Waitable> = what
+            .iter()
+            .filter(|waited| !matches!(waited, Waitable::Sandbox(id) if hidden.contains(id)))
+            .cloned()
+            .collect();
+        self.fake.wait(&what, deadline)
     }
     fn exec(
         &self,
@@ -711,6 +741,10 @@ impl Sandbox for Hooked<'_> {
         self.fake.exec(id, argv, deadline, stdout)
     }
     fn stop(&self, id: &SandboxId) -> Result<Stopped, SandboxError> {
+        if self.fail_stop {
+            let message = format!("{id}: the guest agent is gone");
+            return Err(SandboxError::Backend { message });
+        }
         self.fake.stop(id)
     }
     fn fault(&self, ids: &[SandboxId], fault: &Fault) -> Result<(), SandboxError> {
@@ -872,5 +906,607 @@ fn a_failure_of_before_stops_only_its_lane() {
         |call| matches!(call, Call::Create { ids, .. } if ids.contains(&head)),
     );
     assert!(dropped < head_starts);
+    assert_eq!(raw.head.len(), 3);
+    assert!(!case.run_dir().join("repeat-1-before").exists());
     assert_clean(&fake, &[]);
+
+    // `api` of the before tree dies in its first repeat: "before" runs no other repeat.
+    let case = Case::new(EXAMPLE);
+    let mut rules = example_rules();
+    rules.insert(
+        0,
+        Rule {
+            service: "api".into(),
+            tree: Some(case.tar(Side::Before)),
+            script: Script {
+                exit: Some((1, 5 * SECOND)),
+                ..stops(SECOND)
+            },
+        },
+    );
+    let dying = crate::fake(rules);
+    let raw = case.run(&dying, &case.versions(true)).unwrap();
+    let Some(BeforeOutcome::Failed(failure)) = &raw.before else {
+        panic!("{:?}", raw.before)
+    };
+    assert_eq!(
+        (
+            failure.phase,
+            failure.service.as_deref(),
+            &failure.cause,
+            failure.repeat
+        ),
+        (Phase::Workload, Some("api"), &Cause::Died, Some(1))
+    );
+    assert_eq!(raw.head.len(), 3);
+    let repeats = [
+        "repeat-1-before",
+        "repeat-1-head",
+        "repeat-2-head",
+        "repeat-3-head",
+    ];
+    assert_eq!(workload_folders(&case, &dying.journal()), repeats);
+    assert!(case.run_dir().join("repeat-1-before/api-1.log").is_file());
+    assert_clean(&dying, &[]);
+}
+
+// --- the measured repeats ----------------------------------------------------------------------
+
+/// The host folder of the `/stand/out` bind of `launch`.
+fn out_of(launch: &Launch) -> Option<&Utf8Path> {
+    launch.mounts.iter().find_map(|mount| match mount {
+        Mount::Bind { host, guest, .. } if guest == "/stand/out" => Some(host.as_path()),
+        _ => None,
+    })
+}
+
+/// The folder of each phase that started the workload, by name, in order.
+fn workload_folders(case: &Case, journal: &[Call]) -> Vec<String> {
+    let made = created(journal);
+    let loads = made
+        .iter()
+        .filter(|(launch, _)| launch.service == case.stand.workload.as_str());
+    let folders = loads.map(|(launch, _)| {
+        let out = out_of(launch).expect("the workload binds /stand/out");
+        out.parent().unwrap().file_name().unwrap().to_owned()
+    });
+    folders.collect()
+}
+
+/// `service-replica` of each VM, in the order of creation.
+fn services(journal: &[Call]) -> Vec<String> {
+    let made = created(journal);
+    let names = made
+        .iter()
+        .map(|(launch, _)| format!("{}-{}", launch.service, launch.replica));
+    names.collect()
+}
+
+#[test]
+fn setup_runs_once_and_the_repeats_start_from_its_snapshots_by_levels() {
+    let case = Case::new(EXAMPLE);
+    let fake = fake(example_rules());
+    let raw = case.run(&fake, &case.versions(false)).unwrap();
+    assert!(raw.before.is_none() && raw.setup.before.is_none());
+    let numbers: Vec<u32> = raw.head.iter().map(|output| output.repeat).collect();
+    assert_eq!(numbers, [1, 2, 3]);
+    let journal = fake.journal();
+    // Setup, then each repeat by levels: `db`, the two `api`, `load`; setup services once.
+    let repeat = ["db-1", "api-1", "api-2", "load-1"];
+    let mut expected = vec!["db-1", "prepare-1", "migrate-1"];
+    for _ in 0..3 {
+        expected.extend(repeat);
+    }
+    assert_eq!(services(&journal), expected);
+    let made = created(&journal);
+    let db_setup = &made[0].1;
+    let db_snapshot = journal.iter().find_map(|call| match call {
+        Call::Snapshot { id, snapshot } if id == db_setup => snapshot.clone(),
+        _ => None,
+    });
+    let db_snapshot = db_snapshot.expect("the setup snapshot of db");
+    for (index, output) in raw.head.iter().enumerate() {
+        let vms = &made[3 + 4 * index..][..4];
+        let (db, _) = &vms[0];
+        assert!(matches!(&db.seed, Some(Seed::Snapshot(id)) if *id == db_snapshot));
+        // Each level after what it waits for: `api` after the healthcheck of this repeat's `db`,
+        // `load` after those of both `api`.
+        let created_at = |id: &SandboxId| {
+            index_of(
+                &journal,
+                |call| matches!(call, Call::Create { ids, .. } if ids.contains(id)),
+            )
+        };
+        let checked = |id: &SandboxId| {
+            index_of(
+                &journal,
+                |call| matches!(call, Call::ExecDetached { id: on, .. } if on == id),
+            )
+        };
+        assert!(checked(&vms[0].1) < created_at(&vms[1].1));
+        assert!(checked(&vms[1].1) < created_at(&vms[3].1));
+        assert!(checked(&vms[2].1) < created_at(&vms[3].1));
+        let roles: Vec<(&str, u32, Role)> = output
+            .instances
+            .iter()
+            .map(|instance| (instance.service.as_str(), instance.replica, instance.role))
+            .collect();
+        let long = Role::LongRunning;
+        assert_eq!(
+            roles,
+            [
+                ("db", 1, long),
+                ("api", 1, long),
+                ("api", 2, long),
+                ("load", 1, Role::Workload)
+            ]
+        );
+        let dir = case
+            .run_dir()
+            .join(format!("repeat-{}-head", output.repeat));
+        assert_eq!(output.out_dir, dir.join("out"));
+        assert_eq!(output.instances[1].log, dir.join("api-1.log"));
+        assert!(output.instances[1].log.is_file());
+        assert!(dir.join("metrics.json").is_file());
+    }
+    assert_clean(&fake, &[]);
+}
+
+#[test]
+fn with_before_the_repeats_take_turns_and_the_harness_is_the_same() {
+    let case = Case::new(EXAMPLE);
+    let fake = fake(example_rules());
+    let raw = case.run(&fake, &case.versions(true)).unwrap();
+    let Some(BeforeOutcome::Passed(before)) = &raw.before else {
+        panic!("{:?}", raw.before)
+    };
+    assert_eq!((before.len(), raw.head.len()), (3, 3));
+    let journal = fake.journal();
+    let turns = [
+        "repeat-1-before",
+        "repeat-1-head",
+        "repeat-2-before",
+        "repeat-2-head",
+        "repeat-3-before",
+        "repeat-3-head",
+    ];
+    assert_eq!(workload_folders(&case, &journal), turns);
+    // Each `db` of a repeat starts from the setup snapshot of its own version.
+    let made = created(&journal);
+    let side_of = |launch: &Launch| {
+        let folder = out_of(launch).unwrap().parent().unwrap();
+        let name = folder.file_name().unwrap();
+        if name.ends_with("before") {
+            Side::Before
+        } else {
+            Side::Head
+        }
+    };
+    let dbs = made.iter().filter(|(launch, _)| launch.service == "db");
+    let mut setup = Vec::new();
+    for (launch, id) in dbs {
+        match &launch.seed {
+            None => {
+                let snapshot = journal.iter().find_map(|call| match call {
+                    Call::Snapshot { id: of, snapshot } if of == id => snapshot.clone(),
+                    _ => None,
+                });
+                setup.push((side_of(launch), snapshot.unwrap()));
+            }
+            Some(Seed::Snapshot(seed)) => {
+                let own = setup.iter().find(|(side, _)| *side == side_of(launch));
+                assert_eq!(Some(seed), own.map(|(_, snapshot)| snapshot));
+            }
+            other => panic!("db from {other:?}"),
+        }
+    }
+    assert_eq!(setup.len(), 2);
+    let harness: BTreeSet<Utf8PathBuf> = made
+        .iter()
+        .flat_map(|(launch, _)| launch.mounts.clone())
+        .filter_map(|mount| match mount {
+            Mount::Bind {
+                host,
+                guest,
+                read_only: true,
+            } if guest == "/harness" => Some(host),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(harness.len(), 1, "one harness folder for both versions");
+    assert_eq!(raw.harness, ["/harness"]);
+    assert_clean(&fake, &[]);
+}
+
+#[test]
+fn wall_runs_from_the_create_of_the_workload_to_its_exit() {
+    // `api` gets healthy at its second attempt: the workload starts 2 s into each repeat.
+    let case = Case::new(EXAMPLE);
+    let api = Script {
+        health: vec![Some(1), Some(0)],
+        ..stops(SECOND)
+    };
+    let fake = fake(with("api", api));
+    let raw = case.run(&fake, &case.versions(false)).unwrap();
+    let journal = fake.journal();
+    let api: Vec<SandboxId> = created(&journal)
+        .into_iter()
+        .filter(|(launch, _)| launch.service == "api")
+        .map(|(_, id)| id)
+        .collect();
+    let attempts = journal
+        .iter()
+        .filter(|call| matches!(call, Call::ExecDetached { id, .. } if api.contains(id)));
+    assert_eq!(attempts.count(), 2 * api.len());
+    assert_eq!(raw.head.len(), 3);
+    for output in &raw.head {
+        assert_eq!(output.wall, 30 * SECOND, "repeat {}", output.repeat);
+    }
+    assert_clean(&fake, &[]);
+}
+
+#[test]
+fn a_failure_of_the_head_in_a_repeat_ends_the_run_with_what_it_collected() {
+    let cases: [(&str, Script, Phase, Cause); 4] = [
+        ("load", Script::default(), Phase::Workload, Cause::Timeout),
+        (
+            "load",
+            exits(3, 10 * SECOND),
+            Phase::Workload,
+            Cause::Exit(3),
+        ),
+        (
+            "api",
+            Script {
+                exit: Some((1, 5 * SECOND)),
+                ..stops(SECOND)
+            },
+            Phase::Workload,
+            Cause::Died,
+        ),
+        (
+            "api",
+            Script {
+                health: vec![Some(1)],
+                ..Script::default()
+            },
+            Phase::Ready,
+            Cause::Unhealthy,
+        ),
+    ];
+    for (service, script, phase, cause) in cases {
+        let case = Case::new(EXAMPLE);
+        let fake = fake(with(service, script));
+        let failed = app_failure(case.run(&fake, &case.versions(false)));
+        let failure = &failed.failure;
+        assert_eq!(
+            (
+                failure.phase,
+                failure.service.as_deref(),
+                &failure.cause,
+                failure.repeat
+            ),
+            (phase, Some(service), &cause, Some(1)),
+            "{service}"
+        );
+        let dir = case.run_dir().join("repeat-1-head");
+        assert_eq!(failure.logs.as_deref(), Some(dir.as_path()));
+        assert!(dir.join(format!("{service}-1.log")).is_file());
+        assert!(
+            dir.join("metrics.json").is_file(),
+            "a failed repeat ends whole"
+        );
+        let head: Vec<u32> = failed.raw.head.iter().map(|output| output.repeat).collect();
+        assert_eq!(head, [1], "the failed repeat is in the raw outputs");
+        assert!(!case.run_dir().join("repeat-2-head").exists());
+        assert_clean(&fake, &[]);
+    }
+
+    // The workload of the second repeat never ends: the run ends with both repeats, at `timeout`
+    // from the start of that repeat, the 2 s `api` takes to get healthy included.
+    let case = Case::new(EXAMPLE);
+    let api = Script {
+        health: vec![Some(1), Some(0)],
+        ..stops(SECOND)
+    };
+    let fake = fake(with("api", api));
+    let sandbox = Hooked {
+        hang: Some(("load", 2)),
+        ..Hooked::new(&fake)
+    };
+    let result = run::run(
+        &case.stand,
+        &sandbox,
+        &case.versions(false),
+        &case.run_dir(),
+        &sandbox.cancel,
+    );
+    let failed = app_failure(result);
+    let failure = &failed.failure;
+    assert_eq!(
+        (failure.service.as_deref(), &failure.cause, failure.repeat),
+        (Some("load"), &Cause::Timeout, Some(2))
+    );
+    let head: Vec<(u32, Duration)> = failed
+        .raw
+        .head
+        .iter()
+        .map(|output| (output.repeat, output.wall))
+        .collect();
+    assert_eq!(head, [(1, 30 * SECOND), (2, (300 - 2) * SECOND)]);
+    let journal = fake.journal();
+    let db = &created(&journal)[3 + 4].1;
+    let start = index_of(
+        &journal,
+        |call| matches!(call, Call::Create { ids, .. } if ids.contains(db)),
+    );
+    let waits: Vec<Instant> = journal[start..]
+        .iter()
+        .filter_map(|call| match call {
+            Call::Wait { deadline, .. } => Some(*deadline),
+            _ => None,
+        })
+        .collect();
+    // The first wait ends a chunk of 1 s after the start, the last one at the deadline.
+    assert_eq!(*waits.iter().max().unwrap() - waits[0], 299 * SECOND);
+    assert_clean(&fake, &[]);
+}
+
+#[test]
+fn every_repeat_ends_with_the_stop_of_each_long_running_service_dependents_first() {
+    let case = Case::new(EXAMPLE);
+    let fake = fake(example_rules());
+    let raw = case.run(&fake, &case.versions(false)).unwrap();
+    for output in &raw.head {
+        for instance in &output.instances {
+            match instance.role {
+                Role::LongRunning => {
+                    assert!(instance.stopped.is_some_and(|stopped| !stopped.killed));
+                }
+                Role::Workload => assert!(instance.stopped.is_none()),
+            }
+        }
+    }
+    let journal = fake.journal();
+    let made = created(&journal);
+    let name = |id: &SandboxId| {
+        let (launch, _) = made.iter().find(|(_, made)| made == id).unwrap();
+        format!("{}-{}", launch.service, launch.replica)
+    };
+    let stops: Vec<(usize, String)> = journal
+        .iter()
+        .enumerate()
+        .filter_map(|(index, call)| match call {
+            Call::Stop(id) => Some((index, name(id))),
+            _ => None,
+        })
+        .collect();
+    // Setup stops `db`; each repeat the two `api` in reverse, then `db`; the workload never.
+    let mut expected = vec!["db-1"];
+    for _ in 0..3 {
+        expected.extend(["api-2", "api-1", "db-1"]);
+    }
+    let names: Vec<&str> = stops.iter().map(|(_, name)| name.as_str()).collect();
+    assert_eq!(names, expected);
+    // In each repeat the stops come after the cut read the workload, at its exit.
+    for (repeat, stops) in stops[1..].chunks(3).enumerate() {
+        let load = &made[3 + 4 * repeat + 3].1;
+        let cut = index_of(
+            &journal,
+            |call| matches!(call, Call::Metrics(id) if id == load),
+        );
+        assert!(cut < stops[0].0, "repeat {}", repeat + 1);
+    }
+    let text = fs::read_to_string(case.run_dir().join("repeat-2-head/metrics.json")).unwrap();
+    let metrics: serde_json::Value = serde_json::from_str(&text).unwrap();
+    let stopped: Vec<(&str, bool)> = metrics
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|instance| {
+            let service = instance["service"].as_str().unwrap();
+            (service, !instance["stopped"].is_null())
+        })
+        .collect();
+    assert_eq!(
+        stopped,
+        [("db", true), ("api", true), ("api", true), ("load", false)]
+    );
+    assert_clean(&fake, &[]);
+}
+
+#[test]
+fn everything_made_is_destroyed_on_every_path() {
+    // Passed, the head failed in a repeat, in setup, before its workload, "before" failed in a
+    // repeat.
+    let paths: [fn(&Case) -> Vec<Rule>; 5] = [
+        |_| example_rules(),
+        |_| with("load", exits(3, SECOND)),
+        |_| with("migrate", exits(1, SECOND)),
+        |_| {
+            let sick = Script {
+                health: vec![Some(1)],
+                ..Script::default()
+            };
+            with("api", sick)
+        },
+        |case| {
+            let mut rules = example_rules();
+            let dies = Script {
+                exit: Some((1, SECOND)),
+                ..stops(SECOND)
+            };
+            rules.insert(
+                0,
+                Rule {
+                    service: "api".into(),
+                    tree: Some(case.tar(Side::Before)),
+                    script: dies,
+                },
+            );
+            rules
+        },
+    ];
+    for rules in paths {
+        let case = Case::new(EXAMPLE);
+        let fake = fake(rules(&case));
+        drop(case.run(&fake, &case.versions(true)));
+        assert_clean(&fake, &[]);
+    }
+}
+
+fn logs_in(dir: &Utf8Path) -> BTreeSet<String> {
+    let names = fs::read_dir(dir).unwrap().map(|entry| {
+        let name = entry.unwrap().file_name();
+        name.into_string().unwrap()
+    });
+    names.filter(|name| name.ends_with(".log")).collect()
+}
+
+fn names(logs: &[&str]) -> BTreeSet<String> {
+    logs.iter().map(|log| format!("{log}.log")).collect()
+}
+
+#[test]
+fn cancel_in_a_repeat_destroys_the_vms_and_leaves_the_raw_outputs() {
+    // Ctrl+C once the workload is created is in `Workload`; once `api` is, in `Ready`.
+    let cases = [
+        (
+            "load",
+            Phase::Workload,
+            &["db-1", "api-1", "api-2", "load-1"][..],
+        ),
+        ("api", Phase::Ready, &["db-1", "api-1", "api-2"][..]),
+    ];
+    for (at, phase, logs) in cases {
+        let case = Case::new(EXAMPLE);
+        let fake = fake(example_rules());
+        let sandbox = Hooked {
+            cancel_at: Some(at),
+            ..Hooked::new(&fake)
+        };
+        let result = run::run(
+            &case.stand,
+            &sandbox,
+            &case.versions(false),
+            &case.run_dir(),
+            &sandbox.cancel,
+        );
+        assert!(
+            matches!(&result, Err(RunError::Cancelled { phase: own }) if *own == phase),
+            "{result:?}"
+        );
+        let repeat = case.run_dir().join("repeat-1-head");
+        assert_eq!(logs_in(&repeat), names(logs), "{at}");
+        let setup = case.run_dir().join("setup-head");
+        assert!(setup.join("db-1.log").is_file());
+        assert!(setup.join("metrics.json").is_file());
+        assert_left(&fake, &[]);
+    }
+}
+
+/// `db`, then on one level the workload and `cache`, then `side`, which waits for `cache`: a
+/// service whose `create` comes after the workload's.
+const AFTER_THE_WORKLOAD: &str = r#"
+services:
+  db:
+    image: postgres:17
+    expose: [5432]
+    healthcheck: { test: ["CMD", "pg_isready"], interval: 1s }
+    deploy: { resources: { limits: { cpus: "1", memory: 1g } } }
+  cache:
+    image: redis:7
+    depends_on: { db: { condition: service_healthy } }
+    deploy: { resources: { limits: { cpus: "1", memory: 256m } } }
+  side:
+    image: busybox:1
+    depends_on: { cache: { condition: service_started } }
+    deploy: { resources: { limits: { cpus: "1", memory: 256m } } }
+  load:
+    image: node:22
+    depends_on: { db: { condition: service_healthy } }
+    deploy: { resources: { limits: { cpus: "1", memory: 512m } } }
+x-stand: { workload: load }
+"#;
+
+#[test]
+fn a_stand_fault_in_a_repeat_tears_it_down_in_its_phase() {
+    // `Ready` before the `create` with the workload returned (its own refused `create` too),
+    // `Workload` from then on.
+    let cases = [
+        ("postgres:17", Phase::Ready, &[][..]),
+        ("redis:7", Phase::Ready, &["db-1"][..]),
+        (
+            "busybox:1",
+            Phase::Workload,
+            &["db-1", "cache-1", "load-1"][..],
+        ),
+    ];
+    for (missing, phase, logs) in cases {
+        let case = Case::new(AFTER_THE_WORKLOAD);
+        let fake = Fake::new(Scenario {
+            rules: vec![
+                rule("db", stops(SECOND)),
+                rule("cache", stops(SECOND)),
+                rule("side", stops(SECOND)),
+                rule("load", exits(0, 5 * SECOND)),
+            ],
+            missing_images: vec![missing.into()],
+            ..Scenario::default()
+        });
+        let result = case.run(&fake, &case.versions(false));
+        assert!(
+            matches!(
+                &result,
+                Err(RunError::Stand {
+                    phase: own,
+                    fault: StandFault::Sandbox(SandboxError::ImageNotFound(_)),
+                }) if *own == phase
+            ),
+            "{missing}: {result:?}"
+        );
+        let repeat = case.run_dir().join("repeat-1-head");
+        assert_eq!(logs_in(&repeat), names(logs), "{missing}");
+        assert_left(&fake, &[]);
+    }
+
+    // The stop at the end of the repeat breaks: after the workload exited, and after `db` stayed
+    // unhealthy, which ends the repeat before its workload.
+    let cases = [(Some(0), Phase::Workload), (Some(1), Phase::Ready)];
+    for (health, phase) in cases {
+        let case = Case::new(AFTER_THE_WORKLOAD);
+        let db = Script {
+            health: vec![health],
+            ..stops(SECOND)
+        };
+        let fake = fake(vec![
+            rule("db", db),
+            rule("cache", stops(SECOND)),
+            rule("side", stops(SECOND)),
+            rule("load", exits(0, 5 * SECOND)),
+        ]);
+        let sandbox = Hooked {
+            fail_stop: true,
+            ..Hooked::new(&fake)
+        };
+        let result = run::run(
+            &case.stand,
+            &sandbox,
+            &case.versions(false),
+            &case.run_dir(),
+            &sandbox.cancel,
+        );
+        assert!(
+            matches!(
+                &result,
+                Err(RunError::Stand {
+                    phase: own,
+                    fault: StandFault::Sandbox(SandboxError::Backend { .. }),
+                }) if *own == phase
+            ),
+            "{health:?}: {result:?}"
+        );
+        assert!(case.run_dir().join("repeat-1-head/db-1.log").is_file());
+        assert_left(&fake, &[]);
+    }
 }

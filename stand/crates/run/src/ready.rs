@@ -1,7 +1,7 @@
-//! The VMs of one phase and what `run` waits for on them: the exit of a setup service, a passed
-//! healthcheck, a deadline. Every wait goes in chunks of at most 1 s with `Cancel` between them,
-//! and every running VM of the phase is in it, so a neighbour that dies during a healthcheck
-//! attempt shows at once (architecture plan, port `Sandbox`).
+//! The VMs of one phase and what `run` waits for on them: the exit of a setup service or of the
+//! workload, a passed healthcheck, a deadline. Every wait goes in chunks of at most 1 s with
+//! `Cancel` between them, and every running VM of the phase is in it, so a neighbour that dies
+//! during a healthcheck attempt shows at once (architecture plan, port `Sandbox`).
 
 use std::time::{Duration, Instant};
 
@@ -85,7 +85,12 @@ enum Woke {
 }
 
 impl Fleet {
-    pub(crate) fn start(&mut self, sandbox: &impl Sandbox, batch: Vec<Start>) -> Result<(), Halt> {
+    /// One batch; the moment its `create` returned.
+    pub(crate) fn start(
+        &mut self,
+        sandbox: &impl Sandbox,
+        batch: Vec<Start>,
+    ) -> Result<Instant, Halt> {
         let launches: Vec<Launch> = batch.iter().map(|start| start.launch.clone()).collect();
         let ids = sandbox.create(&launches)?;
         let created = sandbox.now();
@@ -100,7 +105,7 @@ impl Fleet {
                 healthy: false,
             });
         }
-        Ok(())
+        Ok(created)
     }
 
     pub(crate) fn find(&self, service: &str, replica: u32) -> Option<usize> {
@@ -180,6 +185,28 @@ impl Fleet {
             }
         }
         Ok(())
+    }
+
+    /// Until the workload ends: its code and `Exited.at`.
+    pub(crate) fn finished(
+        &mut self,
+        sandbox: &impl Sandbox,
+        deadline: Instant,
+        cancel: &Cancel,
+    ) -> Result<(Option<i32>, Instant), Halt> {
+        let index = self
+            .members
+            .iter()
+            .position(|member| member.kind == ServiceKind::Workload)
+            .expect("a repeat has started its workload");
+        loop {
+            if let Some(exit) = self.members[index].exit {
+                return Ok(exit);
+            }
+            if let Woke::Deadline = self.watch(sandbox, None, deadline, cancel)? {
+                return Err(Halt::Deadline(index));
+            }
+        }
     }
 
     /// The first exit among the running members and `job`, or the deadline. A setup service
