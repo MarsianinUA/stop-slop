@@ -994,7 +994,10 @@ fn live_the_version_snapshot_seeds_another_service() {
     });
     prepare.workdir = Some("/w/app".into());
     prepare.mounts = vec![out(&first)];
-    prepare.command = sh("node scripts/install.js && echo $WHO > /stand/out/who");
+    prepare.command = sh(&format!(
+        "node scripts/install.js && echo $WHO > /stand/out/who && {{ {}; }} > /stand/out/disk",
+        disk_at("/w")
+    ));
     let prepare = case.create(vec![prepare]).remove(0);
     assert_eq!(wait_exit(case.sandbox, &prepare), Some(0));
     let snapshot = case.sandbox.snapshot(&prepare).unwrap();
@@ -1004,6 +1007,11 @@ fn live_the_version_snapshot_seeds_another_service() {
         size > 400 << 20,
         "the version disk in the snapshot: {size} bytes"
     );
+    // Its trim keeps the deleted blocks of an install out only where its disk takes discards.
+    let (disk, discard) = parse_disk(&super::read(&first.join("disk")));
+    note(&format!(
+        "the version disk at /w: {disk}, discard_max_bytes {discard}"
+    ));
 
     let peers = [peer("api", 1, &[3000]), peer("client", 1, &[])];
     let mut api = launch("api", NODE);
@@ -1057,9 +1065,25 @@ ls node_modules | wc -l"#;
 /// 64 MiB of random bytes on the volume, synced to its disk, then deleted.
 const DELETED: &str = "head -c 67108864 /dev/urandom > /data/junk && sync && rm /data/junk && sync";
 
-/// The blueprint's live check of FITRIM: the blocks of deleted files stay out of the snapshot,
-/// and a trim that fails still snapshots. A tmpfs over the mount point makes it fail: FITRIM
-/// reaches the tmpfs, which has none, and the disk under it keeps its deleted blocks.
+/// `<disk> <discard_max_bytes>` of the ext4 disk at `mount`, as the guest's kernel has them.
+fn disk_at(mount: &str) -> String {
+    format!(
+        r#"disk=$(awk '$2 == "{mount}" && $3 == "ext4" {{print substr($1, 6)}}' /proc/mounts); echo "$disk $(cat /sys/block/$disk/queue/discard_max_bytes)""#
+    )
+}
+
+fn parse_disk(said: &str) -> (String, u64) {
+    let parsed = said.trim().split_once(' ').and_then(|(disk, discard)| {
+        let discard = discard.parse().ok()?;
+        (!disk.is_empty()).then(|| (disk.to_owned(), discard))
+    });
+    parsed.unwrap_or_else(|| panic!("`<disk> <discard_max_bytes>`: {said:?}"))
+}
+
+/// The blueprint's live check of FITRIM: where the volume's disk takes discards, the blocks of
+/// deleted files stay out of the snapshot; where it takes none, the trim changes nothing; a trim
+/// that fails still snapshots. A tmpfs over the mount point makes it fail: FITRIM reaches the
+/// tmpfs, which has none, and the disk under it keeps its deleted blocks.
 #[test]
 fn live_trim_keeps_deleted_blocks_out_and_a_failed_trim_still_snapshots() {
     let Some(case) = Case::start() else { return };
@@ -1079,15 +1103,9 @@ fn live_trim_keeps_deleted_blocks_out_and_a_failed_trim_still_snapshots() {
         code == Some(125) && said.contains("not supported by its file system"),
         "the trim of the untrimmed VM: {code:?} {said}"
     );
-    // Whether the guest's disks take discards: on CI's Linux runner the volume's did not.
-    let (_, disks) = case.plain(
-        &ids[1],
-        "grep ' /data ' /proc/mounts; grep . /sys/block/vd*/queue/discard_max_bytes",
-    );
-    let disks: Vec<&str> = disks.lines().collect();
-    note(&format!(
-        "/data and the discard limit of each disk: {disks:?}"
-    ));
+    // The two volumes are disks of one kind; the tmpfs hides the untrimmed VM's from FITRIM only.
+    let (_, said) = case.plain(&ids[1], &disk_at("/data"));
+    let (disk, discard) = parse_disk(&said);
     let snapshots: Vec<SnapshotId> = ids
         .iter()
         .map(|id| case.sandbox.snapshot(id).unwrap())
@@ -1097,21 +1115,26 @@ fn live_trim_keeps_deleted_blocks_out_and_a_failed_trim_still_snapshots() {
     }
     let with = snapshot_bytes(&snapshots[0]);
     let without = snapshot_bytes(&snapshots[1]);
+    let takes = if discard > 0 {
+        format!("the volume's disk {disk} takes discards up to {discard} bytes")
+    } else {
+        format!("trim not supported: the volume's disk {disk} has discard_max_bytes 0")
+    };
     note(&format!(
-        "a snapshot after 64 MiB deleted: {} MiB with trim, {} MiB after a failed trim",
+        "a snapshot after 64 MiB deleted: {} MiB with trim, {} MiB after a failed trim; {takes}",
         with >> 20,
         without >> 20
     ));
-    assert!(
-        with <= without,
-        "with trim {with} bytes, after a failed trim {without}"
-    );
-    // Only Windows showed the saving: on CI's Linux runner the volume's disk had
-    // `discard_max_bytes` 0, so the trim failed there too and both snapshots were 66 MiB. The
-    // Mac is not measured yet.
-    if cfg!(windows) {
+    // By the disk, not the OS: the volume's disk on CI's Linux runner takes no discard, so the
+    // trim fails there as on the tmpfs, and the snapshots differ only by a few KiB of noise.
+    if discard > 0 {
         assert!(
             without >= with + (48 << 20),
+            "with trim {with} bytes, after a failed trim {without}"
+        );
+    } else {
+        assert!(
+            with.abs_diff(without) <= 1 << 20,
             "with trim {with} bytes, after a failed trim {without}"
         );
     }
