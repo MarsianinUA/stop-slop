@@ -73,7 +73,7 @@ pub struct ModuleTime {
 
 #[derive(Debug, thiserror::Error)]
 pub enum ProfileError {
-    #[error("no Node process wrote a profile: the command must start Node 20 or later")]
+    #[error("no Node process wrote a profile: the service must run Node 20 or later")]
     NoProfile,
     #[error("{path}: {message}")]
     BadProfile { path: Utf8PathBuf, message: String },

@@ -12,7 +12,8 @@ use tempfile::TempDir;
 /// empty profile folder. Their paths have a space, and on Windows `\`, which `NODE_OPTIONS`
 /// reads as an escape inside `"`.
 struct Folders {
-    temp: TempDir,
+    _temp: TempDir,
+    dir: Utf8PathBuf,
     preload: Utf8PathBuf,
     profile: Utf8PathBuf,
 }
@@ -20,14 +21,15 @@ struct Folders {
 impl Folders {
     fn new() -> Folders {
         let temp = tempfile::tempdir().expect("create a temp folder");
-        let root = Utf8PathBuf::try_from(temp.path().join("a guest")).expect("a UTF-8 temp folder");
-        let preload = root.join("the preload");
-        let profile = root.join("the profile");
-        fs::create_dir_all(&preload).unwrap();
-        fs::create_dir_all(&profile).unwrap();
+        let dir = Utf8PathBuf::try_from(temp.path().to_owned()).expect("a UTF-8 temp folder");
+        let preload = dir.join("the preload");
+        let profile = dir.join("the profile");
+        fs::create_dir(&preload).unwrap();
+        fs::create_dir(&profile).unwrap();
         fs::write(preload.join("preload.cjs"), PRELOAD).unwrap();
         Folders {
-            temp,
+            _temp: temp,
+            dir,
             preload,
             profile,
         }
@@ -35,9 +37,8 @@ impl Folders {
 
     /// In the temp folder, next to the two others.
     fn script(&self, name: &str, text: &str) -> Utf8PathBuf {
-        let path = Utf8Path::from_path(self.temp.path())
-            .expect("a UTF-8 temp folder")
-            .join(name);
+        let path = self.dir.join(name);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
         fs::write(&path, text).unwrap();
         path
     }
@@ -52,7 +53,7 @@ impl Folders {
         );
         Command::new("node")
             .args(args)
-            .current_dir(self.temp.path())
+            .current_dir(&self.dir)
             .envs(env.into_vars())
             .status()
             .expect("start node")
@@ -248,9 +249,9 @@ fn the_exit_code_and_error_stack_are_the_same_as_without_the_preload() {
              require('node:fs').writeFileSync(process.argv[2], fail().stack);\n\
              process.exit(3);\n",
         );
-        let with = folders.temp.path().join("with.txt");
-        let without = folders.temp.path().join("without.txt");
-        let status = folders.node(mode, None, &[fail.as_str(), with.to_str().unwrap()]);
+        let with = folders.dir.join("with.txt");
+        let without = folders.dir.join("without.txt");
+        let status = folders.node(mode, None, &[fail.as_str(), with.as_str()]);
         let plain = Command::new("node")
             .arg(&fail)
             .arg(&without)
@@ -273,15 +274,15 @@ fn the_exit_code_and_error_stack_are_the_same_as_without_the_preload() {
 #[test]
 fn coverage_writes_the_calls_of_each_function_with_the_line_and_column_of_its_start() {
     let folders = Folders::new();
-    fs::create_dir_all(folders.temp.path().join("node_modules/dep")).unwrap();
     folders.script("node_modules/dep/index.js", "exports.run = () => 1;\n");
-    // Line ends of Windows count as one, as in V8's own positions.
+    // As in V8's own positions, a line end of Windows counts as one and a column counts UTF-16
+    // units: `é` is one, `😀` two.
     let count = folders.script(
         "count.js",
         "function add(a, b) {\r\n\
          \x20 return a + b;\r\n\
          }\r\n\
-         const twice = (x) => x * 2;\r\n\
+         const twice = /* é😀 */ (x) => x * 2;\r\n\
          function unused() {}\r\n\
          class Box { take(y) { return y; } }\r\n\
          for (let i = 0; i < 3; i++) add(i, i);\r\n\
@@ -324,7 +325,7 @@ fn coverage_writes_the_calls_of_each_function_with_the_line_and_column_of_its_st
         [
             ("", 0, 0, 1),
             ("add", 0, 0, 3),
-            ("twice", 3, 14, 1),
+            ("twice", 3, 24, 1),
             ("unused", 4, 0, 0),
             ("take", 5, 12, 1),
         ]
@@ -334,13 +335,18 @@ fn coverage_writes_the_calls_of_each_function_with_the_line_and_column_of_its_st
 #[test]
 fn a_map_file_next_to_the_script_goes_into_maps_json_without_sources_content() {
     let folders = Folders::new();
-    fs::create_dir(folders.temp.path().join("dist")).unwrap();
+    // The space puts `%20` into the script's URL, which the map's name is resolved against.
+    // `gone.js` names a map that is not there: only that script goes without one.
+    folders.script(
+        "a dist/gone.js",
+        "exports.go = () => 1;\n//# sourceMappingURL=gone.js.map\n",
+    );
     let app = folders.script(
-        "dist/app.js",
-        "function main() {}\nmain();\n//# sourceMappingURL=app.js.map\n",
+        "a dist/app.js",
+        "function main() {}\nmain();\nrequire('./gone.js').go();\n//# sourceMappingURL=app.js.map\n",
     );
     folders.script(
-        "dist/app.js.map",
+        "a dist/app.js.map",
         r#"{"version":3,"sources":["../src/app.ts"],"sourcesContent":["x"],"names":[],"mappings":"AAAA"}"#,
     );
     let status = folders.node(ProfileMode::Coverage, None, &[app.as_str()]);
@@ -353,7 +359,7 @@ fn a_map_file_next_to_the_script_goes_into_maps_json_without_sources_content() {
     let [(url, entry)] = maps.as_object().unwrap().iter().collect::<Vec<_>>()[..] else {
         panic!("not one map in {maps}");
     };
-    assert!(url.ends_with("/dist/app.js"), "{url}");
+    assert!(url.ends_with("/a%20dist/app.js"), "{url}");
     assert_eq!(
         entry["map"],
         serde_json::json!({"version": 3, "sources": ["../src/app.ts"], "names": [], "mappings": "AAAA"})
@@ -361,7 +367,7 @@ fn a_map_file_next_to_the_script_goes_into_maps_json_without_sources_content() {
     // The path the relative source starts from, as the guest sees it.
     let base = Utf8Path::new(entry["base"].as_str().unwrap());
     assert!(
-        base.ends_with("dist/app.js.map") && base.is_file(),
+        base.ends_with("a dist/app.js.map") && base.is_file(),
         "{base}"
     );
 }
@@ -369,7 +375,7 @@ fn a_map_file_next_to_the_script_goes_into_maps_json_without_sources_content() {
 #[test]
 fn code_compiled_with_vm_compile_function_gets_its_inline_map() {
     let folders = Folders::new();
-    let source = folders.temp.path().join("add.ts");
+    let source = folders.dir.join("add.ts");
     let compile = folders.script(
         "compile.js",
         "const source = process.argv[2];\n\
@@ -378,11 +384,7 @@ fn code_compiled_with_vm_compile_function_gets_its_inline_map() {
          \x20 '//# sourceMappingURL=data:application/json;base64,' + Buffer.from(JSON.stringify(map)).toString('base64');\n\
          require('node:vm').compileFunction(code, [], { filename: source })();\n",
     );
-    let status = folders.node(
-        ProfileMode::Cpu,
-        None,
-        &[compile.as_str(), source.to_str().unwrap()],
-    );
+    let status = folders.node(ProfileMode::Cpu, None, &[compile.as_str(), source.as_str()]);
     assert_eq!(status.code(), Some(0));
     assert_eq!(
         folders.kinds(),
@@ -397,8 +399,8 @@ fn code_compiled_with_vm_compile_function_gets_its_inline_map() {
         .unwrap_or_else(|| panic!("no map of add.ts in {maps}"));
     assert!(url.starts_with("file:///"), "{url}");
     let map = &entry["map"];
-    assert_eq!(map["sources"][0], source.to_str().unwrap());
+    assert_eq!(map["sources"][0], source.as_str());
     assert_eq!(map["mappings"], "AAAA;AACA");
-    assert_eq!(entry["base"], source.to_str().unwrap());
+    assert_eq!(entry["base"], source.as_str());
     assert!(map.get("sourcesContent").is_none(), "{map}");
 }

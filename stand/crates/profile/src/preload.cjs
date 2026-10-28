@@ -40,10 +40,11 @@ function start(dir, coverage) {
   // its map.
   const mapURLs = new Map();
   const seen = new Set();
+  const dependency = /[\\/]node_modules[\\/]/;
   session.on('Debugger.scriptParsed', ({ params: { url, sourceMapURL } }) => {
     if (!sourceMapURL || seen.has(url) || mapURLs.has(url)) return;
     // Frames of dependencies are never local, so their maps would only take space.
-    if (/[\\/]node_modules[\\/]/.test(url)) return;
+    if (dependency.test(url)) return;
     mapURLs.set(url, sourceMapURL);
   });
   // Without the limit the debugger keeps the source of every script the program dropped, and
@@ -115,7 +116,7 @@ function start(dir, coverage) {
       (script) =>
         script.url.startsWith('file:') &&
         script.url !== self &&
-        !/[\\/]node_modules[\\/]/.test(script.url) &&
+        !dependency.test(script.url) &&
         script.functions.some((fn) => fn.ranges[0].count > 0) &&
         place(script),
     );
