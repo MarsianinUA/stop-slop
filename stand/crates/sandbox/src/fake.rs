@@ -1,16 +1,18 @@
 //! A scripted `Sandbox` for the tests of `run` and `cli`: each VM follows the `Script` of its rule,
-//! time moves only in `wait`, and every call lands in a journal.
+//! time moves only in `wait`, and every call lands in a journal. It refuses what microsandbox
+//! refuses, with the adapter's variant and words (the docs of `create`, `exec`, `Seed::Snapshot`),
+//! so a test of `run` catches such a call before a live run does.
 
 use std::fs;
 use std::io;
 use std::sync::{Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
-use camino::{Utf8Path, Utf8PathBuf};
+use camino::{Utf8Component, Utf8Path, Utf8PathBuf};
 
 use crate::{
-    ExecId, ExecOutcome, Exited, Fault, ImageRef, Launch, Leftovers, Metrics, Mount, Pulled,
-    Sandbox, SandboxError, SandboxId, Seed, SnapshotId, Stopped, VolumeName, Waitable,
+    ExecId, ExecOutcome, Exited, Exposed, Fault, ImageRef, Launch, Leftovers, Metrics, Mount,
+    Pulled, Sandbox, SandboxError, SandboxId, Seed, SnapshotId, Stopped, VolumeName, Waitable,
 };
 
 pub struct Fake {
@@ -184,6 +186,19 @@ impl Fake {
             if self.is_missing(&launch.image) {
                 return Err(SandboxError::ImageNotFound(launch.image.clone()));
             }
+            if let Some((host, guest)) = missing_bind(launch) {
+                return Err(backend(format!(
+                    "{host}, bound on {guest} for `{}`, is not a folder on the host",
+                    launch.service
+                )));
+            }
+            if let Some((vm, port)) = state.port_holder(launch) {
+                return Err(backend(format!(
+                    "host port of `{}` replica {} port {port} is in use: by the live VM `{}` of \
+                     that replica",
+                    launch.service, launch.replica, vm.id
+                )));
+            }
             let (tree, disks) = match &launch.seed {
                 None => (None, volumes(launch)),
                 Some(Seed::Tree { tar, .. }) => (Some(tar.clone()), volumes(launch)),
@@ -353,6 +368,11 @@ impl Sandbox for Fake {
             stdout: stdout.to_owned(),
         });
         let vm = state.vm(id)?;
+        if !under_writable_bind(&vm.launch, stdout) {
+            return Err(SandboxError::Guest {
+                message: format!("{stdout} is not a file under a writable bind of the VM"),
+            });
+        }
         let name = stdout.file_name().unwrap_or_default();
         let scripted = vm.script.probes.iter().find(|(file, ..)| file == name);
         let (outcome, bytes) = match scripted {
@@ -492,6 +512,18 @@ impl State {
         vm.ok_or_else(|| SandboxError::Gone(id.clone()))
     }
 
+    fn port_holder(&self, launch: &Launch) -> Option<(&Vm, u16)> {
+        let replica =
+            |vm: &&Vm| vm.launch.service == launch.service && vm.launch.replica == launch.replica;
+        self.vms.iter().filter(replica).find_map(|vm| {
+            let common = launch
+                .ports
+                .iter()
+                .find(|port| vm.launch.ports.contains(port));
+            common.map(|&Exposed(port)| (vm, port))
+        })
+    }
+
     fn job(&self, exec: &ExecId) -> &Job {
         let job = self.execs.iter().find(|job| job.id == *exec);
         job.expect("an exec id this fake gave")
@@ -590,6 +622,29 @@ fn volumes(launch: &Launch) -> Vec<(VolumeName, String)> {
         _ => None,
     });
     volumes.collect()
+}
+
+fn missing_bind(launch: &Launch) -> Option<(&Utf8Path, &str)> {
+    launch.mounts.iter().find_map(|mount| match mount {
+        Mount::Bind { host, guest, .. } if !host.is_dir() => Some((host.as_path(), guest.as_str())),
+        _ => None,
+    })
+}
+
+/// As the adapter maps `stdout` into the guest: below the host folder of a writable bind, by names
+/// only, so neither the folder itself nor a path with `..` passes.
+fn under_writable_bind(launch: &Launch, stdout: &Utf8Path) -> bool {
+    launch.mounts.iter().any(|mount| match mount {
+        Mount::Bind {
+            host,
+            read_only: false,
+            ..
+        } => stdout.strip_prefix(host).is_ok_and(|rest| {
+            let mut parts = rest.components();
+            !rest.as_str().is_empty() && parts.all(|part| matches!(part, Utf8Component::Normal(_)))
+        }),
+        _ => false,
+    })
 }
 
 fn host_file(launch: &Launch, path: &str) -> Option<Utf8PathBuf> {

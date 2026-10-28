@@ -7,7 +7,7 @@ use std::fmt;
 use std::time::{Duration, Instant};
 
 use camino::{Utf8Path, Utf8PathBuf};
-use serde::Serialize;
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 #[cfg(feature = "fake")]
 mod fake;
@@ -30,6 +30,9 @@ pub trait Sandbox {
     /// One batch starts in parallel; ids in the order of `batch`. Returns once each service's command
     /// runs under `stand-guest run`: that is `service_started`. Env, workdir and command go into that exec,
     /// never onto the VM (a restored VM has no VM env), and every later exec of the VM gets the same env.
+    /// `Backend`, in `Fake` too, for a bind whose host folder is missing, and for a port that a live VM
+    /// of the same service and replica publishes: the adapter gives each (service, replica, port) one
+    /// host port.
     fn create(&self, batch: &[Launch]) -> Result<Vec<SandboxId>, SandboxError>;
     /// Healthcheck attempts: `run` waits on them together with every sandbox of the batch and `Cancel`.
     /// At `timeout` the guest kills the attempt with its process group, as Docker kills a check past
@@ -44,7 +47,8 @@ pub trait Sandbox {
     /// The first of `what` to exit, or `None` at `deadline`.
     fn wait(&self, what: &[Waitable], deadline: Instant) -> Result<Option<Exited>, SandboxError>;
     /// Probes and `inspect`: killed at `deadline`; its sockets reach only the guest's own loopback;
-    /// stdout goes to `stdout` on the host, stderr to `<stdout>.err`.
+    /// stdout goes to `stdout` on the host, stderr to `<stdout>.err`. `stdout` is a file below the
+    /// host folder of a writable bind of the VM, else `Guest`, in `Fake` too.
     fn exec(
         &self,
         id: &SandboxId,
@@ -195,6 +199,20 @@ name!(SnapshotId, pub(crate));
 name!(VolumeName, pub);
 name!(ImageRef, pub);
 
+/// A snapshot outlives the process that took it (`kept.json`, a setup cache entry), so `run` reads
+/// its id back from a file: a string. A `SandboxId` or `ExecId` never outlives its process.
+impl Serialize for SnapshotId {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(&self.0)
+    }
+}
+
+impl<'de> Deserialize<'de> for SnapshotId {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<SnapshotId, D::Error> {
+        String::deserialize(deserializer).map(SnapshotId)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Waitable {
     Sandbox(SandboxId),
@@ -211,7 +229,7 @@ pub struct Exited {
     pub at: Instant,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ExecOutcome {
     Exited(i32),
     TimedOut,

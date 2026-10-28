@@ -11,8 +11,8 @@ use std::time::{Duration, Instant};
 
 use camino::{Utf8Path, Utf8PathBuf};
 use sandbox::{
-    Call, ExecOutcome, Fake, Fault, FaultMode, ImageRef, Launch, Metrics, Mount, Outbound, Rule,
-    Sandbox, SandboxError, SandboxId, Scenario, Script, Seed, Stopped, VolumeName, Waitable,
+    Call, ExecOutcome, Exposed, Fake, Fault, FaultMode, ImageRef, Launch, Metrics, Mount, Outbound,
+    Rule, Sandbox, SandboxError, SandboxId, Scenario, Script, Seed, Stopped, VolumeName, Waitable,
 };
 use tempfile::TempDir;
 
@@ -652,6 +652,69 @@ fn fake_a_snapshot_outlives_its_vm() {
             rule("copy", writes(exits(0), &[("/stand/out/mark", "origin\n")])),
         ],
         a_snapshot_outlives_its_vm,
+    );
+}
+
+/// Refused on every backend, so a test of `run` on the `Fake` catches what a live run would refuse:
+/// a bind of a folder that is not there, a probe output that no writable bind brings out (the
+/// read-only harness does not), and a second live VM of one replica on the host port the first one
+/// holds.
+fn refuses_a_missing_bind_folder_a_probe_outside_writable_binds_and_a_taken_port(
+    sandbox: &impl Sandbox,
+) {
+    let (_dir, dir) = folder();
+    let (_harness, harness) = folder();
+    let (_other, other) = folder();
+    let mut lost = launch("api", ALPINE);
+    lost.command = Some(argv(&["sleep", "600"]));
+    lost.mounts = vec![out(&dir.join("not-made"))];
+    let refused = sandbox.create(&[lost]);
+    assert!(
+        matches!(refused, Err(SandboxError::Backend { .. })),
+        "a missing bind folder: {refused:?}"
+    );
+
+    let mut api = launch("api", ALPINE);
+    api.command = Some(argv(&["sleep", "600"]));
+    api.ports = vec![Exposed(3000)];
+    api.mounts = vec![
+        out(&dir),
+        Mount::Bind {
+            host: harness.clone(),
+            guest: "/harness".into(),
+            read_only: true,
+        },
+    ];
+    let id = create(sandbox, api.clone());
+    let say = argv(&["true"]);
+    for stdout in [other.join("x.txt"), harness.join("x.txt"), dir.clone()] {
+        let outside = sandbox.exec(&id, &say, sandbox.now() + EXIT, &stdout);
+        assert!(
+            matches!(outside, Err(SandboxError::Guest { .. })),
+            "{stdout}: {outside:?}"
+        );
+    }
+    let inside = sandbox.exec(&id, &say, sandbox.now() + EXIT, &dir.join("x.txt"));
+    assert_eq!(inside.unwrap(), ExecOutcome::Exited(0));
+
+    let taken = sandbox.create(std::slice::from_ref(&api));
+    assert!(
+        matches!(taken, Err(SandboxError::Backend { .. })),
+        "the port of a live VM of that replica: {taken:?}"
+    );
+    let mut second = api.clone();
+    second.replica = 2;
+    let second = create(sandbox, second);
+    sandbox.destroy(&id).unwrap();
+    let again = create(sandbox, api);
+    destroy(sandbox, &[second, again]);
+}
+
+#[test]
+fn fake_refuses_a_missing_bind_folder_a_probe_outside_writable_binds_and_a_taken_port() {
+    on_fake(
+        vec![rule("api", Script::default())],
+        refuses_a_missing_bind_folder_a_probe_outside_writable_binds_and_a_taken_port,
     );
 }
 
