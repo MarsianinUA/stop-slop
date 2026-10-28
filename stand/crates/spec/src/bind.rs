@@ -48,6 +48,11 @@ pub(crate) fn stand(root: &Field, dir: &Utf8Path) -> Result<Bound, Invalid> {
     let mut owners: BTreeMap<String, ServiceName> = BTreeMap::new();
     for (name, field) in services_field.entries()? {
         let name = ServiceName(self::name(&field, name)?);
+        unlike_in_case(
+            &field,
+            name.as_str(),
+            services.keys().map(ServiceName::as_str),
+        )?;
         let service = service(&field, dir, &volumes)?;
         mount_owners(&field, &name, &service, &mut owners)?;
         services.insert(name, service);
@@ -93,10 +98,45 @@ pub(crate) fn name(field: &Field, name: &str) -> Result<String, Invalid> {
             "`{name}` is reserved for measures of the stand and of volumes, such as `stand.wall` \
              and `volume:pgdata.bytes`"
         )
+    } else if is_device(name) {
+        not_on_windows(name, DEVICE)
     } else {
         return Ok(name.to_owned());
     };
     Err(field.invalid(message))
+}
+
+pub(crate) fn unlike_in_case<'a>(
+    field: &Field,
+    name: &str,
+    mut others: impl Iterator<Item = &'a str>,
+) -> Result<(), Invalid> {
+    match others.find(|other| other.eq_ignore_ascii_case(name)) {
+        Some(other) => Err(field.invalid(format!(
+            "`{name}` differs from `{other}` only in case, and the stand names files on the host \
+             after both: Windows and macOS would give them one"
+        ))),
+        None => Ok(()),
+    }
+}
+
+/// Windows opens a device for these names, also with an extension (`nul.data`).
+fn is_device(name: &str) -> bool {
+    let stem = name
+        .split_once('.')
+        .map_or(name, |(stem, _)| stem)
+        .to_ascii_lowercase();
+    match stem.as_bytes() {
+        b"con" | b"prn" | b"aux" | b"nul" => true,
+        [b'c', b'o', b'm', digit] | [b'l', b'p', b't', digit] => digit.is_ascii_digit(),
+        _ => false,
+    }
+}
+
+const DEVICE: &str = "is a device name on Windows";
+
+fn not_on_windows(name: &str, why: &str) -> String {
+    format!("`{name}` {why}, and the stand names files on the host after it")
 }
 
 pub(crate) fn service_named(
@@ -133,6 +173,14 @@ fn volumes(field: &Field) -> Result<BTreeSet<String>, Invalid> {
         if !is_volume_name(name) {
             return Err(value.invalid(not_volume_name(name)));
         }
+        if is_device(name) {
+            return Err(value.invalid(not_on_windows(name, DEVICE)));
+        }
+        if name.ends_with('.') {
+            let why = "ends with a `.`, which Windows drops from a file name";
+            return Err(value.invalid(not_on_windows(name, why)));
+        }
+        unlike_in_case(&value, name, names.iter().map(String::as_str))?;
         names.insert(name.to_owned());
     }
     Ok(names)

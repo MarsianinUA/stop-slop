@@ -1,0 +1,18 @@
+services:
+  db:
+    image: postgres:17
+    deploy: { resources: { limits: { cpus: "1", memory: 512m } } }
+  load:
+    image: node:22
+    deploy: { resources: { limits: { cpus: "1", memory: 512m } } }
+x-stand:
+  workload: load
+  probes:
+    rows:
+      in: db
+      at: after-workload
+      run: ["psql", "-At", "-c", "select count(*) from orders"]
+    Rows:
+      in: db
+      at: after-workload
+      run: ["psql", "-At", "-c", "select count(*) from items"]
