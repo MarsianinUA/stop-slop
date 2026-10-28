@@ -53,17 +53,15 @@ pub trait Sandbox {
     fn logs(&self, id: &SandboxId) -> Result<Vec<u8>, SandboxError>;
     /// The guest folder as one tar packed in the guest, one SDK copy, unpacked into the empty folder `host`.
     fn copy_out(&self, id: &SandboxId, guest: &str, host: &Utf8Path) -> Result<(), SandboxError>;
-    /// Used bytes of each volume of `id`, by `du -sb` in the guest; after `stop`, before `snapshot`.
+    /// Used bytes of each volume of `id`, by `du -sk` in the guest; after `stop`, before `snapshot`.
     fn volume_sizes(&self, id: &SandboxId) -> Result<Vec<(VolumeName, u64)>, SandboxError>;
     /// After `stop`, or the exit of the prepare service, before `destroy`. FITRIM on every owned disk first,
     /// so deleted blocks stay out; a failed trim still snapshots. The snapshot carries the VM with its disks.
     fn snapshot(&self, id: &SandboxId) -> Result<SnapshotId, SandboxError>;
-    /// Kills whatever still runs; destroying twice is not an error.
+    /// Kills whatever still runs, and the VM's volumes go with it; destroying twice is not an error.
     fn destroy(&self, id: &SandboxId) -> Result<(), SandboxError>;
-    /// Goes, with `Leftovers.volumes`, if T-11 shows that owned disks die with their VM.
-    fn drop_volumes(&self, volumes: &[VolumeName]) -> Result<(), SandboxError>;
     fn drop_snapshot(&self, snapshot: &SnapshotId) -> Result<(), SandboxError>;
-    /// Everything under the stand's namespace label, which the adapter puts on every sandbox, volume and snapshot.
+    /// Every sandbox and snapshot in the stand's namespace, also those of an earlier process.
     fn leftovers(&self) -> Result<Leftovers, SandboxError>;
     fn prune_images(&self, keep: &[ImageRef]) -> Result<(), SandboxError>;
 }
@@ -258,7 +256,6 @@ pub struct Unexposed {
 #[derive(Debug, Default)]
 pub struct Leftovers {
     pub sandboxes: Vec<SandboxId>,
-    pub volumes: Vec<VolumeName>,
     pub snapshots: Vec<SnapshotId>,
 }
 

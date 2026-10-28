@@ -27,7 +27,7 @@ use tokio::time::timeout;
 
 use crate::{
     ExecId, ExecOutcome, Exited, Fault, ImageRef, Launch, Leftovers, Metrics, Mount, Pulled,
-    Sandbox, SandboxError, SandboxId, SnapshotId, Stopped, VolumeName, Waitable,
+    Sandbox, SandboxError, SandboxId, Seed, SnapshotId, Stopped, VolumeName, Waitable,
 };
 
 /// The prefix of every VM and snapshot name, and the label key where the SDK takes one: a VM
@@ -181,12 +181,18 @@ impl Sandbox for Microsandbox {
         Err(not_built("copy_out"))
     }
 
-    fn volume_sizes(&self, _id: &SandboxId) -> Result<Vec<(VolumeName, u64)>, SandboxError> {
-        Err(not_built("volume_sizes"))
+    fn volume_sizes(&self, id: &SandboxId) -> Result<Vec<(VolumeName, u64)>, SandboxError> {
+        let id = id.clone();
+        self.block(|inner| async move { volumes::sizes(&*inner.live(&id)?).await })
     }
 
-    fn snapshot(&self, _id: &SandboxId) -> Result<SnapshotId, SandboxError> {
-        Err(not_built("snapshot"))
+    fn snapshot(&self, id: &SandboxId) -> Result<SnapshotId, SandboxError> {
+        let id = id.clone();
+        self.block(|inner| async move {
+            let live = inner.live(&id)?;
+            let replica = format!("{}-{}", live.launch.service, live.launch.replica);
+            volumes::snapshot(&live, &inner.name("snap", &replica)).await
+        })
     }
 
     fn destroy(&self, id: &SandboxId) -> Result<(), SandboxError> {
@@ -194,16 +200,14 @@ impl Sandbox for Microsandbox {
         self.block(|inner| async move { inner.destroy(&id).await })
     }
 
-    fn drop_volumes(&self, _volumes: &[VolumeName]) -> Result<(), SandboxError> {
-        Err(not_built("drop_volumes"))
-    }
-
     fn drop_snapshot(&self, snapshot: &SnapshotId) -> Result<(), SandboxError> {
         let snapshot = snapshot.clone();
         self.block(|inner| async move {
             inner.local().await?;
-            let reference = msb::SnapshotReference::id(snapshot.as_str());
-            let remove = msb::Snapshot::remove_ref(reference, true);
+            let Some(found) = volumes::listed(&snapshot).await? else {
+                return Ok(());
+            };
+            let remove = msb::Snapshot::remove_ref(found.reference(), true);
             match within(GUEST_CALL, "drop a snapshot", remove).await? {
                 Ok(()) | Err(msb::MicrosandboxError::SnapshotNotFound(_)) => Ok(()),
                 Err(error) => Err(backend(error)),
@@ -398,7 +402,14 @@ impl Inner {
                 volumes::open_to_every_user(host)?;
             }
         }
-        let vm = match volumes::fresh(&name, &launch, &wiring.published, &folder, binary).await {
+        let made = match &launch.seed {
+            Some(Seed::Snapshot(snapshot)) => {
+                let published = &wiring.published;
+                volumes::restore(&name, &launch, snapshot, published, &folder, binary).await
+            }
+            _ => volumes::fresh(&name, &launch, &wiring.published, &folder, binary).await,
+        };
+        let vm = match made {
             Ok(vm) => vm,
             Err(error) => {
                 remove_folder(&folder);
@@ -550,7 +561,6 @@ impl Inner {
             .collect();
         Ok(Leftovers {
             sandboxes,
-            volumes: Vec::new(),
             snapshots,
         })
     }
@@ -564,7 +574,9 @@ impl Inner {
             if keep.iter().any(|kept| kept.as_str() == image.reference()) {
                 continue;
             }
-            // A snapshot pins its image: without force the SDK refuses, and the image stays.
+            // A snapshot pins its image: without force the SDK refuses, and the image stays. A
+            // removal also drops the manifest and layers no other reference holds; the SDK's
+            // `Image::prune` would drop every image no VM or snapshot uses, kept ones too.
             match msb::Image::remove(image.reference(), false).await {
                 Ok(())
                 | Err(msb::MicrosandboxError::ImageInUse(_))
@@ -572,7 +584,6 @@ impl Inner {
                 Err(error) => return Err(backend(error)),
             }
         }
-        msb::Image::prune().await.map_err(backend)?;
         Ok(())
     }
 }
@@ -594,17 +605,17 @@ impl Live {
     }
 }
 
-/// Stage 2 of T-11 boots a VM with binds and its network only.
+/// Stage 3 of T-11 has no version tree and no scratch folders yet.
 fn built(launch: &Launch) -> Result<(), SandboxError> {
-    if launch.seed.is_some() {
-        return Err(not_built("a seed"));
+    if matches!(launch.seed, Some(Seed::Tree { .. })) {
+        return Err(not_built("a version tree"));
     }
     if launch
         .mounts
         .iter()
-        .any(|mount| !matches!(mount, Mount::Bind { .. }))
+        .any(|mount| matches!(mount, Mount::Scratch { .. }))
     {
-        return Err(not_built("volumes and scratch folders"));
+        return Err(not_built("scratch folders"));
     }
     Ok(())
 }

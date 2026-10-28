@@ -95,7 +95,6 @@ pub enum Call {
         snapshot: Option<SnapshotId>,
     },
     Destroy(SandboxId),
-    DropVolumes(Vec<VolumeName>),
     DropSnapshot(SnapshotId),
     Leftovers,
     PruneImages(Vec<ImageRef>),
@@ -107,7 +106,6 @@ struct State {
     vms: Vec<Vm>,
     execs: Vec<Job>,
     snapshots: Vec<Snap>,
-    volumes: Vec<VolumeName>,
     journal: Vec<Call>,
 }
 
@@ -149,7 +147,6 @@ impl Fake {
             vms: Vec::new(),
             execs: Vec::new(),
             snapshots: Vec::new(),
-            volumes: Vec::new(),
             journal: Vec::new(),
         };
         Fake {
@@ -209,11 +206,6 @@ impl Fake {
         }
         for vm in &mut vms {
             vm.write_files()?;
-        }
-        for (name, _) in batch.iter().flat_map(volumes) {
-            if !state.volumes.contains(&name) {
-                state.volumes.push(name);
-            }
         }
         let ids = vms.iter().map(|vm| vm.id.clone()).collect();
         state.vms.extend(vms);
@@ -445,12 +437,6 @@ impl Sandbox for Fake {
         Ok(())
     }
 
-    fn drop_volumes(&self, volumes: &[VolumeName]) -> Result<(), SandboxError> {
-        let mut state = self.record(Call::DropVolumes(volumes.to_vec()));
-        state.volumes.retain(|name| !volumes.contains(name));
-        Ok(())
-    }
-
     fn drop_snapshot(&self, snapshot: &SnapshotId) -> Result<(), SandboxError> {
         let mut state = self.record(Call::DropSnapshot(snapshot.clone()));
         state.snapshots.retain(|snap| snap.id != *snapshot);
@@ -461,7 +447,6 @@ impl Sandbox for Fake {
         let state = self.record(Call::Leftovers);
         Ok(Leftovers {
             sandboxes: state.vms.iter().map(|vm| vm.id.clone()).collect(),
-            volumes: state.volumes.clone(),
             snapshots: state.snapshots.iter().map(|snap| snap.id.clone()).collect(),
         })
     }

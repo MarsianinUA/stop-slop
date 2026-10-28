@@ -118,7 +118,6 @@ fn stop_then_the_rest_work(sandbox: &impl Sandbox) {
     sandbox.metrics(&id).unwrap();
     sandbox.destroy(&id).unwrap();
     sandbox.drop_snapshot(&snapshot).unwrap();
-    sandbox.drop_volumes(&[data]).unwrap();
 }
 
 #[test]
@@ -164,7 +163,6 @@ fn snapshot_seeds_a_volume(sandbox: &impl Sandbox) {
     assert_eq!(read(&second.join("seen")), "setup\ncached\n");
     sandbox.destroy(&reader).unwrap();
     sandbox.drop_snapshot(&snapshot).unwrap();
-    sandbox.drop_volumes(&[data, cache]).unwrap();
 }
 
 #[test]
@@ -275,7 +273,6 @@ fn restore_refuses_a_missing_bind_and_a_new_volume(sandbox: &impl Sandbox) {
     let left = sandbox.leftovers().unwrap();
     assert!(left.sandboxes.is_empty(), "a refused restore left {left:?}");
     sandbox.drop_snapshot(&snapshot).unwrap();
-    sandbox.drop_volumes(&[data, extra]).unwrap();
 }
 
 #[test]
@@ -469,10 +466,9 @@ fn leftovers_sees_what_was_made(sandbox: &impl Sandbox) {
     );
     sandbox.destroy(&id).unwrap();
     sandbox.drop_snapshot(&snapshot).unwrap();
-    sandbox.drop_volumes(&[data]).unwrap();
     let left = sandbox.leftovers().unwrap();
     assert!(
-        left.sandboxes.is_empty() && left.volumes.is_empty() && left.snapshots.is_empty(),
+        left.sandboxes.is_empty() && left.snapshots.is_empty(),
         "{left:?}"
     );
 }
@@ -748,7 +744,7 @@ fn on_fake(rules: Vec<Rule>, case: impl FnOnce(&Fake)) {
     case(&fake);
     let left = fake.leftovers().unwrap();
     assert!(
-        left.sandboxes.is_empty() && left.volumes.is_empty() && left.snapshots.is_empty(),
+        left.sandboxes.is_empty() && left.snapshots.is_empty(),
         "left behind: {left:?}"
     );
 }
@@ -896,7 +892,9 @@ fn write_tree(path: &Utf8Path) {
 /// The shared cases on `Microsandbox`, and the cases only a real guest shows. Run with
 /// `STOP_SLOP_STAND_LIVE=1` (and `STOP_SLOP_STAND_GUEST=<musl build>` before the pin)
 /// `cargo test --locked -p sandbox --features microsandbox --test contract -- --test-threads=1`:
-/// one case at a time, since `leftovers` sees the whole namespace.
+/// one case at a time, since `leftovers` sees the whole namespace. On Windows build with
+/// `--no-run` and start the binary it names: cargo keeps its children in a job without breakaway,
+/// where a VM from a snapshot, a detached process, cannot start.
 #[cfg(feature = "microsandbox")]
 mod live {
     use std::fs;
@@ -905,16 +903,23 @@ mod live {
     use std::sync::atomic::{AtomicU32, Ordering};
     use std::time::{Duration, Instant};
 
+    use ::microsandbox as msb;
     use camino::{Utf8Path, Utf8PathBuf};
     use sandbox::{
         Exposed, ImageRef, Launch, Metrics, Microsandbox, Outbound, Peer, PortStats, Sandbox,
-        SandboxId, Waitable,
+        SandboxError, SandboxId, Seed, VolumeName, Waitable,
     };
     use tempfile::TempDir;
 
-    use super::{ALPINE, EXIT, NGINX, NODE, argv, launch, out, sh, wait_exit};
+    use super::{ALPINE, EXIT, NGINX, NODE, argv, folder, launch, out, sh, volume, wait_exit};
 
     const POSTGRES: &str = "postgres:17-alpine";
+    /// Only the prune case takes it, so pruning it costs no other case a pull.
+    const BUSYBOX: &str = "busybox:1.37";
+    /// `OK <status>` when the registry answers, `ERR <reason>` when the network refuses.
+    const FETCH: &str = "node -e \"fetch('https://registry.npmjs.org/-/ping', \
+                         {signal: AbortSignal.timeout(8000)}).then(r => console.log('OK', r.status), \
+                         e => console.log('ERR', String(e.cause || e)))\"";
 
     fn live() -> Option<&'static Microsandbox> {
         if std::env::var("STOP_SLOP_STAND_LIVE").as_deref() != Ok("1") {
@@ -926,7 +931,7 @@ mod live {
             let sandbox = Microsandbox::new(&home()).expect("the adapter");
             let pulled = sandbox.pull(&images(&[NODE, POSTGRES, NGINX]));
             pulled.expect("pull the images of the live set");
-            sweep(&sandbox);
+            sweep(&sandbox).expect("sweep what an earlier run left");
             sandbox
         }))
     }
@@ -944,16 +949,15 @@ mod live {
     }
 
     /// What a crashed run or a panicked case left.
-    fn sweep(sandbox: &Microsandbox) {
-        let left = sandbox.leftovers().expect("leftovers");
+    fn sweep(sandbox: &Microsandbox) -> Result<(), SandboxError> {
+        let left = sandbox.leftovers()?;
         for id in &left.sandboxes {
-            sandbox.destroy(id).expect("destroy a leftover");
+            sandbox.destroy(id)?;
         }
         for snapshot in &left.snapshots {
-            sandbox
-                .drop_snapshot(snapshot)
-                .expect("drop a leftover snapshot");
+            sandbox.drop_snapshot(snapshot)?;
         }
+        Ok(())
     }
 
     /// One live case: a host folder for `/stand/out`, a sweep when it panics, and at its end the
@@ -1052,9 +1056,12 @@ mod live {
     }
 
     impl Drop for Case {
+        /// A second panic here would abort the process before the first one is reported.
         fn drop(&mut self) {
-            if std::thread::panicking() {
-                sweep(self.sandbox);
+            if std::thread::panicking()
+                && let Err(error) = sweep(self.sandbox)
+            {
+                eprintln!("the sweep after the panic failed: {error}");
             }
         }
     }
@@ -1089,8 +1096,13 @@ mod live {
     shared!(
         create_batch_and_wait,
         logs_and_metrics_until_destroy,
+        stop_then_the_rest_work,
+        snapshot_seeds_a_volume,
+        restore_refuses_a_missing_bind_and_a_new_volume,
+        leftovers_sees_what_was_made,
         pull_of_an_unknown_image_is_not_found,
         pull_gives_digests_in_order,
+        a_snapshot_outlives_its_vm,
     );
 
     /// Row 88, a stop rule of T-11: without a digest the setup cache key cannot see a new image
@@ -1280,14 +1292,11 @@ const ghost = () => new Promise(ok => { const c = net.connect(1234, 'ghost');
         public.service = "public".into();
         public.outbound = Outbound::Public;
         let ids = case.create(vec![off, public]);
-        let fetch = "node -e \"fetch('https://registry.npmjs.org/-/ping', \
-                     {signal: AbortSignal.timeout(8000)}).then(r => console.log('OK', r.status), \
-                     e => console.log('ERR', String(e.cause || e)))\"";
         let started = Instant::now();
-        let (_, refused) = case.plain(&ids[0], fetch);
+        let (_, refused) = case.plain(&ids[0], FETCH);
         let fast = started.elapsed() < Duration::from_secs(5);
         assert!(refused.starts_with("ERR") && fast, "{refused}");
-        let (_, answered) = case.plain(&ids[1], fetch);
+        let (_, answered) = case.plain(&ids[1], FETCH);
         assert!(answered.starts_with("OK 200"), "{answered}");
 
         let (_, ipv6) = case.plain(&ids[0], "cat /proc/net/if_inet6 /proc/net/ipv6_route");
@@ -1401,5 +1410,258 @@ Promise.all(Array.from({ length: 32 }, lane));
             .metrics(&id)
             .expect("the counters are still net's");
         case.finish(&[id]);
+    }
+
+    /// For the SDK's own calls in the checks: they reach the adapter's home, the process-wide
+    /// default since the first `pull`. One runtime for every call, since the SDK may keep what it
+    /// opened on it; a worker with a big stack, as in the adapter.
+    fn sdk<T: Send + 'static>(call: impl Future<Output = T> + Send + 'static) -> T {
+        static RUNTIME: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
+        let runtime = RUNTIME.get_or_init(|| {
+            tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(1)
+                .thread_stack_size(16 << 20)
+                .enable_all()
+                .build()
+                .unwrap()
+        });
+        runtime.block_on(async { tokio::spawn(call).await.unwrap() })
+    }
+
+    /// Decides the port: owned disks live in the SDK's folder of their VM and go with it, so the
+    /// port has no `drop_volumes`.
+    #[test]
+    fn live_owned_disks_die_with_their_vm() {
+        let Some(case) = Case::start() else { return };
+        let mut keeper = launch("keeper", ALPINE);
+        keeper.command = sh("echo data > /data/file && sleep 600");
+        keeper.mounts = vec![volume(&VolumeName::new("data"), "/data")];
+        let id = case.create(vec![keeper]).remove(0);
+        let vm = home().join("sandboxes").join(id.as_str());
+        let disks: Vec<Utf8PathBuf> = fs::read_dir(vm.join("owned-volumes"))
+            .unwrap()
+            .map(|mount| Utf8PathBuf::try_from(mount.unwrap().path().join("disk.raw")).unwrap())
+            .filter(|disk| disk.is_file())
+            .collect();
+        assert_eq!(disks.len(), 1, "one owned disk under {vm}: {disks:?}");
+        case.sandbox.destroy(&id).unwrap();
+        assert!(!vm.exists(), "{vm} outlived its VM");
+        case.finish(&[]);
+    }
+
+    fn cached(image: &'static str) -> bool {
+        sdk(async move { msb::Image::get(image).await.is_ok() })
+    }
+
+    /// A snapshot pins its image, so `clean` drops snapshots before images.
+    #[test]
+    fn live_a_snapshot_carries_the_label_and_drops_before_its_image() {
+        let Some(case) = Case::start() else { return };
+        let kept = [ALPINE, NODE, POSTGRES, NGINX];
+        let keep = images(&kept);
+        case.sandbox.pull(&images(&[BUSYBOX])).unwrap();
+        let mut boxed = launch("boxed", BUSYBOX);
+        boxed.command = sh("sleep 600");
+        let id = case.create(vec![boxed]).remove(0);
+        case.sandbox.stop(&id).unwrap();
+        let snapshot = case.sandbox.snapshot(&id).unwrap();
+        case.sandbox.destroy(&id).unwrap();
+        let left = case.sandbox.leftovers().unwrap();
+        assert!(left.snapshots.contains(&snapshot), "{left:?}");
+        let digest = snapshot.as_str().to_owned();
+        let labels = sdk(async move {
+            let all = msb::Snapshot::list().await.unwrap();
+            let found = all.into_iter().find(|listed| listed.digest() == digest);
+            found
+                .expect("listed")
+                .open()
+                .await
+                .unwrap()
+                .labels()
+                .clone()
+        });
+        let label = labels.get("stop-slop-stand").map(String::as_str);
+        assert_eq!(label, Some("1"), "{labels:?}");
+        case.sandbox.prune_images(&keep).unwrap();
+        assert!(cached(BUSYBOX), "pruned while a snapshot pins it");
+        case.sandbox.drop_snapshot(&snapshot).unwrap();
+        case.sandbox.prune_images(&keep).unwrap();
+        assert!(!cached(BUSYBOX), "kept after its snapshot went");
+        let lost: Vec<&str> = kept.into_iter().filter(|image| !cached(image)).collect();
+        assert!(lost.is_empty(), "pruned though kept: {lost:?}");
+        case.finish(&[]);
+    }
+
+    /// `RestoreBuilder` takes no label, so `leftovers` finds a VM from a snapshot by its name;
+    /// whether it carries the label of the namespace anyway goes to the notes.
+    #[test]
+    fn live_a_vm_from_a_snapshot_is_in_the_leftovers() {
+        let Some(case) = Case::start() else { return };
+        let mut source = launch("source", ALPINE);
+        source.command = sh("sleep 600");
+        let id = case.create(vec![source.clone()]).remove(0);
+        case.sandbox.stop(&id).unwrap();
+        let snapshot = case.sandbox.snapshot(&id).unwrap();
+        case.sandbox.destroy(&id).unwrap();
+        source.seed = Some(Seed::Snapshot(snapshot.clone()));
+        let restored = case.create(vec![source]).remove(0);
+        let left = case.sandbox.leftovers().unwrap();
+        assert!(left.sandboxes.contains(&restored), "{left:?}");
+        let labelled = sdk(async {
+            let page = msb::Sandbox::list_with(|list| {
+                let list = list.limit(msb::sandbox::MAX_SANDBOX_LIST_LIMIT);
+                list.label("stop-slop-stand", "1")
+            })
+            .await;
+            page.map(|page| {
+                let names = page.sandboxes.iter().map(|vm| vm.name().to_owned());
+                names.collect::<Vec<_>>()
+            })
+        });
+        let carries = labelled
+            .unwrap()
+            .iter()
+            .any(|name| name == restored.as_str());
+        note(&format!(
+            "a VM from a snapshot carries the namespace label: {carries}"
+        ));
+        case.sandbox.destroy(&restored).unwrap();
+        case.sandbox.drop_snapshot(&snapshot).unwrap();
+        case.finish(&[]);
+    }
+
+    /// The snapshot of a setup cache entry outlives the run that made it, and that run's folders.
+    #[test]
+    fn live_a_vm_from_a_snapshot_starts_after_its_source_and_folders_are_gone() {
+        let Some(case) = Case::start() else { return };
+        let (first, first_dir) = folder();
+        let mut entry = launch("entry", ALPINE);
+        entry.command = sh("echo $WHO > /stand/out/who");
+        entry.env.insert("WHO".into(), "first".into());
+        entry.mounts = vec![out(&first_dir)];
+        let id = case.create(vec![entry.clone()]).remove(0);
+        assert_eq!(wait_exit(case.sandbox, &id), Some(0));
+        let snapshot = case.sandbox.snapshot(&id).unwrap();
+        case.sandbox.destroy(&id).unwrap();
+        drop(first);
+        assert!(!first_dir.exists());
+        entry.seed = Some(Seed::Snapshot(snapshot.clone()));
+        entry.env.insert("WHO".into(), "second".into());
+        entry.mounts = vec![out(case.out())];
+        let restored = case.create(vec![entry]).remove(0);
+        assert_eq!(wait_exit(case.sandbox, &restored), Some(0));
+        assert_eq!(case.read("who"), "second\n");
+        case.sandbox.destroy(&restored).unwrap();
+        case.sandbox.drop_snapshot(&snapshot).unwrap();
+        case.finish(&[]);
+    }
+
+    const PGDATA: &str = "/var/lib/postgresql/data";
+    const PG_READY: &str = "pg_isready -h 127.0.0.1 -U postgres";
+
+    /// A clean stop before the snapshot spares every start from it the recovery, 1.4-1.6 s
+    /// (spike state). `SIGINT` is the fast shutdown, the image's `STOPSIGNAL`.
+    #[test]
+    fn live_postgres_starts_from_its_snapshot_without_recovery() {
+        let Some(case) = Case::start() else { return };
+        let mut db = launch("db", POSTGRES);
+        db.env.insert("POSTGRES_PASSWORD".into(), "pw".into());
+        db.stop_signal = "SIGINT".into();
+        db.mounts = vec![volume(&VolumeName::new("pg"), PGDATA), out(case.out())];
+        let first = case.create(vec![db.clone()]).remove(0);
+        case.until_passes(&first, PG_READY);
+        let stopped = case.sandbox.stop(&first).unwrap();
+        assert!(!stopped.killed, "{stopped:?}");
+        let sizes = case.sandbox.volume_sizes(&first).unwrap();
+        let data = match sizes.as_slice() {
+            [(name, bytes)] if name.as_str() == "pg" && *bytes > 1 << 20 => *bytes,
+            _ => panic!("one volume `pg` above 1 MiB: {sizes:?}"),
+        };
+        let snapshot = case.sandbox.snapshot(&first).unwrap();
+        case.sandbox.destroy(&first).unwrap();
+
+        db.seed = Some(Seed::Snapshot(snapshot.clone()));
+        let started = Instant::now();
+        let second = case.create(vec![db]).remove(0);
+        let restored = started.elapsed();
+        case.until_passes(&second, PG_READY);
+        note(&format!(
+            "postgres from its snapshot ({} MiB of data): service started {restored:?}, ready {:?}",
+            data >> 20,
+            started.elapsed()
+        ));
+        let log = case.log(&second);
+        let clean = log.contains("database system was shut down at");
+        assert!(clean && !log.contains("automatic recovery"), "{log}");
+        case.sandbox.destroy(&second).unwrap();
+        case.sandbox.drop_snapshot(&snapshot).unwrap();
+        case.finish(&[]);
+    }
+
+    const WHO_SERVER: &str =
+        "require('http').createServer((q, s) => s.end(process.env.WHO)).listen(3000, '0.0.0.0');";
+
+    /// Rows 86 and 87, a stop rule of T-11: a VM of another service from a snapshot keeps the root
+    /// disk of the snapshot and takes its own limits, network, port, bind, env and command. Stage 4
+    /// turns it into the case of the version snapshot (a tree on the version disk, about 0.6 GiB).
+    #[test]
+    fn live_a_vm_from_a_snapshot_takes_its_own_launch() {
+        let Some(case) = Case::start() else { return };
+        let (_first, first) = folder();
+        fs::write(first.join("who.js"), WHO_SERVER).unwrap();
+        let mut prepare = launch("prepare", NODE);
+        prepare.memory = 1 << 30;
+        prepare.outbound = Outbound::Public;
+        prepare.env.insert("WHO".into(), "prepare".into());
+        prepare.mounts = vec![out(&first)];
+        prepare.command =
+            sh("mkdir -p /srv && cp /stand/out/who.js /srv/ && echo $WHO > /stand/out/who");
+        let prepare = case.create(vec![prepare]).remove(0);
+        assert_eq!(wait_exit(case.sandbox, &prepare), Some(0));
+        let snapshot = case.sandbox.snapshot(&prepare).unwrap();
+        case.sandbox.destroy(&prepare).unwrap();
+
+        let peers = [peer("api", 1, &[3000]), peer("client", 1, &[])];
+        let mut api = launch("api", NODE);
+        api.seed = Some(Seed::Snapshot(snapshot.clone()));
+        api.cpus = 2;
+        api.env.insert("WHO".into(), "api".into());
+        api.ports = vec![Exposed(3000)];
+        api.peers = peers.to_vec();
+        api.mounts = vec![out(case.out())];
+        api.command = sh("echo $WHO > /stand/out/who && exec node /srv/who.js");
+        let started = Instant::now();
+        let api = case.create(vec![api]).remove(0);
+        let restored = started.elapsed();
+        case.until_passes(&api, "wget -q -O- http://127.0.0.1:3000/");
+        note(&format!(
+            "node from a snapshot of another service: service started {restored:?}, ready {:?}",
+            started.elapsed()
+        ));
+        let limits = r#"nproc; awk '/^MemTotal/ {print int($2 / 1024)}' /proc/meminfo; echo $WHO"#;
+        let (_, facts) = case.plain(&api, limits);
+        let facts: Vec<&str> = facts.lines().collect();
+        let [cpus, mib, who] = facts.as_slice() else {
+            panic!("`<vCPUs> <MiB> <who>`: {facts:?}");
+        };
+        let mib: u32 = mib.parse().unwrap();
+        assert!(*cpus == "2" && mib < 600 && *who == "api", "{facts:?}");
+        let (_, outside) = case.plain(&api, FETCH);
+        assert!(outside.starts_with("ERR"), "`Off` of the Launch: {outside}");
+        assert_eq!(case.read("who"), "api\n");
+        assert_eq!(super::read(&first.join("who")), "prepare\n");
+
+        let mut client = launch("client", NODE);
+        client.peers = peers.to_vec();
+        client.mounts = vec![out(case.out())];
+        client.command = sh("wget -q -O- http://api:3000/ > /stand/out/api.txt");
+        let client = case.create(vec![client]).remove(0);
+        assert_eq!(wait_exit(case.sandbox, &client), Some(0));
+        assert_eq!(case.read("api.txt"), "api", "the port of the Launch");
+        for id in [&api, &client] {
+            case.sandbox.destroy(id).unwrap();
+        }
+        case.sandbox.drop_snapshot(&snapshot).unwrap();
+        case.finish(&[]);
     }
 }
