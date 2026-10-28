@@ -1,0 +1,7 @@
+services:
+  load:
+    image: node:22
+    deploy:
+      resources: { limits: { cpus: "1", memory: 512m } }
+      replicas: 2
+x-stand: { workload: load }

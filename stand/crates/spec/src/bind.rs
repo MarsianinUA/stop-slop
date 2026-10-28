@@ -128,11 +128,31 @@ pub(crate) fn required<'a>(field: &Field<'a>, key: &str, why: &str) -> Result<Fi
 
 /// The names of the top-level `volumes`, whose values `allow` keeps empty.
 fn volumes(field: &Field) -> Result<BTreeSet<String>, Invalid> {
-    Ok(field
-        .entries()?
-        .into_iter()
-        .map(|(name, _)| name.to_owned())
-        .collect())
+    let mut names = BTreeSet::new();
+    for (name, value) in field.entries()? {
+        if !is_volume_name(name) {
+            return Err(value.invalid(not_volume_name(name)));
+        }
+        names.insert(name.to_owned());
+    }
+    Ok(names)
+}
+
+/// The characters of Docker's volume names, `[a-zA-Z0-9][a-zA-Z0-9_.-]*`, without its two-char
+/// minimum: the name goes into the name of its disk on the host, which a `/` would lead out of the
+/// folder of disks.
+fn is_volume_name(name: &str) -> bool {
+    let word = |byte: u8| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'.' | b'-');
+    name.bytes()
+        .next()
+        .is_some_and(|byte| byte.is_ascii_alphanumeric())
+        && name.bytes().all(word)
+}
+
+fn not_volume_name(name: &str) -> String {
+    format!(
+        "`{name}` is not a volume name: letters, digits, `_`, `.` and `-`, from a letter or digit"
+    )
 }
 
 fn service(field: &Field, dir: &Utf8Path, volumes: &BTreeSet<String>) -> Result<Service, Invalid> {
@@ -340,11 +360,23 @@ fn mount(item: &Field, dir: &Utf8Path, volumes: &BTreeSet<String>) -> Result<Mou
         if let Some(link) = link_on(dir, &path) {
             return Err(leaves(format!(" through the link `{link}`")));
         }
+        if !path.exists() {
+            return Err(item.invalid(format!(
+                "`{source}` is not in the folder of the stand file: the sandbox would make it \
+                 there, and the recipe would change after its seal"
+            )));
+        }
         return Ok(Mount::Harness {
             source: path,
             target,
             read_only,
         });
+    }
+    if !is_volume_name(&source) {
+        return Err(item.invalid(format!(
+            "{}; a folder beside the stand file starts with `./`",
+            not_volume_name(&source)
+        )));
     }
     if !volumes.contains(&source) {
         return Err(item.invalid(format!("no volume `{source}` in the top-level `volumes`")));

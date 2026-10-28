@@ -1,0 +1,10 @@
+services:
+  load:
+    image: node:22
+    deploy: { resources: { limits: { cpus: "1", memory: 512m } } }
+x-stand:
+  workload: load
+  second_pass: true
+  expect:
+    unchanged:
+      - { file: ../orders.jsonl, reason: "the same orders" }

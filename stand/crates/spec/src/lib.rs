@@ -52,7 +52,7 @@ fn read(text: &str, file: &Utf8Path, recipe: Recipe, policy: &Policy) -> Result<
     let probes = xstand::probes(&root, &bound.services)?;
     let expect = xstand::expect(&root, policy)?;
     let fault = xstand::fault(&root, &bound.services)?;
-    let second_pass = xstand::second_pass(&root)?;
+    let second_pass = xstand::second_pass(&root, &probes)?;
     Ok(Stand {
         file: file.to_owned(),
         recipe,

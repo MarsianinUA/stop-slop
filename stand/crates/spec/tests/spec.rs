@@ -2,25 +2,15 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::time::Duration;
 
-use camino::{Utf8Path, Utf8PathBuf};
+use camino::Utf8Path;
 use spec::{
     Change, Condition, Demand, FaultMode, Mount, Outbound, Policy, PolicyError, Profiler, Recipe,
     Service, ServiceKind, ServiceName, SpecError, Stand, Tap, load,
 };
 
-/// `tests/fixtures/<case>/compose.yaml`. Every refusal has its own folder: a small file that is
-/// valid but for the one thing the case is named after.
-fn fixture(case: &str) -> Utf8PathBuf {
-    Utf8Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/fixtures")
-        .join(case)
-        .join("compose.yaml")
-}
+mod common;
 
-/// With the default policy, `max_tolerance` 25.
-fn load_case(case: &str) -> Result<Stand, SpecError> {
-    load(&fixture(case), &Policy::new(None).unwrap())
-}
+use common::{assert_refused, fixture, load_case};
 
 fn stand(case: &str) -> Stand {
     stand_at(&fixture(case))
@@ -37,31 +27,6 @@ fn service<'a>(stand: &'a Stand, name: &str) -> &'a Service {
         .find(|(known, _)| known.as_str() == name)
         .map(|(_, service)| service)
         .unwrap_or_else(|| panic!("no service {name}"))
-}
-
-/// Each case is refused at its key and line, with a message that has the words.
-fn assert_refused(cases: &[(&str, &str, u32, &str)]) {
-    for &(case, key, line, words) in cases {
-        let Err(SpecError::Invalid {
-            file,
-            line: refused_line,
-            key: refused_key,
-            message,
-        }) = load_case(case)
-        else {
-            panic!("{case} is not refused as invalid");
-        };
-        assert!(
-            file.ends_with(format!("{case}/compose.yaml")),
-            "{case}: {file}"
-        );
-        assert_eq!(
-            (refused_key.as_str(), refused_line),
-            (key, line),
-            "{case}: {message}"
-        );
-        assert!(message.contains(words), "{case}: {message}");
-    }
 }
 
 fn ports(service: &Service) -> Vec<u16> {
@@ -709,7 +674,10 @@ fn expect_reads_changes_without_quotes_and_holds_them_to_the_policy() {
         .collect();
     assert_eq!(
         unchanged,
-        [("probe.orders.jsonl", "a second pass sees the same orders")]
+        [
+            ("probe.orders.jsonl", "a second pass sees the same orders"),
+            ("results/orders.jsonl", "the workload reads the same orders")
+        ]
     );
 
     assert_refused(&[
@@ -872,7 +840,7 @@ fn what_the_stand_would_not_honour_is_refused_at_its_key() {
             "unchanged-twice",
             "x-stand.expect.unchanged[1].file",
             11,
-            "`probe.orders.jsonl` is named twice",
+            "`orders.jsonl` is named twice",
         ),
         (
             "tag",

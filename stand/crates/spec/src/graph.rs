@@ -1,5 +1,6 @@
-//! What needs every service at once: kinds from `depends_on` and its rules, the levels, and the
-//! prepare service of the version disk with what restoring its snapshot asks of the others.
+//! What needs every service at once: kinds from `depends_on` and its rules, the levels, the
+//! replicas a kind takes, and the prepare service of the version disk with what restoring its
+//! snapshot asks of the others.
 
 use std::collections::btree_map::Entry;
 use std::collections::{BTreeMap, BTreeSet};
@@ -30,8 +31,26 @@ pub(crate) fn of(
         };
     }
     let levels = levels(root, services)?;
+    one_replica(root, services)?;
     let prepare = prepare(root, services, &levels)?;
     Ok(Graph { levels, prepare })
+}
+
+fn one_replica(root: &Field, services: &BTreeMap<ServiceName, Service>) -> Result<(), Invalid> {
+    for (name, service) in services {
+        let kind = match service.kind {
+            ServiceKind::LongRunning => continue,
+            ServiceKind::Setup => "a setup service, which runs once and leaves one snapshot",
+            ServiceKind::Workload => "the workload, whose exit ends a repeat",
+        };
+        if service.replicas.get() > 1 {
+            return Err(service_field(root, name.as_str())
+                .at("deploy")
+                .at("replicas")
+                .invalid(format!("`{}` is {kind}: it has one replica", name.as_str())));
+        }
+    }
+    Ok(())
 }
 
 /// Checks every `depends_on` entry and gives the setup services: those waited for with

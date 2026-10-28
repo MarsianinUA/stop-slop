@@ -7,5 +7,5 @@ x-stand:
   second_pass: true
   expect:
     unchanged:
-      - { file: probe.orders.jsonl, reason: "the same orders" }
-      - { file: probe.orders.jsonl, reason: "the same rows" }
+      - { file: orders.jsonl, reason: "the same orders" }
+      - { file: orders.jsonl, reason: "the same rows" }

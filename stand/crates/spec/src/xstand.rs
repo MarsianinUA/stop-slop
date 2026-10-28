@@ -88,12 +88,7 @@ pub(crate) fn probes(
         let probe = ProbeName(name(&field, probe)?);
         let within = required(&field, "in", "the long-running service the probe runs in")?;
         let service = service_named(services, &within)?;
-        let kind = match services[&service].kind {
-            ServiceKind::LongRunning => None,
-            ServiceKind::Setup => Some("a setup service"),
-            ServiceKind::Workload => Some("the workload"),
-        };
-        if let Some(kind) = kind {
+        if let Some(kind) = short_lived(&services[&service]) {
             return Err(within.invalid(format!(
                 "`{}` is {kind}: a probe runs in a long-running service, which is up when it reads",
                 service.as_str()
@@ -132,6 +127,14 @@ pub(crate) fn probes(
         );
     }
     Ok(probes)
+}
+
+fn short_lived(service: &Service) -> Option<&'static str> {
+    match service.kind {
+        ServiceKind::LongRunning => None,
+        ServiceKind::Setup => Some("a setup service"),
+        ServiceKind::Workload => Some("the workload"),
+    }
 }
 
 fn tap(text: &str) -> Result<Tap, String> {
@@ -239,6 +242,12 @@ fn target(field: &Field, services: &BTreeMap<ServiceName, Service>) -> Result<Ta
     let Some(definition) = services.get(&name) else {
         return Err(field.invalid(format!("no service `{service}`")));
     };
+    if let Some(kind) = short_lived(definition) {
+        return Err(field.invalid(format!(
+            "`{service}` is {kind}: a fault cuts a long-running service, which is up while the \
+             workload runs"
+        )));
+    }
     let port = bind::port(port).map_err(|message| field.invalid(message))?;
     if !definition.expose.contains(&port) {
         return Err(field.invalid(format!(
@@ -252,7 +261,10 @@ fn target(field: &Field, services: &BTreeMap<ServiceName, Service>) -> Result<Ta
     })
 }
 
-pub(crate) fn second_pass(root: &Field) -> Result<Option<SecondPass>, Invalid> {
+pub(crate) fn second_pass(
+    root: &Field,
+    probes: &BTreeMap<ProbeName, Probe>,
+) -> Result<Option<SecondPass>, Invalid> {
     let x_stand = root.at("x-stand");
     let on = optional(&x_stand, "second_pass", Field::bool)?.unwrap_or(false);
     match (on, x_stand.at("expect").get("unchanged")) {
@@ -264,7 +276,7 @@ pub(crate) fn second_pass(root: &Field) -> Result<Option<SecondPass>, Invalid> {
         (true, _) => {
             let mut files: Vec<Unchanged> = Vec::new();
             for item in x_stand.at("expect").at("unchanged").items()? {
-                let file = self::unchanged(&item)?;
+                let file = self::unchanged(&item, probes)?;
                 if files.iter().any(|known| known.file == file.file) {
                     return Err(item
                         .at("file")
@@ -277,9 +289,65 @@ pub(crate) fn second_pass(root: &Field) -> Result<Option<SecondPass>, Invalid> {
     }
 }
 
-fn unchanged(item: &Field) -> Result<Unchanged, Invalid> {
+fn unchanged(item: &Field, probes: &BTreeMap<ProbeName, Probe>) -> Result<Unchanged, Invalid> {
+    let file = required(item, "file", "a file of /stand/out or `probe.<name>.jsonl`")?;
     Ok(Unchanged {
-        file: required(item, "file", "a file of /stand/out or `probe.<name>.jsonl`")?.string()?,
+        file: file.parse(|text| out_file(text, probes))?,
         reason: reason(item)?,
     })
+}
+
+/// A path that `report` joins to the `/stand/out` folder of a pass on the host, so it stays in
+/// that folder on every OS, and without `.` or empty parts one file has one name; `report` reads
+/// only `*.jsonl` there, and `probe.<name>.jsonl` is there after a pass only from an
+/// `after-workload` probe.
+fn out_file(text: &str, probes: &BTreeMap<ProbeName, Probe>) -> Result<String, String> {
+    let such = "name the file by its path in /stand/out, such as `orders.jsonl`";
+    if text.contains('\\') {
+        return Err(format!(
+            "`{text}` has a `\\`: write `/` between folders; {such}"
+        ));
+    }
+    if text.contains(':') {
+        return Err(format!(
+            "`{text}` has a `:`, which a Windows host reads as a drive or a stream; {such}"
+        ));
+    }
+    if text.starts_with('/') {
+        return Err(format!("`{text}` is absolute: {such}"));
+    }
+    let odd = text
+        .split('/')
+        .find(|part| matches!(*part, "" | "." | ".."));
+    match odd {
+        Some("") => return Err(format!("`{text}` has an empty part: {such}")),
+        Some(part) => return Err(format!("`{text}` has `{part}`: {such}")),
+        None => {}
+    }
+    if !text.ends_with(".jsonl") {
+        return Err(format!(
+            "`{text}` is not a `*.jsonl` file, and `report` compares only those of /stand/out"
+        ));
+    }
+    let Some(name) = text
+        .strip_prefix("probe.")
+        .and_then(|rest| rest.strip_suffix(".jsonl"))
+    else {
+        return Ok(text.to_owned());
+    };
+    let probe = probes.get(&ProbeName(name.to_owned()));
+    let runs = match probe.map(|probe| probe.at) {
+        None => {
+            return Err(format!(
+                "`{text}` is the output of a probe `{name}`, and `x-stand.probes` has none"
+            ));
+        }
+        Some(Tap::AfterWorkload) => return Ok(text.to_owned()),
+        Some(Tap::AfterSetup) => "after-setup",
+        Some(Tap::OnFailure) => "on-failure",
+    };
+    Err(format!(
+        "`{text}` is the output of the probe `{name}`, which runs {runs}: after a pass only \
+         `after-workload` probes write theirs"
+    ))
 }
