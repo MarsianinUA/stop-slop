@@ -633,15 +633,11 @@ mod process {
     #[cfg(target_os = "linux")]
     #[test]
     fn exec_under_root_takes_the_probe_group_and_the_user() {
-        use std::io::Write;
-
         if unsafe { libc::geteuid() } != 0 {
-            // Past the harness's capture, so the skip shows in a passing run.
-            let _ = writeln!(
-                std::io::stderr(),
-                "skipped exec_under_root_takes_the_probe_group_and_the_user: not root"
+            return skip_root_case(
+                "exec_under_root_takes_the_probe_group_and_the_user",
+                "not root",
             );
-            return;
         }
         let nobody = Process::new("id").args(["-u", "nobody"]).output().unwrap();
         let nobody = String::from_utf8(nobody.stdout).unwrap();
@@ -746,7 +742,6 @@ mod process {
 #[cfg(target_os = "linux")]
 mod trim {
     use std::fs::{self, File};
-    use std::io::Write;
     use std::os::unix::fs::MetadataExt;
     use std::path::Path;
     use std::process::{Command as Process, Output};
@@ -776,11 +771,11 @@ mod trim {
     fn trim_under_root_frees_the_blocks_of_deleted_files() {
         const NAME: &str = "trim_under_root_frees_the_blocks_of_deleted_files";
         if unsafe { libc::geteuid() } != 0 {
-            return skip(NAME, "not root");
+            return skip_root_case(NAME, "not root");
         }
         let disk = match Ext4::mount() {
             Ok(disk) => disk,
-            Err(why) => return skip(NAME, &why),
+            Err(why) => return skip_root_case(NAME, &why),
         };
         let junk = disk.dir.join("junk");
         fs::write(&junk, vec![0xA5; JUNK]).unwrap();
@@ -863,9 +858,19 @@ mod trim {
             Err(error) => Err(format!("{shown}: {error}")),
         }
     }
+}
 
-    /// Past the harness's capture, so the skip shows in a passing run.
-    fn skip(name: &str, why: &str) {
-        let _ = writeln!(std::io::stderr(), "skipped {name}: {why}");
-    }
+/// A root case skips where it cannot run, unless `STAND_GUEST_ROOT_REQUIRED` is set: CI sets it when
+/// it runs these cases again under `sudo`, so there a case that cannot run fails.
+#[cfg(target_os = "linux")]
+fn skip_root_case(name: &str, why: &str) {
+    use std::io::Write;
+
+    let line = format!("{name}: {why}");
+    assert!(
+        std::env::var_os("STAND_GUEST_ROOT_REQUIRED").is_none(),
+        "{line}"
+    );
+    // Past the harness's capture, so the skip shows in a passing run.
+    let _ = writeln!(std::io::stderr(), "skipped {line}");
 }

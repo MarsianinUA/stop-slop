@@ -49,6 +49,12 @@ jobs:
           node-version: 22
       - run: cargo fmt --check
       - run: cargo clippy --locked --workspace --all-targets -- -D warnings
+      # guest-release.yml builds this on a tag; here a break shows on the PR instead.
+      - name: Build stand-guest for musl, as the release does
+        if: runner.os == 'Linux'
+        run: |
+          rustup target add x86_64-unknown-linux-musl
+          cargo build --locked -p guest --release --target x86_64-unknown-linux-musl
       # Ubuntu 24.04 gives an unprivileged user namespace no capabilities, so the netfilter tests
       # of guest could only skip; with them allowed, a namespace that still fails is a failure.
       - name: Let the netfilter tests run in their own namespaces
@@ -57,3 +63,16 @@ jobs:
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
           echo STAND_GUEST_NF_REQUIRED=1 >> "$GITHUB_ENV"
       - run: cargo test --locked --workspace
+      # The root cases of guest (the probe's privilege drop, FITRIM on a loop-mounted ext4) skipped
+      # above; here they run as root, where a skip fails, and the count shows the filter matched both.
+      - name: Run the root cases of guest under sudo
+        if: runner.os == 'Linux'
+        shell: bash
+        env:
+          CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUNNER: sudo -E
+          STAND_GUEST_ROOT_REQUIRED: 1
+        run: |
+          cargo test --locked -p guest --test guest -- --exact \
+            process::exec_under_root_takes_the_probe_group_and_the_user \
+            trim::trim_under_root_frees_the_blocks_of_deleted_files | tee "$RUNNER_TEMP/root.log"
+          grep -q ' 2 passed;' "$RUNNER_TEMP/root.log"
