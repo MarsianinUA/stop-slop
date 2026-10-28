@@ -251,7 +251,7 @@ impl Fleet {
     }
 }
 
-fn stop_if(cancel: &Cancel) -> Result<(), Halt> {
+pub(crate) fn stop_if(cancel: &Cancel) -> Result<(), Halt> {
     if cancel.is_cancelled() {
         Err(Halt::Cancelled)
     } else {

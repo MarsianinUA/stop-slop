@@ -1,6 +1,6 @@
-//! One atomic stand run in sandboxes. `run` knows no type of `store` or `source`: `cli` gives it
-//! the tar files of the trees, the cache entries and an empty run folder, and gets back
-//! `report::Raw`.
+//! One atomic stand run in sandboxes, and a look into its kept snapshots. `run` knows no type of
+//! `store` or `source`: `cli` gives it the tar files of the trees, the cache entries and an empty
+//! run folder, and gets back `report::Raw`.
 
 use std::fmt;
 use std::io;
@@ -11,18 +11,20 @@ use std::time::Duration;
 use camino::{Utf8Path, Utf8PathBuf};
 use profile::ProfileError;
 use report::{Failure, Phase, Raw};
-use sandbox::{Sandbox, SandboxError};
+use sandbox::{ExecOutcome, Sandbox, SandboxError};
 use serde::{Deserialize, Serialize};
 use spec::Stand;
 
 mod cache;
 mod drain;
+mod keep;
 mod lane;
 mod launch;
 mod probes;
 mod ready;
 
 pub use cache::cached_ids;
+pub use keep::{Kept, KeptLaunch, inspect, kept_ids};
 
 /// Over the sum of the timeouts in `span`: readiness, stops, drains and snapshots between them.
 const SPAN_MARGIN: Duration = Duration::from_secs(10 * 60);
@@ -106,6 +108,13 @@ impl fmt::Display for Side {
     }
 }
 
+#[derive(Debug)]
+pub struct Inspected {
+    pub outcome: ExecOutcome,
+    /// The stdout of `argv`, `<run>/inspect/<n>.out`; its stderr is `<n>.out.err` beside it.
+    pub out: Utf8PathBuf,
+}
+
 /// Ctrl+C sets it; `run` and the lock wait check it.
 #[derive(Debug, Clone, Default)]
 pub struct Cancel(Arc<AtomicBool>);
@@ -176,4 +185,19 @@ impl StandFault {
             source: io::Error::new(io::ErrorKind::InvalidData, message.to_string()),
         }
     }
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum InspectError {
+    /// No such run folder, side, service or kept snapshot.
+    #[error("{0}")]
+    NotKept(String),
+    /// Its harness folder or the preload of the run is gone (no VM is created), or it exited or
+    /// never got healthy: `inspect` gives it no peers and no network. Exit 2.
+    #[error("{service} did not start in inspect: {cause}")]
+    NotStarted { service: String, cause: String },
+    #[error(transparent)]
+    Stand(StandFault),
+    #[error("cancelled")]
+    Cancelled,
 }

@@ -12,7 +12,7 @@ use spec::{Profiler, Service, ServiceKind, ServiceName, Stand};
 
 use crate::ready::{Health, Start};
 
-const OUT: &str = "/stand/out";
+pub(crate) const OUT: &str = "/stand/out";
 const PRELOAD: &str = "/stand/preload";
 pub(crate) const PROFILE: &str = "/stand/profile";
 

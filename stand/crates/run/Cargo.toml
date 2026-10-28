@@ -6,7 +6,8 @@ rust-version.workspace = true
 publish = false
 
 [dependencies]
-camino.workspace = true
+# `kept.json` keeps the host folders of the kept repeat's binds.
+camino = { workspace = true, features = ["serde1"] }
 profile = { path = "../profile" }
 report = { path = "../report" }
 sandbox = { path = "../sandbox" }
