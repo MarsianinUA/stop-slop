@@ -13,6 +13,8 @@ mod process;
 mod relay;
 #[cfg(unix)]
 mod sniff;
+#[cfg(target_os = "linux")]
+mod trim;
 
 use std::process::ExitCode;
 
@@ -30,9 +32,19 @@ fn main() -> ExitCode {
         Ok(guest::Command::Run(args)) => process::run(&args),
         Ok(guest::Command::Stop(args)) => process::stop(&args),
         Ok(guest::Command::Exec(args)) => process::exec(&args),
-        Ok(guest::Command::Trim(_)) => failed("stand-guest", "trim is not built yet"),
+        Ok(guest::Command::Trim(args)) => run_trim(&args),
         Err(error) => failed("stand-guest", error),
     }
+}
+
+#[cfg(target_os = "linux")]
+fn run_trim(args: &guest::TrimArgs) -> ExitCode {
+    trim::run(args)
+}
+
+#[cfg(all(unix, not(target_os = "linux")))]
+fn run_trim(_: &guest::TrimArgs) -> ExitCode {
+    failed("stand-guest trim", "FITRIM is an ioctl only Linux has")
 }
 
 #[cfg(unix)]

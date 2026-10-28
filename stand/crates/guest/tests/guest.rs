@@ -1,8 +1,8 @@
 //! `stand-guest` driven on the host. The forwarder runs in `--direct` mode, so no root or netfilter
 //! is needed: a listener binds each route's loopback `address:port`, and the relay is the same code
 //! the guest uses behind REDIRECT. macOS has only `127.0.0.1` on loopback, so the routes share that
-//! address and differ by port. The forwarder, `run`, `stop` and `exec` are Unix only; the
-//! arguments, the files and the Windows stub are checked everywhere.
+//! address and differ by port. The forwarder, `run`, `stop` and `exec` are Unix only, `trim` is
+//! Linux only; the arguments, the files and the Windows stub are checked everywhere.
 
 use std::net::Ipv4Addr;
 use std::path::PathBuf;
@@ -738,5 +738,134 @@ mod process {
             assert!(Instant::now() < deadline, "group {pgid} still runs");
             thread::sleep(Duration::from_millis(10));
         }
+    }
+}
+
+/// The error cases run as any user. Trimming needs root and an ext4 disk, which the test makes on a
+/// loop device, as an owned disk of a guest is; without them it is skipped.
+#[cfg(target_os = "linux")]
+mod trim {
+    use std::fs::{self, File};
+    use std::io::Write;
+    use std::os::unix::fs::MetadataExt;
+    use std::path::Path;
+    use std::process::{Command as Process, Output};
+
+    use super::*;
+
+    const JUNK: usize = 16 << 20;
+
+    #[test]
+    fn trim_tries_every_mount_and_names_each_one_it_could_not_trim() {
+        let temp = tempfile::tempdir().unwrap();
+        let missing = temp.path().join("missing");
+        let output = trim(&[Path::new("/proc"), &missing]);
+        assert_eq!(output.status.code(), Some(125));
+        let stderr = String::from_utf8(output.stderr).unwrap();
+        let lines: Vec<&str> = stderr.lines().collect();
+        assert_eq!(lines.len(), 2, "{stderr}");
+        assert_eq!(
+            lines[0],
+            "stand-guest trim: FITRIM /proc: not supported by its file system"
+        );
+        let open = format!("stand-guest trim: open {}: ", missing.display());
+        assert!(lines[1].starts_with(&open), "{stderr}");
+    }
+
+    #[test]
+    fn trim_under_root_frees_the_blocks_of_deleted_files() {
+        const NAME: &str = "trim_under_root_frees_the_blocks_of_deleted_files";
+        if unsafe { libc::geteuid() } != 0 {
+            return skip(NAME, "not root");
+        }
+        let disk = match Ext4::mount() {
+            Ok(disk) => disk,
+            Err(why) => return skip(NAME, &why),
+        };
+        let junk = disk.dir.join("junk");
+        fs::write(&junk, vec![0xA5; JUNK]).unwrap();
+        File::open(&junk).unwrap().sync_all().unwrap();
+        fs::remove_file(&junk).unwrap();
+        // Commits the delete, so the blocks are free when FITRIM looks.
+        unsafe { libc::sync() };
+        let before = disk.allocated();
+
+        let output = trim(&[&disk.dir]);
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let freed = before - disk.allocated();
+        assert!(
+            freed >= JUNK as u64,
+            "the image gave back {freed} bytes, less than the {JUNK} deleted"
+        );
+    }
+
+    fn trim(mounts: &[&Path]) -> Output {
+        let mounts = mounts.iter().map(|mount| mount.to_path_buf()).collect();
+        let command = Command::Trim(TrimArgs { mounts });
+        Process::new(BIN).args(command.to_args()).output().unwrap()
+    }
+
+    /// Mounted from a sparse image, so a discard on it gives the image's blocks back.
+    struct Ext4 {
+        image: PathBuf,
+        dir: PathBuf,
+        _temp: tempfile::TempDir,
+    }
+
+    impl Ext4 {
+        fn mount() -> Result<Ext4, String> {
+            let temp = tempfile::tempdir().unwrap();
+            let image = temp.path().join("disk.img");
+            let dir = temp.path().join("w");
+            File::create(&image).unwrap().set_len(64 << 20).unwrap();
+            fs::create_dir(&dir).unwrap();
+            // The inode tables and the journal are written now, not by a kernel thread while the
+            // image is measured.
+            let lazy = "lazy_itable_init=0,lazy_journal_init=0";
+            ran(Process::new("mkfs.ext4")
+                .args(["-q", "-F", "-b", "4096", "-E", lazy])
+                .arg(&image))?;
+            ran(Process::new("mount")
+                .args(["-o", "loop"])
+                .arg(&image)
+                .arg(&dir))?;
+            Ok(Ext4 {
+                image,
+                dir,
+                _temp: temp,
+            })
+        }
+
+        fn allocated(&self) -> u64 {
+            fs::metadata(&self.image).unwrap().blocks() * 512
+        }
+    }
+
+    /// `mount -o loop` frees the loop device on the unmount.
+    impl Drop for Ext4 {
+        fn drop(&mut self) {
+            let _ = Process::new("umount").arg(&self.dir).status();
+        }
+    }
+
+    fn ran(command: &mut Process) -> Result<(), String> {
+        let shown = format!("{command:?}");
+        match command.output() {
+            Ok(output) if output.status.success() => Ok(()),
+            Ok(output) => Err(format!(
+                "{shown}: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            )),
+            Err(error) => Err(format!("{shown}: {error}")),
+        }
+    }
+
+    /// Past the harness's capture, so the skip shows in a passing run.
+    fn skip(name: &str, why: &str) {
+        let _ = writeln!(std::io::stderr(), "skipped {name}: {why}");
     }
 }
