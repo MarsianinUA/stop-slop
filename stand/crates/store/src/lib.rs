@@ -195,6 +195,7 @@ pub struct Trees {
 #[derive(Debug)]
 pub struct Expired {
     key: String,
+    at: SystemTime,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -221,8 +222,6 @@ impl KeptScope {
 
 #[derive(Debug, thiserror::Error)]
 pub enum StoreError {
-    #[error(transparent)]
-    Config(ConfigError),
     #[error("{path}: {source}")]
     Io {
         path: Utf8PathBuf,

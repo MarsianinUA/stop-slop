@@ -1,0 +1,63 @@
+name: Guest release
+on:
+  push:
+    tags:
+      - 'guest-v*'
+permissions:
+  contents: read
+env:
+  CARGO_TERM_COLOR: always
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-latest
+            target: x86_64-unknown-linux-musl
+          - runner: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-musl
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - name: Static musl build of stand-guest
+        run: cargo build --locked --manifest-path stand/Cargo.toml -p guest --release --target ${{ matrix.target }}
+      - name: The binary and its sha256
+        shell: bash
+        run: |
+          name=stand-guest-${{ matrix.target }}
+          cp "stand/target/${{ matrix.target }}/release/stand-guest" "$name"
+          # Each runner is the target's own architecture: a binary that does not start here would not
+          # start in a guest either. An unknown subcommand exits 125.
+          code=0
+          "./$name" not-a-command || code=$?
+          test "$code" -eq 125
+          sha256sum "$name" > "$name.sha256"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: ${{ matrix.target }}
+          path: |
+            stand-guest-${{ matrix.target }}
+            stand-guest-${{ matrix.target }}.sha256
+          if-no-files-found: error
+  # Apart from the builds, so the code they compile never runs with a token that can write.
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          path: release
+          merge-multiple: true
+      - name: Publish both binaries and their sha256
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: >-
+          gh release create "$GITHUB_REF_NAME" release/*
+          --repo "$GITHUB_REPOSITORY" --verify-tag
+          --title "$GITHUB_REF_NAME" --notes "stand-guest ${GITHUB_REF_NAME#guest-v}"

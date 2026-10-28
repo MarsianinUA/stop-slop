@@ -159,8 +159,22 @@ impl Session {
 pub(crate) fn append_cleaned(dir: &Utf8Path, now: SystemTime) -> Result<(), StoreError> {
     for entry in entries(dir)? {
         if entry.path().extension() == Some("json") {
-            append(entry.path(), JournalEntry::Cleaned { cleaned_at: now })?;
+            append_cleaned_to(entry.path(), now)?;
         }
+    }
+    Ok(())
+}
+
+/// `{cleanedAt}` at the end of the journal at `path`. Not when there is none: a session that never
+/// sealed has none, and a journal that starts with a clean tells nothing. Not after another clean:
+/// nothing was sealed since, and a `forget` that failed after the entry and runs again adds no second.
+pub(crate) fn append_cleaned_to(path: &Utf8Path, now: SystemTime) -> Result<(), StoreError> {
+    let Some(mut journal) = read_json::<Vec<JournalEntry>>(path)? else {
+        return Ok(());
+    };
+    if !matches!(journal.last(), Some(JournalEntry::Cleaned { .. })) {
+        journal.push(JournalEntry::Cleaned { cleaned_at: now });
+        write_json(path, &journal)?;
     }
     Ok(())
 }

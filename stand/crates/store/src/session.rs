@@ -13,7 +13,7 @@ use sha2::{Digest, Sha256};
 use crate::cache::Slots;
 use crate::{
     Expired, JOURNAL, KeptScope, SESSIONS, Store, StoreError, entries, hex, read_json, remove,
-    write_json,
+    seal, write_json,
 };
 
 /// Of a session and of what it keeps: its runs, the kept run's snapshots, its setup cache.
@@ -114,15 +114,21 @@ impl Store {
             .sessions()?
             .into_iter()
             .filter(|(_, state)| is_expired(state, now))
-            .map(|(session, _)| Expired { key: session.key })
+            .map(|(session, _)| Expired {
+                key: session.key,
+                at: now,
+            })
             .collect())
     }
 
-    /// Their sessions, runs, reports, kept runs and setup cache; their journals stay.
+    /// Their sessions, runs, reports, kept runs and setup cache; their journals stay and get
+    /// `{cleanedAt}` with the `now` of `expired`.
     pub fn forget(&self, expired: &[Expired]) -> Result<(), StoreError> {
-        expired
-            .iter()
-            .try_for_each(|expired| remove(&self.session_of(&expired.key).dir))
+        expired.iter().try_for_each(|expired| {
+            let session = self.session_of(&expired.key);
+            seal::append_cleaned_to(&session.journal, expired.at)?;
+            remove(&session.dir)
+        })
     }
 
     /// Images of every session and of its cache entries, which after `forget` are the sessions

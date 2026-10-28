@@ -63,7 +63,6 @@ impl Home {
     }
 }
 
-/// 2026-10-28T12:00:00Z and `seconds` after.
 fn at(seconds: u64) -> SystemTime {
     humantime::parse_rfc3339("2026-10-28T12:00:00Z").unwrap() + Duration::from_secs(seconds)
 }
@@ -464,6 +463,7 @@ fn the_ttl_forgets_a_session_and_what_it_keeps_but_not_its_journal() {
         .unwrap();
     let live_run = live.new_run(at(4), &pool_key("2")).unwrap();
     live.keep(&live_run).unwrap();
+    let unsealed = home.session("unsealed", &[], at(0));
 
     let ttl = at(0) + 3 * DAY;
     let before_ttl = ttl - Duration::from_secs(1);
@@ -478,7 +478,9 @@ fn the_ttl_forgets_a_session_and_what_it_keeps_but_not_its_journal() {
         "the sweep before forget leaves no snapshots of an expired session"
     );
     let expired = home.store.expired(ttl).unwrap();
-    assert_eq!(expired.len(), 1);
+    assert_eq!(expired.len(), 2);
+    home.store.forget(&expired).unwrap();
+    // As a sweep after a `forget` that failed past the journal entry: no second entry.
     home.store.forget(&expired).unwrap();
 
     assert!(old.history().unwrap().is_empty());
@@ -495,11 +497,22 @@ fn the_ttl_forgets_a_session_and_what_it_keeps_but_not_its_journal() {
         home.store.kept_images().unwrap(),
         ["mysql:8", "node:22", "redis:7"]
     );
-    let journal = home
-        .root()
-        .join("journal")
-        .join(format!("{}.json", old.key()));
-    assert_eq!(json_of(&journal).as_array().unwrap().len(), 1);
+    let journal = |session: &Session| {
+        home.root()
+            .join("journal")
+            .join(format!("{}.json", session.key()))
+    };
+    assert_eq!(
+        json_of(&journal(&old)),
+        json!([
+            {"sealedAt": "2026-10-28T12:00:02Z", "digest": "digest"},
+            {"cleanedAt": "2026-10-31T12:00:00Z"},
+        ])
+    );
+    assert!(
+        !journal(&unsealed).exists(),
+        "a session that never sealed gets no journal"
+    );
     assert!(matches!(&live.history().unwrap()[..], [record] if record.id == live_run.id));
     assert_eq!(home.store.expired(ttl).unwrap().len(), 0);
 }
