@@ -24,6 +24,7 @@ pub fn run(routes: &Routes) -> ExitCode {
     if let Err(message) = started {
         return crate::failed("stand-guest net", message);
     }
+    relay.watch_fault(routes.fault.clone());
     // SAFETY: the handler only stores to an atomic, which is async-signal-safe.
     unsafe {
         libc::signal(

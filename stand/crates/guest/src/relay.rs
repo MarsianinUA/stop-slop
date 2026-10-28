@@ -1,24 +1,30 @@
 //! The relay, shared by both entries. A connection to an exposed name goes round-robin to one of
-//! the upstream host ports, and its bytes are counted as they pass.
+//! the upstream host ports, and its bytes are counted as they pass. A `FaultSwitch` file turns
+//! one target `down` or `slow` while the relay runs.
 
+use std::fs;
 use std::io::{ErrorKind, Read, Write};
 #[cfg(target_os = "linux")]
 use std::net::{Ipv4Addr, SocketAddrV4};
 use std::net::{Shutdown, TcpStream, ToSocketAddrs};
-use std::path::Path;
+use std::os::fd::AsRawFd;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
-use guest::{Counters, Route, TargetCounters, UnexposedCount, UnexposedName};
+use guest::{
+    Counters, FaultSwitch, FaultSwitchMode, Route, TargetCounters, UnexposedCount, UnexposedName,
+};
 
 use crate::sniff::HttpSniff;
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 const COUNTERS_EVERY: Duration = Duration::from_millis(100);
+const FAULT_EVERY: Duration = Duration::from_millis(100);
 
-/// Shared by every accept thread and the counters writer.
+/// Shared by every accept thread, the fault watcher and the counters writer.
 pub struct Relay {
     upstream_host: String,
     targets: Vec<Target>,
@@ -35,6 +41,22 @@ struct Target {
     upstream: Vec<u16>,
     next: AtomicUsize,
     counts: Counts,
+    fault: Mutex<Fault>,
+}
+
+/// One lock over the fault and the connections it cuts, so a connection is either in `open` when
+/// a `down` comes or sees the `down` when it starts.
+#[derive(Default)]
+struct Fault {
+    mode: Option<FaultSwitchMode>,
+    open: Vec<Arc<Conn>>,
+}
+
+/// A relayed connection, shared with the fault watcher, which may cut it from its own thread.
+struct Conn {
+    client: TcpStream,
+    upstream: OnceLock<TcpStream>,
+    cut: AtomicBool,
 }
 
 #[derive(Default)]
@@ -78,6 +100,7 @@ impl Relay {
                 upstream: route.upstream.clone(),
                 next: AtomicUsize::new(0),
                 counts: Counts::default(),
+                fault: Mutex::default(),
             })
             .collect();
         let unexposed = unexposed
@@ -138,33 +161,91 @@ impl Relay {
         }
     }
 
+    /// Reads `path` every `FAULT_EVERY` from now on and applies the switch in it; while there is
+    /// no file no target has a fault. A file that cannot be read or parsed leaves the faults as
+    /// they are and is reported on stderr once.
+    pub fn watch_fault(self: &Arc<Relay>, path: PathBuf) {
+        let relay = Arc::clone(self);
+        thread::spawn(move || {
+            let mut reported = None;
+            loop {
+                match read_fault(&path) {
+                    Ok(switch) => {
+                        relay.apply_fault(switch.as_ref());
+                        reported = None;
+                    }
+                    Err(problem) => {
+                        if reported.as_ref() != Some(&problem) {
+                            eprintln!("stand-guest net: {problem}");
+                            reported = Some(problem);
+                        }
+                    }
+                }
+                thread::sleep(FAULT_EVERY);
+            }
+        });
+    }
+
+    fn apply_fault(&self, switch: Option<&FaultSwitch>) {
+        for target in &self.targets {
+            let mode = switch
+                .filter(|switch| switch.target == target.target)
+                .map(|switch| switch.mode);
+            target.set_fault(mode);
+        }
+    }
+
     fn relay(&self, target: &Target, client: TcpStream) {
+        let accepted = Instant::now();
         let counts = &target.counts;
         counts.connections.fetch_add(1, Ordering::Relaxed);
         counts.open.fetch_add(1, Ordering::Relaxed);
         self.mark();
+        let conn = Arc::new(Conn {
+            client,
+            upstream: OnceLock::new(),
+            cut: AtomicBool::new(false),
+        });
+        let fault = target.admit(&conn);
         let _open = Open {
             relay: self,
-            counts,
+            target,
+            conn: &conn,
         };
 
+        if fault == Some(FaultSwitchMode::Down) {
+            conn.cut();
+            return;
+        }
         let Some(upstream) = self.connect(target) else {
             counts.drops.fetch_add(1, Ordering::Relaxed);
             return;
         };
+        let Some(upstream) = target.attach(&conn, upstream) else {
+            return;
+        };
+        // Neither the client's bytes nor an upstream's greeting pass before the delay.
+        if let Some(FaultSwitchMode::Slow { delay_ms }) = fault {
+            thread::sleep(Duration::from_millis(delay_ms).saturating_sub(accepted.elapsed()));
+        }
+        let client = &conn.client;
         let sniff = Mutex::new(HttpSniff::default());
         let client_closed = AtomicBool::new(false);
         thread::scope(|scope| {
             scope.spawn(|| {
                 if self
-                    .pipe(counts, &client, &upstream, Dir::Out, &sniff)
+                    .pipe(counts, client, upstream, Dir::Out, &sniff)
                     .by_source
                 {
                     client_closed.store(true, Ordering::Release);
                 }
                 let _ = upstream.shutdown(Shutdown::Write);
             });
-            let reply = self.pipe(counts, &upstream, &client, Dir::In, &sniff);
+            let reply = self.pipe(counts, upstream, client, Dir::In, &sniff);
+            // A cut connection ends with the reset of its close, and is no drop.
+            if conn.is_cut() {
+                return;
+            }
             // The upstream closed before any reply and before the client: how the network limit
             // of microsandbox shows from inside a guest.
             if reply.by_source && reply.bytes == 0 && !client_closed.load(Ordering::Acquire) {
@@ -276,15 +357,93 @@ impl Relay {
     }
 }
 
-/// Takes the connection off `open` however `relay` returns.
+fn read_fault(path: &Path) -> Result<Option<FaultSwitch>, String> {
+    let text = match fs::read_to_string(path) {
+        Ok(text) => text,
+        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(format!("read {}: {error}", path.display())),
+    };
+    FaultSwitch::parse(&text)
+        .map(Some)
+        .map_err(|error| format!("{}: {error}", path.display()))
+}
+
+impl Target {
+    fn set_fault(&self, mode: Option<FaultSwitchMode>) {
+        let mut fault = self.fault.lock().expect("fault lock");
+        if mode == Some(FaultSwitchMode::Down) && fault.mode != mode {
+            for conn in &fault.open {
+                conn.cut();
+            }
+        }
+        fault.mode = mode;
+    }
+
+    /// Puts a new connection where a `down` reaches it; returns the fault it starts under.
+    fn admit(&self, conn: &Arc<Conn>) -> Option<FaultSwitchMode> {
+        let mut fault = self.fault.lock().expect("fault lock");
+        fault.open.push(Arc::clone(conn));
+        fault.mode
+    }
+
+    /// `None` when a `down` cut the connection while it dialed the upstream.
+    fn attach<'c>(&self, conn: &'c Conn, upstream: TcpStream) -> Option<&'c TcpStream> {
+        let _fault = self.fault.lock().expect("fault lock");
+        if conn.is_cut() {
+            return None;
+        }
+        Some(conn.upstream.get_or_init(|| upstream))
+    }
+
+    fn leave(&self, conn: &Arc<Conn>) {
+        let mut fault = self.fault.lock().expect("fault lock");
+        fault.open.retain(|open| !Arc::ptr_eq(open, conn));
+    }
+}
+
+impl Conn {
+    /// Wakes both pipes and leaves the client socket to close with `SO_LINGER` 0, so the client
+    /// gets a reset and no FIN. A pipe blocked writing to a client that does not read waits until
+    /// it reads.
+    fn cut(&self) {
+        self.cut.store(true, Ordering::Release);
+        let linger = libc::linger {
+            l_onoff: 1,
+            l_linger: 0,
+        };
+        // SAFETY: the option value is a `linger` of the length given.
+        unsafe {
+            libc::setsockopt(
+                self.client.as_raw_fd(),
+                libc::SOL_SOCKET,
+                libc::SO_LINGER,
+                (&raw const linger).cast(),
+                size_of::<libc::linger>() as libc::socklen_t,
+            )
+        };
+        let _ = self.client.shutdown(Shutdown::Read);
+        if let Some(upstream) = self.upstream.get() {
+            let _ = upstream.shutdown(Shutdown::Both);
+        }
+    }
+
+    fn is_cut(&self) -> bool {
+        self.cut.load(Ordering::Acquire)
+    }
+}
+
+/// Takes the connection off `open` and out of the fault's reach however `relay` returns; its
+/// sockets close after that, with the last `Arc`.
 struct Open<'a> {
     relay: &'a Relay,
-    counts: &'a Counts,
+    target: &'a Target,
+    conn: &'a Arc<Conn>,
 }
 
 impl Drop for Open<'_> {
     fn drop(&mut self) {
-        self.counts.open.fetch_sub(1, Ordering::Relaxed);
+        self.target.leave(self.conn);
+        self.target.counts.open.fetch_sub(1, Ordering::Relaxed);
         self.relay.mark();
     }
 }

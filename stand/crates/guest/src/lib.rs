@@ -403,7 +403,9 @@ impl Counters {
     }
 }
 
-/// Written by the adapter; `net` applies it from the moment it sees the file.
+/// Written by the adapter; `net` applies it from the moment it sees the file until the file is gone,
+/// if it has a route for `target`. `down` resets the target's open connections and each new one;
+/// `slow` holds each new connection `delay_ms` before its first byte.
 /// `{"target": "db:5432", "mode": "down"}` or `{"target": "db:5432", "mode": "slow", "delayMs": 2000}`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FaultSwitch {

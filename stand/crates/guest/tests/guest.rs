@@ -174,7 +174,7 @@ fn the_binary_runs() {
 
 #[cfg(unix)]
 mod forwarder {
-    use std::io::{Read, Write};
+    use std::io::{self, ErrorKind, Read, Write};
     use std::net::{Shutdown, TcpListener, TcpStream};
     use std::path::Path;
     use std::process::{Child, Command as Process};
@@ -184,6 +184,7 @@ mod forwarder {
     use super::*;
 
     const LOOPBACK: Ipv4Addr = Ipv4Addr::LOCALHOST;
+    const LONG: Duration = Duration::from_secs(10);
 
     /// Reads each request to its end, writes `reply` and closes.
     fn upstream(reply: &'static [u8]) -> u16 {
@@ -195,6 +196,19 @@ mod forwarder {
                     let _ = stream.read_to_end(&mut Vec::new());
                     let _ = stream.write_all(reply);
                 });
+            }
+        });
+        port
+    }
+
+    /// Writes back what it reads until the client closes, so a connection stays open between
+    /// exchanges.
+    fn echo_upstream() -> u16 {
+        let listener = TcpListener::bind((LOOPBACK, 0)).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        thread::spawn(move || {
+            for stream in listener.incoming().flatten() {
+                thread::spawn(move || io::copy(&mut &stream, &mut &stream));
             }
         });
         port
@@ -236,7 +250,10 @@ mod forwarder {
     struct Forwarder {
         child: Child,
         counters: PathBuf,
+        fault: PathBuf,
         ports: Vec<u16>,
+        /// `name:port` of each route, as the counters and the fault switch name it.
+        targets: Vec<String>,
         _temp: tempfile::TempDir,
     }
 
@@ -247,6 +264,7 @@ mod forwarder {
         fn start(mut routes: Vec<Route>) -> Forwarder {
             let temp = tempfile::tempdir().unwrap();
             let counters = temp.path().join("counters.json");
+            let fault = temp.path().join("fault.json");
             for _ in 0..5 {
                 let command = Command::Net(Routes {
                     upstream_host: LOOPBACK.to_string(),
@@ -254,14 +272,19 @@ mod forwarder {
                     routes: routes.clone(),
                     unexposed: vec![],
                     counters: counters.clone(),
-                    fault: temp.path().join("fault.json"),
+                    fault: fault.clone(),
                 });
                 let mut child = Process::new(BIN).args(command.to_args()).spawn().unwrap();
                 if bound(&mut child, &counters) {
                     return Forwarder {
                         child,
                         counters,
+                        fault,
                         ports: routes.iter().map(|route| route.port).collect(),
+                        targets: routes
+                            .iter()
+                            .map(|route| format!("{}:{}", route.name, route.port))
+                            .collect(),
                         _temp: temp,
                     };
                 }
@@ -273,7 +296,23 @@ mod forwarder {
         }
 
         fn connect(&self, target: usize) -> TcpStream {
-            TcpStream::connect((LOOPBACK, self.ports[target])).unwrap()
+            let stream = TcpStream::connect((LOOPBACK, self.ports[target])).unwrap();
+            stream.set_read_timeout(Some(LONG)).unwrap();
+            stream
+        }
+
+        /// The time from the dial of `target` to the first byte of the echo of `ping`.
+        fn first_byte(&self, target: usize) -> Duration {
+            let started = Instant::now();
+            let mut stream = self.connect(target);
+            stream.write_all(b"ping").unwrap();
+            stream.read_exact(&mut [0]).unwrap();
+            started.elapsed()
+        }
+
+        fn switch(&self, target: usize, mode: FaultSwitchMode) {
+            let target = self.targets[target].clone();
+            FaultSwitch { target, mode }.write(&self.fault).unwrap();
         }
 
         /// Sends `body`, closes the sending side and reads the reply to its end. A target that is
@@ -427,6 +466,71 @@ mod forwarder {
         let fwd = Forwarder::start(vec![route("api", &[upstream(b"a"), upstream(b"b")])]);
         let replies: Vec<Vec<u8>> = (0..3).map(|_| fwd.request(0, b"ping")).collect();
         assert_eq!(replies, [b"a", b"b", b"a"]);
+    }
+
+    #[test]
+    fn a_down_fault_resets_the_open_connections_and_refuses_new_ones_while_the_file_is_there() {
+        let fwd = Forwarder::start(vec![
+            route("db", &[echo_upstream()]),
+            route("api", &[echo_upstream()]),
+        ]);
+        let mut talked = fwd.connect(0);
+        talked.write_all(b"ping").unwrap();
+        talked.read_exact(&mut [0; 4]).unwrap();
+        let quiet = fwd.connect(0);
+        let mut other = fwd.connect(1);
+        fwd.counters_until(|c| c.targets[0].open == 2 && c.targets[1].open == 1);
+
+        fwd.switch(0, FaultSwitchMode::Down);
+        assert_reset(talked);
+        assert_reset(quiet);
+        assert_reset(fwd.connect(0));
+        other.write_all(b"ping").unwrap();
+        other.read_exact(&mut [0; 4]).unwrap();
+        let down = fwd.counters_until(|c| c.targets[0].connections == 3 && c.targets[0].open == 0);
+        assert_eq!(down.targets[1].open, 1);
+
+        std::fs::remove_file(&fwd.fault).unwrap();
+        until("a new connection to db passes", || {
+            fwd.request(0, b"ping") == b"ping"
+        });
+        drop(other);
+        let after = fwd.counters_until(|c| c.targets.iter().all(|target| target.open == 0));
+        let drops: Vec<u64> = after.targets.iter().map(|target| target.drops).collect();
+        assert_eq!(drops, [0, 0], "a reset is not a drop");
+    }
+
+    #[test]
+    fn a_slow_fault_holds_the_first_byte_of_each_new_connection_while_the_file_is_there() {
+        const DELAY_MS: u64 = 400;
+        let delay = Duration::from_millis(DELAY_MS);
+        let fwd = Forwarder::start(vec![route("db", &[echo_upstream()])]);
+
+        fwd.switch(0, FaultSwitchMode::Slow { delay_ms: DELAY_MS });
+        until("the delay", || fwd.first_byte(0) >= delay);
+        assert!(fwd.first_byte(0) >= delay);
+        assert_eq!(fwd.request(0, b"ping"), b"ping");
+
+        std::fs::remove_file(&fwd.fault).unwrap();
+        until("the end of the delay", || fwd.first_byte(0) < delay);
+    }
+
+    /// Within the read timeout of `connect`, so a connection the relay keeps open fails it too.
+    fn assert_reset(mut stream: TcpStream) {
+        let read = stream.read(&mut [0]);
+        assert!(
+            matches!(&read, Err(error) if error.kind() == ErrorKind::ConnectionReset),
+            "{read:?}"
+        );
+    }
+
+    /// The fault watcher reads its file every 100 ms, so a switch takes effect a moment later.
+    fn until(what: &str, mut done: impl FnMut() -> bool) {
+        let deadline = Instant::now() + LONG;
+        while !done() {
+            assert!(Instant::now() < deadline, "{what} never came");
+            thread::sleep(Duration::from_millis(10));
+        }
     }
 }
 
