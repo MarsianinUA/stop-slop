@@ -106,9 +106,9 @@ pub fn check(demand: Demand, host: &Host, share: Share) -> Result<Admission, Ref
         free,
         share: share.0,
     };
-    let cpus = part(u64::from(host.cpus), share);
+    let all = u64::from(host.cpus);
+    let cpus = part(all, share);
     if u64::from(demand.cpus) > cpus {
-        let all = u64::from(host.cpus);
         return Err(refusal(Resource::Cpu, demand.cpus.into(), cpus, all, all));
     }
     let memory = part(host.memory, share).min(host.free_memory.saturating_sub(MEMORY_RESERVE));
@@ -136,10 +136,8 @@ pub fn disk_low(host: &Host) -> bool {
     host.free_disk < DISK_FLOOR
 }
 
-/// `share` percent of `whole`, rounded down, without overflow.
 fn part(whole: u64, share: Share) -> u64 {
-    let share = u64::from(share.0);
-    whole / 100 * share + whole % 100 * share / 100
+    (u128::from(whole) * u128::from(share.0) / 100) as u64
 }
 
 /// Every service and replica at once; CPUs as whole vCPUs.

@@ -16,7 +16,7 @@ use std::fs::{self, File, OpenOptions, TryLockError};
 use std::io::{self, ErrorKind, Write};
 use std::time::SystemTime;
 
-use camino::{Utf8Path, Utf8PathBuf};
+use camino::{Utf8DirEntry, Utf8Path, Utf8PathBuf};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 
@@ -265,6 +265,16 @@ fn write_json<T: Serialize>(path: &Utf8Path, value: &T) -> Result<(), StoreError
     file.sync_all().map_err(&io_error)?;
     drop(file);
     fs::rename(&temp, path).map_err(StoreError::io(path))
+}
+
+fn entries(dir: &Utf8Path) -> Result<Vec<Utf8DirEntry>, StoreError> {
+    match dir.read_dir_utf8() {
+        Ok(entries) => entries
+            .collect::<io::Result<_>>()
+            .map_err(StoreError::io(dir)),
+        Err(error) if error.kind() == ErrorKind::NotFound => Ok(Vec::new()),
+        Err(error) => Err(StoreError::io(dir)(error)),
+    }
 }
 
 /// A folder with all in it, or a file; nothing there is not an error.

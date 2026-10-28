@@ -300,6 +300,11 @@ fn a_seal_copies_the_folder_and_only_a_reseal_changes_the_copy() {
     );
     assert!(copy.join("new.js").is_file());
     assert!(!copy.join("scripts").join("load.js").exists());
+    assert_eq!(
+        names_in(copy.parent().unwrap()),
+        BTreeSet::from(["seal", "session.json"].map(str::to_owned)),
+        "the old copy and the temp copy go"
+    );
     assert!(matches!(
         &resealed.journal[..],
         [

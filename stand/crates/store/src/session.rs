@@ -12,7 +12,8 @@ use sha2::{Digest, Sha256};
 
 use crate::cache::Slots;
 use crate::{
-    Expired, JOURNAL, KeptScope, SESSIONS, Store, StoreError, hex, read_json, remove, write_json,
+    Expired, JOURNAL, KeptScope, SESSIONS, Store, StoreError, entries, hex, read_json, remove,
+    write_json,
 };
 
 /// Of a session and of what it keeps: its runs, the kept run's snapshots, its setup cache.
@@ -92,23 +93,17 @@ impl Store {
         let hash = Sha256::digest(format!("{file}\n{worktree}"));
         let session = self.session_of(&hex(&hash)[..16]);
         fs::create_dir_all(&session.dir).map_err(StoreError::io(&session.dir))?;
-        let images = images.to_vec();
-        let state = match session.read()? {
-            Some(old) => SessionFile {
-                file,
-                worktree,
-                images,
-                used_at: now,
-                ..old
-            },
-            None => SessionFile {
-                file,
-                worktree,
-                images,
-                used_at: now,
-                kept: None,
-                cache: Slots::default(),
-            },
+        let (kept, cache) = session
+            .read()?
+            .map(|old| (old.kept, old.cache))
+            .unwrap_or_default();
+        let state = SessionFile {
+            file,
+            worktree,
+            images: images.to_vec(),
+            used_at: now,
+            kept,
+            cache,
         };
         session.write(&state)?;
         Ok(session)
@@ -301,8 +296,7 @@ impl Session {
     }
 
     pub(crate) fn state(&self) -> Result<SessionFile, StoreError> {
-        let path = self.dir.join(SESSION);
-        read_json(&path)?.ok_or_else(|| missing(&path))
+        self.read()?.ok_or_else(|| missing(&self.dir.join(SESSION)))
     }
 
     pub(crate) fn write(&self, state: &SessionFile) -> Result<(), StoreError> {
@@ -324,14 +318,8 @@ fn run_id(at: SystemTime) -> String {
 
 /// The names of the folders in `dir`, sorted; none when `dir` is missing.
 pub(crate) fn folders(dir: &Utf8Path) -> Result<Vec<String>, StoreError> {
-    let entries = match dir.read_dir_utf8() {
-        Ok(entries) => entries,
-        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(error) => return Err(StoreError::io(dir)(error)),
-    };
     let mut names = Vec::new();
-    for entry in entries {
-        let entry = entry.map_err(StoreError::io(dir))?;
+    for entry in entries(dir)? {
         if entry
             .file_type()
             .map_err(StoreError::io(entry.path()))?

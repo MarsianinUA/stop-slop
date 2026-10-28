@@ -126,11 +126,11 @@ fn is_device(name: &str) -> bool {
         .split_once('.')
         .map_or(name, |(stem, _)| stem)
         .to_ascii_lowercase();
-    let port = |prefix: &str| {
-        stem.strip_prefix(prefix)
-            .is_some_and(|digit| matches!(digit.as_bytes(), [digit] if digit.is_ascii_digit()))
-    };
-    matches!(stem.as_str(), "con" | "prn" | "aux" | "nul") || port("com") || port("lpt")
+    match stem.as_bytes() {
+        b"con" | b"prn" | b"aux" | b"nul" => true,
+        [b'c', b'o', b'm', digit] | [b'l', b'p', b't', digit] => digit.is_ascii_digit(),
+        _ => false,
+    }
 }
 
 fn not_on_windows(name: &str) -> String {

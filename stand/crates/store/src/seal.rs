@@ -9,7 +9,7 @@ use camino::{Utf8Path, Utf8PathBuf};
 use serde::{Deserialize, Serialize};
 
 use crate::session::Session;
-use crate::{StoreError, read_json, remove, write_json};
+use crate::{StoreError, entries, read_json, remove, write_json};
 
 const SEAL: &str = "seal";
 const ACCEPTED: &str = "accepted.json";
@@ -119,19 +119,30 @@ impl Session {
 
     /// The journal gets the entry before the copy changes: a crash between the two leaves an
     /// entry for a copy that did not change, never a change without an entry. The copy is whole
-    /// before it takes the place of the old one.
+    /// before it takes the place of the old one, and the old one moves aside before it is
+    /// deleted: deleting it in place can stop halfway on a file another process holds open
+    /// (Windows), which would leave half a copy in `seal/`.
     fn replace_copy(
         &self,
         stand_dir: &Utf8Path,
         now: SystemTime,
         entry: JournalEntry,
     ) -> Result<Sealed, StoreError> {
-        let (dir, temp) = (self.dir.join(SEAL), self.dir.join("seal.tmp"));
+        let dir = self.dir.join(SEAL);
+        let (temp, old) = (self.dir.join("seal.tmp"), self.dir.join("seal.old"));
         remove(&temp)?;
+        remove(&old)?;
         copy_folder(stand_dir, &temp)?;
         let journal = append(&self.journal, entry)?;
-        remove(&dir)?;
+        match fs::rename(&dir, &old) {
+            Err(error) if error.kind() != ErrorKind::NotFound => {
+                return Err(StoreError::io(&dir)(error));
+            }
+            _ => {}
+        }
         fs::rename(&temp, &dir).map_err(StoreError::io(&dir))?;
+        // The seal is done; a copy left aside goes with the next one.
+        let _ = remove(&old);
         Ok(Sealed {
             dir,
             sealed_at: now,
@@ -146,13 +157,7 @@ impl Session {
 
 /// `{cleanedAt}` at the end of every journal in `dir`.
 pub(crate) fn append_cleaned(dir: &Utf8Path, now: SystemTime) -> Result<(), StoreError> {
-    let entries = match dir.read_dir_utf8() {
-        Ok(entries) => entries,
-        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(()),
-        Err(error) => return Err(StoreError::io(dir)(error)),
-    };
-    for entry in entries {
-        let entry = entry.map_err(StoreError::io(dir))?;
+    for entry in entries(dir)? {
         if entry.path().extension() == Some("json") {
             append(entry.path(), JournalEntry::Cleaned { cleaned_at: now })?;
         }

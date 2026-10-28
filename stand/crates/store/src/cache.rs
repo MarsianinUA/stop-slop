@@ -111,9 +111,11 @@ impl Session {
         entry: CacheEntry,
     ) -> Result<Vec<Utf8PathBuf>, StoreError> {
         let mut state = self.state()?;
+        let digest = key.digest();
+        debug_assert_eq!(entry.dir, self.entry(&digest), "an entry of another key");
         let named = Named {
             key: key.clone(),
-            digest: key.digest(),
+            digest,
             built_by: entry.built_by,
         };
         let place = match slot {
