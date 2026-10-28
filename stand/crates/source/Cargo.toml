@@ -1,0 +1,17 @@
+[package]
+name = "source"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+camino.workspace = true
+gitcmd = { path = "../../../shared/gitcmd" }
+sha2.workspace = true
+tar.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+testkit = { path = "../../../shared/testkit" }
