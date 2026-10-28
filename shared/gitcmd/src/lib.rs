@@ -128,7 +128,7 @@ pub struct Root {
     pub common: PathBuf,
 }
 
-/// `None` outside a git repository.
+/// `None` outside a git work tree: outside any repository, inside `.git` or in a bare one.
 pub fn root(dir: &Path) -> Result<Option<Root>, GitError> {
     // From a subfolder git prints the common dir relative to `dir`, which may be relative
     // itself; `--path-format` makes it absolute. The root is absolute anyway.
@@ -139,7 +139,10 @@ pub fn root(dir: &Path) -> Result<Option<Root>, GitError> {
         "--git-common-dir",
     ];
     let out = match Git::at(dir).run(&args) {
-        Err(GitError::Failed { stderr, .. }) if stderr.contains("not a git repository") => {
+        Err(GitError::Failed { stderr, .. })
+            if stderr.contains("not a git repository")
+                || stderr.contains("must be run in a work tree") =>
+        {
             return Ok(None);
         }
         other => other?,

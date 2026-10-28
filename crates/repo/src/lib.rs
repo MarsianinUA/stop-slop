@@ -210,9 +210,7 @@ impl Repo {
         Ok(out.map(oid))
     }
 
-    /// Fetches `+refs/pull/<n>/head:refs/stop-slop/pr-<n>` and
-    /// `+refs/heads/<base>:refs/remotes/origin/<base>`. A fetched head other than `head` is
-    /// `PrMoved`: a push came between `gh` and the fetch.
+    /// A fetched head other than `head` is `PrMoved`: a push came between `gh` and the fetch.
     pub fn fetch_pr(&self, number: u32, base: &str, head: &str) -> Result<(), RepoError> {
         let pr = format!("refs/stop-slop/pr-{number}");
         // Only the two refs the check reads: no tags, no fetch in submodules, which can fail

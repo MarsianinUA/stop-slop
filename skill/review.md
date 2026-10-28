@@ -2,11 +2,11 @@
 
 Draft review comments for a colleague's PR `<n>`. The run ends when the draft file is written and the user has its path; sending is a separate run ([send.md](send.md)), after the user says so. The working tree stays as it is.
 
-1. `stop-slop check --pr <n> --json`. It fetches the PR head into `refs/stop-slop/pr-<n>` and its base into `origin/<pr.base>`, where `pr` is the field of its output. When it exits with 2 and `next` holds this same command, the PR moved during the fetch: run it once more.
-2. Read `stop-slop rules --json`, and the project conventions (SKILL.md) at the PR revision: list them with `git ls-tree -r --name-only refs/stop-slop/pr-<n>`, read them with `git show refs/stop-slop/pr-<n>:<path>`.
-3. Judge every finding against the PR's code (`git show refs/stop-slop/pr-<n>:<file>`) and its diff (`git diff origin/<pr.base>...refs/stop-slop/pr-<n> -- <file>`). Drop:
+1. `stop-slop check --pr <n> --json`. It fetches the PR head into `refs/stop-slop/pr-<n>` and its base into `origin/<pr.base>`, where `pr` is the field of its output. When it exits with 2 and `next` holds this same command, the PR moved during the fetch: run it once more rather than stop.
+2. Read `stop-slop rules --json`, and the project conventions ([Project conventions win](SKILL.md#project-conventions-win)) at the PR revision: list them with `git ls-tree -r --name-only <pr.head>`, read them with `git show <pr.head>:<path>`.
+3. Judge every finding against the PR's code (`git show <pr.head>:<file>`) and its diff (`git diff origin/<pr.base>...<pr.head> -- <file>`). Drop:
    - false positives: a `candidate` its `agent` hint clears (where a hint says to ignore a finding, a review drops it), or an `error` the code proves wrong;
-   - what a convention allows (SKILL.md);
+   - what a convention allows ([Project conventions win](SKILL.md#project-conventions-win));
    - what is not the author's: an `inHunk: false` finding whose function the PR left alone, unless the PR made it worse. The function is the innermost one around the finding (for a parameter, the function that declares it), or its top-level declaration outside any function; the PR touched it when the diff changes a line of its code, not only its comments.
 
    When most of the codebase follows a habit a rule flags and no convention says so (every handler names its context `c`), keep the finding and point it out to the user. A `parse-error` goes to the user, not into a comment.
