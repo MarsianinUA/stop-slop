@@ -785,8 +785,8 @@ fn each_launch_has_span_as_its_max_duration_and_the_stop_of_its_service() {
 /// a `Backend` error; `logs_grow`: each `logs` of a VM is one line longer than the one before, as
 /// the output of a running service grows; `latency`: a `wait` that saw an exit returns this much
 /// after it, as the adapter's poll does, while `Exited.at` keeps when it ended; `entry`: a file
-/// whose presence each `create` and `destroy` notes in `seen`, by VM; `ends`: the `n`-th VM of a
-/// service ends with this code this long after its `create`, whatever its script says.
+/// whose presence each `create` and `destroy` notes in `seen`, by VM; `ends`: each `n`-th VM of a
+/// service named there ends with that code that long after its `create`, whatever its script says.
 struct Hooked<'f> {
     fake: &'f Fake,
     cancel_at: Option<&'static str>,
@@ -796,12 +796,12 @@ struct Hooked<'f> {
     fail_fault: bool,
     logs_grow: bool,
     latency: Duration,
-    ends: Option<(&'static str, usize, i32, Duration)>,
+    ends: Vec<(&'static str, usize, i32, Duration)>,
     /// VMs so far, by service.
     made: RefCell<BTreeMap<String, usize>>,
     hidden: RefCell<Vec<SandboxId>>,
-    /// The VM of `ends` once made, when it ends and its code.
-    ending: RefCell<Option<(SandboxId, Instant, i32)>>,
+    /// The VMs of `ends` once made and not yet ended: when each ends, and its code.
+    ending: RefCell<Vec<(SandboxId, Instant, i32)>>,
     /// `logs` calls so far, by VM.
     reads: RefCell<Vec<(SandboxId, usize)>>,
     /// The time each `exec` had left at its call.
@@ -821,10 +821,10 @@ impl<'f> Hooked<'f> {
             fail_fault: false,
             logs_grow: false,
             latency: Duration::ZERO,
-            ends: None,
+            ends: Vec::new(),
             made: RefCell::new(BTreeMap::new()),
             hidden: RefCell::new(Vec::new()),
-            ending: RefCell::new(None),
+            ending: RefCell::new(Vec::new()),
             reads: RefCell::new(Vec::new()),
             deadlines: RefCell::new(Vec::new()),
             entry: None,
@@ -867,11 +867,11 @@ impl Sandbox for Hooked<'_> {
             if self.hang == Some((launch.service.as_str(), n)) {
                 self.hidden.borrow_mut().push(id.clone());
             }
-            if let Some((service, nth, code, after)) = self.ends
-                && (service, nth) == (launch.service.as_str(), n)
-            {
-                let at = self.fake.now() + after;
-                *self.ending.borrow_mut() = Some((id.clone(), at, code));
+            for &(service, nth, code, after) in &self.ends {
+                if (service, nth) == (launch.service.as_str(), n) {
+                    let at = self.fake.now() + after;
+                    self.ending.borrow_mut().push((id.clone(), at, code));
+                }
             }
         }
         Ok(ids)
@@ -887,8 +887,11 @@ impl Sandbox for Hooked<'_> {
     fn wait(&self, what: &[Waitable], deadline: Instant) -> Result<Option<Exited>, SandboxError> {
         let hidden = self.hidden.borrow();
         let ending = self.ending.borrow().clone();
-        let ending = ending.filter(|(id, ..)| what.contains(&Waitable::Sandbox(id.clone())));
-        let own = |id: &SandboxId| ending.as_ref().is_some_and(|(ends, ..)| ends == id);
+        let ending = ending.into_iter();
+        let ending: Vec<_> = ending
+            .filter(|(id, ..)| what.contains(&Waitable::Sandbox(id.clone())))
+            .collect();
+        let own = |id: &SandboxId| ending.iter().any(|(ends, ..)| ends == id);
         let what: Vec<Waitable> = what
             .iter()
             .filter(
@@ -896,15 +899,16 @@ impl Sandbox for Hooked<'_> {
             )
             .cloned()
             .collect();
-        let until = ending
+        let first = ending.into_iter().min_by_key(|(_, at, _)| *at);
+        let until = first
             .as_ref()
             .map_or(deadline, |(_, at, _)| deadline.min(*at));
         let mut exited = self.fake.wait(&what, until)?;
         if exited.is_none()
-            && let Some((id, at, code)) = ending
+            && let Some((id, at, code)) = first
             && at <= deadline
         {
-            self.ending.take();
+            self.ending.borrow_mut().retain(|(ends, ..)| *ends != id);
             let what = Waitable::Sandbox(id);
             exited = Some(Exited {
                 what,
@@ -3498,7 +3502,7 @@ fn a_fault_repeat_turns_the_workload_code_its_timeout_and_a_dead_service_into_ca
     struct Ending {
         rules: Vec<Rule>,
         hang: Option<(&'static str, usize)>,
-        ends: Option<(&'static str, usize, i32, Duration)>,
+        ends: Vec<(&'static str, usize, i32, Duration)>,
         workload: Option<i32>,
         exited: &'static [&'static str],
     }
@@ -3507,7 +3511,7 @@ fn a_fault_repeat_turns_the_workload_code_its_timeout_and_a_dead_service_into_ca
         Ending {
             rules: fault_rules(),
             hang: None,
-            ends: Some(("load", 5, 3, 10 * SECOND)),
+            ends: vec![("load", 5, 3, 10 * SECOND)],
             workload: Some(3),
             exited: &[],
         },
@@ -3515,7 +3519,7 @@ fn a_fault_repeat_turns_the_workload_code_its_timeout_and_a_dead_service_into_ca
         Ending {
             rules: fault_rules(),
             hang: Some(("load", 5)),
-            ends: None,
+            ends: Vec::new(),
             workload: None,
             exited: &[],
         },
@@ -3523,7 +3527,15 @@ fn a_fault_repeat_turns_the_workload_code_its_timeout_and_a_dead_service_into_ca
         Ending {
             rules: fault_rules(),
             hang: None,
-            ends: Some(("api", 9, 1, 5 * SECOND)),
+            ends: vec![("api", 9, 1, 5 * SECOND)],
+            workload: Some(0),
+            exited: &["api"],
+        },
+        // Both replicas of `api` die under the fault: one service ended.
+        Ending {
+            rules: fault_rules(),
+            hang: None,
+            ends: vec![("api", 9, 1, 5 * SECOND), ("api", 10, 1, 6 * SECOND)],
             workload: Some(0),
             exited: &["api"],
         },
@@ -3531,7 +3543,7 @@ fn a_fault_repeat_turns_the_workload_code_its_timeout_and_a_dead_service_into_ca
         Ending {
             rules: replaced(fault_rules(), "api", healthy_late),
             hang: None,
-            ends: Some(("api", 9, 1, SECOND / 2)),
+            ends: vec![("api", 9, 1, SECOND / 2)],
             workload: None,
             exited: &["api"],
         },
@@ -3548,7 +3560,7 @@ fn a_fault_repeat_turns_the_workload_code_its_timeout_and_a_dead_service_into_ca
         let fake = fake(rules);
         let sandbox = Hooked {
             hang,
-            ends,
+            ends: ends.clone(),
             ..Hooked::new(&fake)
         };
         let raw = sandbox.run(&case, &case.versions(false)).unwrap();
@@ -3753,7 +3765,7 @@ fn a_failed_second_pass_is_a_fact_at_twice_the_timeout() {
     struct Failing {
         rules: Vec<Rule>,
         hang: Option<(&'static str, usize)>,
-        ends: Option<(&'static str, usize, i32, Duration)>,
+        ends: Vec<(&'static str, usize, i32, Duration)>,
         failure: (Phase, &'static str, Cause),
         out: &'static str,
         loads: usize,
@@ -3763,7 +3775,7 @@ fn a_failed_second_pass_is_a_fact_at_twice_the_timeout() {
         Failing {
             rules: pass_rules(),
             hang: Some(("load", 6)),
-            ends: None,
+            ends: Vec::new(),
             failure: (Phase::Workload, "load", Cause::Timeout),
             out: "out-2",
             loads: 2,
@@ -3772,7 +3784,7 @@ fn a_failed_second_pass_is_a_fact_at_twice_the_timeout() {
         Failing {
             rules: pass_rules(),
             hang: None,
-            ends: Some(("load", 5, 4, 10 * SECOND)),
+            ends: vec![("load", 5, 4, 10 * SECOND)],
             failure: (Phase::Workload, "load", Cause::Exit(4)),
             out: "out-1",
             loads: 1,
@@ -3781,7 +3793,7 @@ fn a_failed_second_pass_is_a_fact_at_twice_the_timeout() {
         Failing {
             rules: replaced(pass_rules(), "api", healthy_late),
             hang: None,
-            ends: Some(("api", 9, 1, SECOND / 2)),
+            ends: vec![("api", 9, 1, SECOND / 2)],
             failure: (Phase::Ready, "api", Cause::Died),
             out: "out-1",
             loads: 0,
