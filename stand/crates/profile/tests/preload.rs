@@ -10,7 +10,8 @@ use tempfile::TempDir;
 
 /// In a temp folder, the preload folder with `PRELOAD` in it, as the stand writes it, and the
 /// empty profile folder. Their paths have a space, and on Windows `\`, which `NODE_OPTIONS`
-/// reads as an escape inside `"`.
+/// reads as an escape inside `"`. The preload's has a `~`, as a Windows short name such as
+/// `RUNNER~1` does: `pathToFileURL` writes it `%7E`, V8's script URLs keep it.
 struct Folders {
     _temp: TempDir,
     dir: Utf8PathBuf,
@@ -22,7 +23,7 @@ impl Folders {
     fn new() -> Folders {
         let temp = tempfile::tempdir().expect("create a temp folder");
         let dir = Utf8PathBuf::try_from(temp.path().to_owned()).expect("a UTF-8 temp folder");
-        let preload = dir.join("the preload");
+        let preload = dir.join("the preload~1");
         let profile = dir.join("the profile");
         fs::create_dir(&preload).unwrap();
         fs::create_dir(&profile).unwrap();

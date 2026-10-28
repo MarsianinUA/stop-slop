@@ -22,7 +22,7 @@ function start(dir, coverage) {
   const fs = require('node:fs');
   const path = require('node:path');
   const inspector = require('node:inspector');
-  const { fileURLToPath, pathToFileURL } = require('node:url');
+  const { fileURLToPath } = require('node:url');
   const { threadId } = require('node:worker_threads');
 
   const pid = threadId === 0 ? String(process.pid) : `${process.pid}-t${threadId}`;
@@ -66,7 +66,6 @@ function start(dir, coverage) {
     post('Profiler.start');
   }
 
-  const self = pathToFileURL(__filename).href;
   const lineStarts = new Map();
   let chunk = 0;
   // A process killed hard (TerminateProcess on Windows, jest ending its workers) runs no
@@ -115,12 +114,23 @@ function start(dir, coverage) {
     const scripts = result.filter(
       (script) =>
         script.url.startsWith('file:') &&
-        script.url !== self &&
         !dependency.test(script.url) &&
+        !isSelf(script.url) &&
         script.functions.some((fn) => fn.ranges[0].count > 0) &&
         place(script),
     );
     return { kind: 'coverage.json', value: scripts, urls: scripts.map((script) => script.url) };
+  }
+
+  // Not against `pathToFileURL(__filename)`: it writes `~` as `%7E`, and V8's URL keeps it, as
+  // in the Windows short name `RUNNER~1`.
+  function isSelf(url) {
+    try {
+      return fileURLToPath(url) === __filename;
+    } catch {
+      // A vm script can be named any `file:` URL, even one with no path on this OS.
+      return false;
+    }
   }
 
   // The host has no copy of the generated script, so each function gets the line and column
