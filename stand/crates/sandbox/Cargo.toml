@@ -12,3 +12,9 @@ fake = []
 camino.workspace = true
 serde.workspace = true
 thiserror.workspace = true
+
+[dev-dependencies]
+sandbox = { path = ".", features = ["fake"] }
+# The tree case of the contract set writes a real tar.
+tar.workspace = true
+tempfile.workspace = true

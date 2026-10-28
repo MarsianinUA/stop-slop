@@ -8,6 +8,12 @@ use std::time::{Duration, Instant};
 use camino::{Utf8Path, Utf8PathBuf};
 use serde::Serialize;
 
+#[cfg(feature = "fake")]
+mod fake;
+
+#[cfg(feature = "fake")]
+pub use fake::{Call, Fake, Rule, Scenario, Script};
+
 pub trait Sandbox {
     /// Virtual in `Fake`: it moves only in `wait`.
     fn now(&self) -> Instant;
