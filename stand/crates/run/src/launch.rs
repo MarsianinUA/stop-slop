@@ -36,7 +36,7 @@ pub(crate) struct Frame<'a> {
     /// The host folder of `/stand/out` for the workload.
     pub(crate) out: &'a Utf8Path,
     /// The host folder of `/stand/out` for every service with a probe: `out`, but in the second
-    /// pass the folder of the repeat, which holds the `out-<n>/` of each pass for its probes.
+    /// pass the folder that holds the `out-<n>/` of each pass, so its probes reach both.
     pub(crate) probed: &'a Utf8Path,
     pub(crate) tar: &'a Utf8Path,
     pub(crate) seeds: &'a Seeds,

@@ -2,8 +2,10 @@
 //! relays of the repeat refuse or delay the target, and how the repeat ended is a category for
 //! the report, never a failure of the run.
 
-use report::{FaultOutcome, FaultRepeat, InstanceOutput};
-use sandbox::{Fault, FaultMode, Sandbox, SandboxError, SandboxId};
+use std::time::Duration;
+
+use report::{FaultOutcome, FaultRepeat};
+use sandbox::{Fault, FaultMode, Sandbox, SandboxError};
 use spec::ServiceKind;
 
 use crate::ready::Fleet;
@@ -27,39 +29,15 @@ fn target(fault: &spec::Fault) -> String {
     format!("{}:{}", target.service.as_str(), target.port.get())
 }
 
-/// The members from `from` on get the fault, the workload aside: it drives the repeat, and the
-/// fault is on what the app does. From now on a long-running member that ends does not halt.
-pub(crate) fn on(
-    sandbox: &impl Sandbox,
-    fleet: &mut Fleet,
-    from: usize,
-    fault: &Fault,
-) -> Result<(), SandboxError> {
-    fleet.under_fault = true;
-    let members = fleet.members[from..].iter();
-    let ids: Vec<SandboxId> = members
-        .filter(|member| member.kind != ServiceKind::Workload)
-        .map(|member| member.id.clone())
-        .collect();
-    if ids.is_empty() {
-        return Ok(());
-    }
-    sandbox.fault(&ids, fault)
-}
-
 /// How a fault repeat ended, read before its stop ends every service.
 pub(crate) struct Ends {
-    workload: Option<i32>,
-    exited: Vec<String>,
+    pub(crate) workload: Option<i32>,
+    pub(crate) exited: Vec<String>,
 }
 
-pub(crate) fn ends(fleet: &Fleet) -> Ends {
-    let workload = fleet
-        .members
-        .iter()
-        .find(|member| member.kind == ServiceKind::Workload)
-        .and_then(|member| member.exit)
-        .and_then(|(code, _)| code);
+pub(crate) fn ends(sandbox: &impl Sandbox, fleet: &mut Fleet) -> Result<Ends, SandboxError> {
+    fleet.ended(sandbox)?;
+    let workload = fleet.workload().and_then(|index| fleet.members[index].exit);
     let mut exited: Vec<String> = Vec::new();
     for member in &fleet.members {
         let service = &member.launch.service;
@@ -68,16 +46,10 @@ pub(crate) fn ends(fleet: &Fleet) -> Ends {
             exited.push(service.clone());
         }
     }
-    Ends { workload, exited }
-}
-
-pub(crate) fn repeat(repeat: u32, ends: Ends, instances: Vec<InstanceOutput>) -> FaultRepeat {
-    FaultRepeat {
-        repeat,
-        workload: ends.workload,
-        exited: ends.exited,
-        instances,
-    }
+    Ok(Ends {
+        workload: workload.and_then(|(code, _)| code),
+        exited,
+    })
 }
 
 pub(crate) fn outcome(
@@ -89,9 +61,20 @@ pub(crate) fn outcome(
         target: target(fault),
         mode: match fault.mode {
             spec::FaultMode::Down => "down".to_owned(),
-            spec::FaultMode::Slow(delay) => format!("slow {}ms", delay.as_millis()),
+            spec::FaultMode::Slow(delay) => format!("slow {}ms", millis(delay)),
         },
         head,
         before,
     }
+}
+
+/// `2s` is `2000`, `1500us` is `1.5`: whole milliseconds would turn a finer delay into another.
+fn millis(delay: Duration) -> String {
+    let nanos = delay.as_nanos();
+    let (whole, rest) = (nanos / 1_000_000, nanos % 1_000_000);
+    if rest == 0 {
+        return whole.to_string();
+    }
+    let fraction = format!("{rest:06}");
+    format!("{whole}.{}", fraction.trim_end_matches('0'))
 }

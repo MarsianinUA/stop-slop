@@ -146,7 +146,7 @@ pub(crate) fn drain(
     Ok(())
 }
 
-/// One member out of `fleet` before its phase ends: its logs into `log`, then `destroy`.
+/// One member before its phase ends, without `copy_out`: the first workload of a second pass.
 pub(crate) fn release(
     sandbox: &impl Sandbox,
     fleet: &mut Fleet,

@@ -785,8 +785,8 @@ fn each_launch_has_span_as_its_max_duration_and_the_stop_of_its_service() {
 /// a `Backend` error; `logs_grow`: each `logs` of a VM is one line longer than the one before, as
 /// the output of a running service grows; `latency`: a `wait` that saw an exit returns this much
 /// after it, as the adapter's poll does, while `Exited.at` keeps when it ended; `entry`: a file
-/// whose presence each `create` and `destroy` notes in `seen`, by VM; `ends`: each `n`-th VM of a
-/// service named there ends with that code that long after its `create`, whatever its script says.
+/// whose presence each `create` and `destroy` notes in `seen`, by VM; `ends`: VMs that end on
+/// their own.
 struct Hooked<'f> {
     fake: &'f Fake,
     cancel_at: Option<&'static str>,
@@ -796,7 +796,7 @@ struct Hooked<'f> {
     fail_fault: bool,
     logs_grow: bool,
     latency: Duration,
-    ends: Vec<(&'static str, usize, i32, Duration)>,
+    ends: Vec<End>,
     /// VMs so far, by service.
     made: RefCell<BTreeMap<String, usize>>,
     hidden: RefCell<Vec<SandboxId>>,
@@ -808,6 +808,16 @@ struct Hooked<'f> {
     deadlines: RefCell<Vec<Duration>>,
     entry: Option<Utf8PathBuf>,
     seen: RefCell<Vec<(SandboxId, bool)>>,
+}
+
+/// The `nth` VM of `service`, from 1, ends with `code` that long after its `create`, whatever its
+/// script says.
+#[derive(Debug, Clone, Copy)]
+struct End {
+    service: &'static str,
+    nth: usize,
+    code: i32,
+    after: Duration,
 }
 
 impl<'f> Hooked<'f> {
@@ -867,10 +877,10 @@ impl Sandbox for Hooked<'_> {
             if self.hang == Some((launch.service.as_str(), n)) {
                 self.hidden.borrow_mut().push(id.clone());
             }
-            for &(service, nth, code, after) in &self.ends {
-                if (service, nth) == (launch.service.as_str(), n) {
-                    let at = self.fake.now() + after;
-                    self.ending.borrow_mut().push((id.clone(), at, code));
+            for end in &self.ends {
+                if (end.service, end.nth) == (launch.service.as_str(), n) {
+                    let at = self.fake.now() + end.after;
+                    self.ending.borrow_mut().push((id.clone(), at, end.code));
                 }
             }
         }
@@ -886,10 +896,12 @@ impl Sandbox for Hooked<'_> {
     }
     fn wait(&self, what: &[Waitable], deadline: Instant) -> Result<Option<Exited>, SandboxError> {
         let hidden = self.hidden.borrow();
-        let ending = self.ending.borrow().clone();
-        let ending = ending.into_iter();
-        let ending: Vec<_> = ending
+        let ending: Vec<(SandboxId, Instant, i32)> = self
+            .ending
+            .borrow()
+            .iter()
             .filter(|(id, ..)| what.contains(&Waitable::Sandbox(id.clone())))
+            .cloned()
             .collect();
         let own = |id: &SandboxId| ending.iter().any(|(ends, ..)| ends == id);
         let what: Vec<Waitable> = what
@@ -1176,10 +1188,12 @@ fn out_of(launch: &Launch) -> Option<&Utf8Path> {
     })
 }
 
-/// The folder of the phase whose `/stand/out` `launch` binds: `setup-head`, `repeat-2-before`.
+/// The folder of the phase whose `/stand/out` `launch` binds: `setup-head`, `repeat-2-before`,
+/// `pass2-head` (for its `out/` and for each `out/out-<n>/`).
 fn phase_of(launch: &Launch) -> &str {
     let out = out_of(launch).expect("a bind of /stand/out");
-    out.parent().unwrap().file_name().unwrap()
+    let mut folders = out.ancestors().filter_map(Utf8Path::file_name);
+    folders.find(|name| !name.starts_with("out")).unwrap()
 }
 
 /// The folder of each phase that started the workload, by name, in order.
@@ -3222,14 +3236,27 @@ fn inspect_of_a_service_that_exits_or_stays_unhealthy_did_not_start_and_cancel_d
 
 // --- the repeats outside the stats -------------------------------------------------------------
 
+/// `EXAMPLE` with more keys of the top-level `x-stand`, each line indented as they are.
+fn with_x_stand(lines: &str) -> String {
+    EXAMPLE.replace("  workload: load\n", &format!("  workload: load\n{lines}"))
+}
+
 /// `EXAMPLE` with the fault on `db:5432` and the second pass: the stand asks for every repeat
 /// outside the stats.
 fn every_repeat() -> String {
-    EXAMPLE.replace(
-        "  workload: load\n",
-        "  workload: load\n  fault: { target: \"db:5432\", mode: down }\n  second_pass: true\n",
-    )
+    with_x_stand("  fault: { target: \"db:5432\", mode: down }\n  second_pass: true\n")
 }
+
+/// The folders of the fault repeats, in their turns.
+const FAULTS: [&str; 4] = [
+    "fault-1-before",
+    "fault-1-head",
+    "fault-2-before",
+    "fault-2-head",
+];
+
+/// The folder of each start of the workload in the second passes: two per pass.
+const PASSES: [&str; 4] = ["pass2-before", "pass2-before", "pass2-head", "pass2-head"];
 
 /// The folder of each phase past the measured repeats that started the workload, in order.
 fn outside_folders(case: &Case, journal: &[Call]) -> Vec<String> {
@@ -3242,21 +3269,13 @@ fn outside_folders(case: &Case, journal: &[Call]) -> Vec<String> {
 #[test]
 fn the_set_of_extras_runs_only_what_it_names_and_the_stand_asks_for() {
     let span = run::span(&Case::new(&every_repeat()).stand);
-    let faults = [
-        "fault-1-before",
-        "fault-1-head",
-        "fault-2-before",
-        "fault-2-head",
-    ];
-    // The workload starts twice in each second pass.
-    let passes = ["pass2-before", "pass2-before", "pass2-head", "pass2-head"];
-    let both = [faults.as_slice(), &passes].concat();
+    let both = [FAULTS.as_slice(), &PASSES].concat();
     let every = [&["coverage"][..], &both].concat();
     let sets: [(&[Extra], &[&str]); 6] = [
         (&[], &[]),
         (&[Extra::Coverage], &["coverage"]),
-        (&[Extra::Fault], &faults),
-        (&[Extra::SecondPass], &passes),
+        (&[Extra::Fault], &FAULTS),
+        (&[Extra::SecondPass], &PASSES),
         (&[Extra::Fault, Extra::SecondPass], &both),
         (&[Extra::Coverage, Extra::Fault, Extra::SecondPass], &every),
     ];
@@ -3290,10 +3309,7 @@ fn the_set_of_extras_runs_only_what_it_names_and_the_stand_asks_for() {
 
 /// `EXAMPLE` with `fault` on `db:5432`.
 fn under_fault(fault: &str) -> String {
-    EXAMPLE.replace(
-        "  workload: load\n",
-        &format!("  workload: load\n  fault: {{ target: \"db:5432\", {fault} }}\n"),
-    )
+    with_x_stand(&format!("  fault: {{ target: \"db:5432\", {fault} }}\n"))
 }
 
 /// Metrics whose only port is `target`, with `connections` dropped before their first byte.
@@ -3348,14 +3364,8 @@ fn two_fault_repeats_per_version_take_turns_after_the_measured_ones_with_the_fau
     let fake = fake(fault_rules());
     let raw = case.run(&fake, &case.versions(true)).unwrap();
     let journal = fake.journal();
-    let turns = [
-        "fault-1-before",
-        "fault-1-head",
-        "fault-2-before",
-        "fault-2-head",
-    ];
     let mut folders = vec!["coverage"];
-    folders.extend(turns);
+    folders.extend(FAULTS);
     assert_eq!(outside_folders(&case, &journal), folders);
     let Some(fault) = &raw.fault else {
         panic!("no fault outcome")
@@ -3365,23 +3375,21 @@ fn two_fault_repeats_per_version_take_turns_after_the_measured_ones_with_the_fau
         ("db:5432", "down")
     );
     let before = fault.before.as_ref().expect("the fault repeats of before");
-    // The relays of the app see the fault; the workload, which drives the repeat, does not.
-    let drops = [("db-1", 0), ("api-1", 7), ("api-2", 7), ("load-1", 0)];
-    let drops: Vec<(String, u64)> = drops.iter().map(|(vm, n)| (vm.to_string(), *n)).collect();
     for repeats in [&fault.head, before] {
         let numbers: Vec<u32> = repeats.iter().map(|repeat| repeat.repeat).collect();
         assert_eq!(numbers, [1, 2]);
         for repeat in repeats {
             assert_eq!((repeat.workload, repeat.exited.len()), (Some(0), 0));
-            let seen: Vec<(String, u64)> = repeat
+            let seen: Vec<(&str, u32, u64)> = repeat
                 .instances
                 .iter()
                 .map(|instance| {
                     let dropped = instance.metrics.ports.iter().map(|port| port.drops);
-                    let vm = format!("{}-{}", instance.service, instance.replica);
-                    (vm, dropped.sum())
+                    (instance.service.as_str(), instance.replica, dropped.sum())
                 })
                 .collect();
+            // The relays of the app see the fault; the workload, which drives the repeat, does not.
+            let drops = [("db", 1, 0), ("api", 1, 7), ("api", 2, 7), ("load", 1, 0)];
             assert_eq!(seen, drops);
             let profiles = repeat.instances.iter().map(|instance| &instance.profile);
             assert!(profiles.into_iter().all(Option::is_none));
@@ -3393,7 +3401,7 @@ fn two_fault_repeats_per_version_take_turns_after_the_measured_ones_with_the_fau
     let switches = faults(&journal);
     assert_eq!(switches.len(), 4);
     let last = made[made.len() - 16..].chunks(4);
-    for (chunk, ((index, vms, switch), folder)) in last.zip(switches.iter().zip(turns)) {
+    for (chunk, ((index, vms, switch), folder)) in last.zip(switches.iter().zip(FAULTS)) {
         let names: Vec<String> = chunk.iter().map(|(launch, _)| vm(launch)).collect();
         assert_eq!(names, ["db-1", "api-1", "api-2", "load-1"]);
         assert_eq!(
@@ -3450,6 +3458,13 @@ fn two_fault_repeats_per_version_take_turns_after_the_measured_ones_with_the_fau
     }
     assert_clean(&fake, &case.left());
 
+    // A delay finer than a millisecond keeps its fraction in the mode.
+    let case = Case::new(&under_fault("mode: slow, delay: 1500us"));
+    let fake = crate::fake(fault_rules());
+    let raw = case.run(&fake, &case.versions(false)).unwrap();
+    assert_eq!(raw.fault.unwrap().mode, "slow 1.5ms");
+    assert_clean(&fake, &case.left());
+
     // `cache` starts with the workload and `side` after it: each gets the fault right after its
     // `create`, the workload never.
     let case = Case::new(&AFTER_THE_WORKLOAD.replace(
@@ -3476,17 +3491,41 @@ fn two_fault_repeats_per_version_take_turns_after_the_measured_ones_with_the_fau
         let batch: Vec<&str> = batch.iter().map(|launch| launch.service.as_str()).collect();
         seen.push((vms.join(" "), batch.join(" ")));
     }
+    let seen: Vec<(&str, &str)> = seen
+        .iter()
+        .map(|(vms, batch)| (vms.as_str(), batch.as_str()))
+        .collect();
     let each = [
         ("db-1", "db"),
         ("cache-1", "cache load"),
         ("side-1", "side"),
     ];
-    let each: Vec<(String, String)> = each
-        .iter()
-        .map(|(vms, batch)| (vms.to_string(), batch.to_string()))
-        .collect();
-    assert_eq!(seen, [&each[..], &each[..]].concat());
+    assert_eq!(seen, [each, each].concat());
     assert_clean(&fake, &case.left());
+}
+
+/// `api` fails its first healthcheck, so it is healthy a second after its start at the earliest.
+fn healthy_late() -> Script {
+    Script {
+        health: vec![Some(1), Some(0)],
+        ..stops(SECOND)
+    }
+}
+
+fn end(service: &'static str, nth: usize, code: i32, after: Duration) -> End {
+    End {
+        service,
+        nth,
+        code,
+        after,
+    }
+}
+
+/// The index of the first VM of the phase in `folder`, among those that bind `/stand/out`.
+fn first_in(made: &[(Launch, SandboxId)], folder: &str) -> usize {
+    let mut made = made.iter();
+    let first = made.position(|(launch, _)| out_of(launch).is_some() && phase_of(launch) == folder);
+    first.unwrap()
 }
 
 #[test]
@@ -3494,15 +3533,11 @@ fn a_fault_repeat_turns_the_workload_code_its_timeout_and_a_dead_service_into_ca
     // Head only. By service, the VMs of setup come first, then those of the three measured repeats
     // and the coverage repeat: the first fault repeat makes the fifth `load` and the ninth and
     // tenth `api`.
-    let healthy_late = Script {
-        health: vec![Some(1), Some(0)],
-        ..stops(SECOND)
-    };
     /// `hang` and `ends` of `Hooked`, and the categories of the first fault repeat.
     struct Ending {
         rules: Vec<Rule>,
         hang: Option<(&'static str, usize)>,
-        ends: Vec<(&'static str, usize, i32, Duration)>,
+        ends: Vec<End>,
         workload: Option<i32>,
         exited: &'static [&'static str],
     }
@@ -3511,7 +3546,7 @@ fn a_fault_repeat_turns_the_workload_code_its_timeout_and_a_dead_service_into_ca
         Ending {
             rules: fault_rules(),
             hang: None,
-            ends: vec![("load", 5, 3, 10 * SECOND)],
+            ends: vec![end("load", 5, 3, 10 * SECOND)],
             workload: Some(3),
             exited: &[],
         },
@@ -3527,7 +3562,7 @@ fn a_fault_repeat_turns_the_workload_code_its_timeout_and_a_dead_service_into_ca
         Ending {
             rules: fault_rules(),
             hang: None,
-            ends: vec![("api", 9, 1, 5 * SECOND)],
+            ends: vec![end("api", 9, 1, 5 * SECOND)],
             workload: Some(0),
             exited: &["api"],
         },
@@ -3535,15 +3570,24 @@ fn a_fault_repeat_turns_the_workload_code_its_timeout_and_a_dead_service_into_ca
         Ending {
             rules: fault_rules(),
             hang: None,
-            ends: vec![("api", 9, 1, 5 * SECOND), ("api", 10, 1, 6 * SECOND)],
+            ends: vec![end("api", 9, 1, 5 * SECOND), end("api", 10, 1, 6 * SECOND)],
             workload: Some(0),
             exited: &["api"],
         },
+        // `db` and `api` die the moment the workload ends, 30 s after all three started: no wait
+        // gave their exits yet, the look before the cut does.
+        Ending {
+            rules: fault_rules(),
+            hang: None,
+            ends: vec![end("db", 6, 1, 30 * SECOND), end("api", 9, 1, 30 * SECOND)],
+            workload: Some(0),
+            exited: &["db", "api"],
+        },
         // `api` dies before it is healthy, so before the fault: the workload never starts.
         Ending {
-            rules: replaced(fault_rules(), "api", healthy_late),
+            rules: replaced(fault_rules(), "api", healthy_late()),
             hang: None,
-            ends: vec![("api", 9, 1, SECOND / 2)],
+            ends: vec![end("api", 9, 1, SECOND / 2)],
             workload: None,
             exited: &["api"],
         },
@@ -3577,7 +3621,8 @@ fn a_fault_repeat_turns_the_workload_code_its_timeout_and_a_dead_service_into_ca
         let journal = fake.journal();
         if hang.is_some() {
             // The deadline is `timeout` from the start of the repeat.
-            let db = &created(&journal)[3 + 4 * 4].1;
+            let made = created(&journal);
+            let db = &made[first_in(&made, "fault-1-head")].1;
             assert_eq!(waited(&journal, db), 299 * SECOND);
         }
         assert_clean(&fake, &case.left());
@@ -3611,15 +3656,10 @@ fn a_fault_repeat_turns_the_workload_code_its_timeout_and_a_dead_service_into_ca
 fn twice() -> String {
     let unchanged = "{ unchanged: [{ file: probe.orders.jsonl, reason: \"a read\" }, \
                      { file: orders.jsonl, reason: \"the same orders\" }] }";
-    EXAMPLE
-        .replace(
-            "  workload: load\n",
-            &format!("  workload: load\n  second_pass: true\n  expect: {unchanged}\n"),
-        )
-        .replace(
-            "    command: [\"node\", \"load.js\", \"http://api:3000\"]\n",
-            "    command: [\"node\", \"load.js\", \"http://api:3000\"]\n    expose: [9000]\n",
-        )
+    with_x_stand(&format!("  second_pass: true\n  expect: {unchanged}\n")).replace(
+        "    command: [\"node\", \"load.js\", \"http://api:3000\"]\n",
+        "    command: [\"node\", \"load.js\", \"http://api:3000\"]\n    expose: [9000]\n",
+    )
 }
 
 /// Metrics whose only port is `target`, with `open` connections still open.
@@ -3661,10 +3701,9 @@ fn the_second_pass_runs_the_workload_twice_on_one_state() {
     let fake = fake(pass_rules());
     let raw = case.run(&fake, &case.versions(true)).unwrap();
     let journal = fake.journal();
-    let passes = ["pass2-before", "pass2-before", "pass2-head", "pass2-head"];
     assert_eq!(
         outside_folders(&case, &journal),
-        [&["coverage"][..], &passes].concat()
+        [&["coverage"][..], &PASSES].concat()
     );
     let Some(pass) = &raw.second_pass else {
         panic!("no second pass")
@@ -3691,14 +3730,20 @@ fn the_second_pass_runs_the_workload_twice_on_one_state() {
             ["db-1", "api-1", "api-2", "load-1", "load-1"],
             "{side}"
         );
-        // `db` binds the folder of the repeat; each workload its own `out-<n>`.
+        // `db` binds `out/`, each workload its own `out/out-<n>`; the host writes nothing of its
+        // own below the bind of a guest.
+        let probed = dir.join("out");
         let outs: Vec<Utf8PathBuf> = chunk
             .iter()
             .filter_map(|(launch, _)| out_of(launch).map(Utf8Path::to_owned))
             .collect();
-        assert_eq!(outs, [dir.clone(), dir.join("out-1"), dir.join("out-2")]);
+        assert_eq!(
+            outs,
+            [probed.clone(), probed.join("out-1"), probed.join("out-2")]
+        );
+        assert_eq!(names_in(&probed), ["out-1", "out-2"], "{side}");
         for (n, pass) in [(1, first), (2, second)] {
-            let out = dir.join(format!("out-{n}"));
+            let out = probed.join(format!("out-{n}"));
             assert_eq!(pass.out_dir, out);
             assert_eq!(ran(&pass.probes), ["orders"]);
             assert_eq!(pass.probes[0].out, out.join("probe.orders.jsonl"));
@@ -3721,7 +3766,7 @@ fn the_second_pass_runs_the_workload_twice_on_one_state() {
         let at = |matches: &dyn Fn(&Call) -> bool| index_of(&journal, matches);
         let cut = at(&|call| matches!(call, Call::Metrics(id) if id == first_load));
         let probe = at(
-            &|call| matches!(call, Call::Exec { stdout, .. } if *stdout == dir.join("out-1/probe.orders.jsonl")),
+            &|call| matches!(call, Call::Exec { stdout, .. } if *stdout == probed.join("out-1/probe.orders.jsonl")),
         );
         let gone = at(&|call| matches!(call, Call::Destroy(id) if id == first_load));
         let again =
@@ -3757,15 +3802,11 @@ fn a_failed_second_pass_is_a_fact_at_twice_the_timeout() {
     // Head only. By service, the VMs of setup come first, then those of the three measured repeats
     // and the coverage repeat: the second pass makes the fifth and sixth `load` and the ninth and
     // tenth `api`.
-    let healthy_late = Script {
-        health: vec![Some(1), Some(0)],
-        ..stops(SECOND)
-    };
     /// `hang` and `ends` of `Hooked`, the failure and the probe folder of the pass that failed.
     struct Failing {
         rules: Vec<Rule>,
         hang: Option<(&'static str, usize)>,
-        ends: Vec<(&'static str, usize, i32, Duration)>,
+        ends: Vec<End>,
         failure: (Phase, &'static str, Cause),
         out: &'static str,
         loads: usize,
@@ -3784,16 +3825,16 @@ fn a_failed_second_pass_is_a_fact_at_twice_the_timeout() {
         Failing {
             rules: pass_rules(),
             hang: None,
-            ends: vec![("load", 5, 4, 10 * SECOND)],
+            ends: vec![end("load", 5, 4, 10 * SECOND)],
             failure: (Phase::Workload, "load", Cause::Exit(4)),
             out: "out-1",
             loads: 1,
         },
         // `api` dies before it is healthy: no workload.
         Failing {
-            rules: replaced(pass_rules(), "api", healthy_late),
+            rules: replaced(pass_rules(), "api", healthy_late()),
             hang: None,
-            ends: vec![("api", 9, 1, SECOND / 2)],
+            ends: vec![end("api", 9, 1, SECOND / 2)],
             failure: (Phase::Ready, "api", Cause::Died),
             out: "out-1",
             loads: 0,
@@ -3826,7 +3867,7 @@ fn a_failed_second_pass_is_a_fact_at_twice_the_timeout() {
             repeat: None,
             cause,
             logs: Some(dir.clone()),
-            probes: vec![dir.join(out).join("probe.last.jsonl")],
+            probes: vec![dir.join("out").join(out).join("probe.last.jsonl")],
         };
         assert!(
             matches!(&pass.head, PassPair::Failed(failure) if *failure == expected),
@@ -3835,17 +3876,15 @@ fn a_failed_second_pass_is_a_fact_at_twice_the_timeout() {
         );
         let journal = fake.journal();
         let made = created(&journal);
-        let second: Vec<String> = made[3 + 4 * 4..]
-            .iter()
-            .map(|(launch, _)| vm(launch))
-            .collect();
+        let first = first_in(&made, "pass2-head");
+        let second: Vec<String> = made[first..].iter().map(|(launch, _)| vm(launch)).collect();
         let mut expected = vec!["db-1", "api-1", "api-2"];
         expected.extend(vec!["load-1"; loads]);
         assert_eq!(second, expected, "{service}");
         assert!(dir.join("metrics.json").is_file() && dir.join("db-1.log").is_file());
         if hang.is_some() {
             // The first wait ends a chunk of 1 s after the start, the last one at the deadline.
-            let db = &made[3 + 4 * 4].1;
+            let db = &made[first].1;
             assert_eq!(waited(&journal, db), (600 - 1) * SECOND);
         }
         assert_clean(&fake, &case.left());

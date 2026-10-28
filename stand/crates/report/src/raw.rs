@@ -121,7 +121,7 @@ pub enum CoverageOutcome {
 pub struct FaultOutcome {
     /// `<service>:<port>`.
     pub target: String,
-    /// `down`, or `slow <delay>ms`.
+    /// `down`, or `slow <delay>ms`: `slow 2000ms`, `slow 1.5ms`.
     pub mode: String,
     pub head: Vec<FaultRepeat>,
     /// `None` without `Versions.before`, or when "before" failed.
@@ -252,15 +252,6 @@ impl Cause {
     }
 }
 
-/// The repeats outside the stats: `run` runs those in its set, `Context.reused` names those
-/// copied from the pool (plan, row 89).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub enum Extra {
-    Coverage,
-    Fault,
-    SecondPass,
-}
-
 impl Serialize for Cause {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         serializer.collect_str(self)
@@ -272,6 +263,15 @@ impl<'de> Deserialize<'de> for Cause {
         let text = String::deserialize(deserializer)?;
         Ok(Cause::parse(&text))
     }
+}
+
+/// The repeats outside the stats: `run` runs those in its set, `Context.reused` names those
+/// copied from the pool (plan, row 89).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Extra {
+    Coverage,
+    Fault,
+    SecondPass,
 }
 
 #[cfg(test)]
