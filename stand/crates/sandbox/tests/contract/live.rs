@@ -1079,7 +1079,7 @@ fn live_trim_keeps_deleted_blocks_out_and_a_failed_trim_still_snapshots() {
         code == Some(125) && said.contains("not supported by its file system"),
         "the trim of the untrimmed VM: {code:?} {said}"
     );
-    // On CI's Linux runner the trim saved nothing: whether the guest's disks take discards.
+    // Whether the guest's disks take discards: on CI's Linux runner the volume's did not.
     let (_, disks) = case.plain(
         &ids[1],
         "grep ' /data ' /proc/mounts; grep . /sys/block/vd*/queue/discard_max_bytes",
@@ -1106,8 +1106,9 @@ fn live_trim_keeps_deleted_blocks_out_and_a_failed_trim_still_snapshots() {
         with <= without,
         "with trim {with} bytes, after a failed trim {without}"
     );
-    // Only Windows showed the saving: on CI's Linux runner both snapshots were 66 MiB, for a
-    // cause not found, and the Mac is not measured yet.
+    // Only Windows showed the saving: on CI's Linux runner the volume's disk had
+    // `discard_max_bytes` 0, so the trim failed there too and both snapshots were 66 MiB. The
+    // Mac is not measured yet.
     if cfg!(windows) {
         assert!(
             without >= with + (48 << 20),
