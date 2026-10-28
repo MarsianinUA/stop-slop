@@ -3608,6 +3608,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "run"
+version = "0.1.0"
+dependencies = [
+ "camino",
+ "guest",
+ "profile",
+ "report",
+ "sandbox",
+ "serde",
+ "serde_json",
+ "spec",
+ "tempfile",
+ "thiserror",
+]
+
+[[package]]
 name = "rust_decimal"
 version = "1.43.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
