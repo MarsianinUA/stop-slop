@@ -215,10 +215,15 @@ impl Repo {
     /// `PrMoved`: a push came between `gh` and the fetch.
     pub fn fetch_pr(&self, number: u32, base: &str, head: &str) -> Result<(), RepoError> {
         let pr = format!("refs/stop-slop/pr-{number}");
+        // Only the two refs the check reads: no tags, no fetch in submodules, which can fail
+        // the whole run, and no `maintenance --auto`, whose gc cannot detach on Windows.
         git::run(
             &self.root,
             &[
                 "fetch",
+                "--no-tags",
+                "--no-recurse-submodules",
+                "--no-auto-maintenance",
                 "origin",
                 &format!("+refs/pull/{number}/head:{pr}"),
                 &format!("+refs/heads/{base}:refs/remotes/origin/{base}"),

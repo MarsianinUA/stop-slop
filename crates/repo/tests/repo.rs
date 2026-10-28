@@ -576,12 +576,21 @@ fn fetch_pr_takes_the_head_and_the_base_from_origin() {
     let url = origin.path().to_str().expect("a UTF-8 temp path");
     t.git(&["init", "-q", "--bare", url]);
     // By URL: no `origin/*` refs exist before the fetch.
-    t.git(&["push", "-q", url, "main", "pr:refs/pull/1/head"]);
+    t.git(&[
+        "push",
+        "-q",
+        url,
+        "main",
+        "pr:refs/pull/1/head",
+        "pr:refs/tags/v1",
+    ]);
     t.git(&["remote", "add", "origin", url]);
 
     open(&t).fetch_pr(1, "main", &head).unwrap();
     assert_eq!(t.git(&["rev-parse", "refs/stop-slop/pr-1"]), head);
     assert_eq!(t.git(&["rev-parse", "refs/remotes/origin/main"]), main);
+    // A plain fetch would bring `v1` along, as it sits on the head.
+    assert_eq!(t.git(&["tag", "--list"]), "");
 
     match open(&t).fetch_pr(1, "main", &main) {
         Err(RepoError::PrMoved { number: 1 }) => {}

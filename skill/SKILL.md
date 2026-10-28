@@ -17,7 +17,7 @@ Run `stop-slop` inside the repository. If the command is missing, tell the user 
 - `--json` prints one line. Leave `--pretty` off: it indents the same JSON by 2 spaces for a person, and the indents cost you tokens.
 - `stop-slop check --json` prints `pr` (`null` without `--pr`), `base`, `files` (the branch files it checked: commits, uncommitted edits and untracked files), `skipped`, `findings` and `fixed` (`rule`, `file`, `count` of the fixes `--fix` applied).
   - `pr` has `number`, `head` (the full sha), `base` (the branch name, without `origin/`) and `title`.
-  - `base` has `ref`, `sha` and `reason`: `flag` (given with `--base`), `pr` (the base of the branch's PR), `ancestor` (the nearest ancestor branch) or `default` (`origin/HEAD`).
+  - `base` has `ref`, `sha` and `reason`: `flag` (given with `--base`), `pr` (the base of the PR: of `--pr`, or of the branch), `ancestor` (the nearest ancestor branch) or `default` (`origin/HEAD`).
 - A finding has `rule`, `kind`, `file`, `line`, `column`, `endLine`, `endColumn`, `message`, `inHunk`, `fixable`, `fingerprint`.
   - `kind`: `error` means the rule is sure; `candidate` is a heuristic you decide with the rule's `agent` hint; `parse-error` means the file did not parse, so no rule ran on it.
   - `inHunk: true` puts the finding on a line the branch changed; `false` is old code in a touched file.

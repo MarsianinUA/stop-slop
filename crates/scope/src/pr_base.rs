@@ -71,7 +71,8 @@ fn from_view(number: u32, stdout: &[u8]) -> Option<PullRequest> {
     let head = lines.next()?.trim();
     let base = lines.next()?.trim();
     let title = lines.next()?.trim_end();
-    let is_oid = !head.is_empty() && head.bytes().all(|byte| byte.is_ascii_hexdigit());
+    // 64 in a SHA-256 repo. A cut head would otherwise read as a moved PR.
+    let is_oid = matches!(head.len(), 40 | 64) && head.bytes().all(|byte| byte.is_ascii_hexdigit());
     (is_oid && !base.is_empty()).then(|| PullRequest {
         number,
         head: head.to_owned(),
@@ -120,6 +121,7 @@ mod tests {
             (format!("{HEAD}\ndev\nCache prices\n"), "Cache prices"),
             (format!("{HEAD}\r\ndev\r\nFix: cache\r\n"), "Fix: cache"),
             (format!("{HEAD}\ndev\nTwo\nlines\n"), "Two\nlines"),
+            (format!("{HEAD}\ndev\n\n"), ""),
         ] {
             assert_eq!(from_view(7, stdout.as_bytes()), Some(pr(title)), "{stdout}");
         }
@@ -135,6 +137,7 @@ mod tests {
             format!("{HEAD}\n\nTitle\n"),
             "\ndev\nTitle\n".to_owned(),
             "main\ndev\nTitle\n".to_owned(),
+            format!("{}\ndev\nTitle\n", &HEAD[..7]),
         ] {
             assert_eq!(from_view(7, stdout.as_bytes()), None, "{stdout:?}");
         }
