@@ -14,7 +14,6 @@ enum Shape {
     },
     /// A mapping of names, such as services, each value of this shape.
     Names(&'static Shape),
-    /// A list, each item of this shape.
     Items(&'static Shape),
     Value,
 }

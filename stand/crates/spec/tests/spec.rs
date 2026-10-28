@@ -785,6 +785,32 @@ fn a_fault_targets_an_exposed_port_and_slow_has_a_delay() {
             12,
             "`flaky` is not",
         ),
+        (
+            "fault-down-delay",
+            "x-stand.fault.delay",
+            12,
+            "for `mode: slow`",
+        ),
+    ]);
+}
+
+#[test]
+fn what_the_stand_would_not_honour_is_refused_at_its_key() {
+    assert_refused(&[
+        (
+            "mount-twice",
+            "services.load.volumes[1]",
+            4,
+            "a second mount on `/harness`",
+        ),
+        ("port-twice", "services.load.expose[1]", 4, "listed twice"),
+        (
+            "tag",
+            "services.load.image",
+            3,
+            "YAML tags are not supported",
+        ),
+        ("volume-keys", "volumes.data.driver", 7, "takes no key"),
     ]);
 }
 

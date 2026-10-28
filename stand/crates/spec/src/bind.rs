@@ -98,7 +98,6 @@ pub(crate) fn name(field: &Field, name: &str) -> Result<String, Invalid> {
     Err(field.invalid(message))
 }
 
-/// The service a string field names.
 pub(crate) fn service_named(
     services: &BTreeMap<ServiceName, Service>,
     field: &Field,
@@ -111,7 +110,6 @@ pub(crate) fn service_named(
         .ok_or_else(|| field.invalid(format!("no service `{name}`")))
 }
 
-/// The value of `key`; `None` when the key is not there.
 pub(crate) fn optional<'a, T>(
     field: &Field<'a>,
     key: &str,
