@@ -26,12 +26,11 @@ struct Pin {
     aarch64: &'static str,
 }
 
-/// The commit `Pin stand-guest 0.1.0` puts the first field of each `.sha256` of the release here;
-/// until then only `STOP_SLOP_STAND_GUEST` works.
+/// The first field of each `.sha256` of the release `guest-v<version>`.
 const PIN: Pin = Pin {
     version: "0.1.0",
-    x86_64: "0000000000000000000000000000000000000000000000000000000000000000",
-    aarch64: "0000000000000000000000000000000000000000000000000000000000000000",
+    x86_64: "f28c4e941ba7dd69ad2e4be38fb01b9d1a152eada5fa5498765b6584f8ed871c",
+    aarch64: "b42a1f30839c039eb65ec462219c362ed8d4229eb454665bcee7b40585000154",
 };
 
 /// `version` goes into `Pulled.guest`.

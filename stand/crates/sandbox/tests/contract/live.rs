@@ -1,5 +1,5 @@
 //! The shared cases on `Microsandbox`, and the cases only a real guest shows. Run with
-//! `STOP_SLOP_STAND_LIVE=1` (and `STOP_SLOP_STAND_GUEST=<musl build>` before the pin)
+//! `STOP_SLOP_STAND_LIVE=1` (and `STOP_SLOP_STAND_GUEST=<musl build>` for this tree's guest)
 //! `cargo test --locked -p sandbox --features microsandbox --test contract -- --test-threads=1`:
 //! one case at a time, since `leftovers` sees the whole namespace. On Windows build with
 //! `--no-run` and start the binary it names: cargo keeps its children in a job without breakaway,
