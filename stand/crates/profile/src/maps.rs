@@ -137,11 +137,11 @@ fn source_path(source: &str, root: Option<&str>, base: &str) -> Option<String> {
     paths::resolve(base, &source)
 }
 
-/// `webpack://` or `http:`; a drive letter is not a scheme.
+/// `webpack://`, `http:`, or the `C:` of a map built on Windows: URL parsing takes a drive letter
+/// for a scheme too, and the guest has none.
 fn has_scheme(source: &str) -> bool {
     source.split_once(':').is_some_and(|(scheme, _)| {
-        scheme.len() > 1
-            && scheme.starts_with(|ch: char| ch.is_ascii_alphabetic())
+        scheme.starts_with(|ch: char| ch.is_ascii_alphabetic())
             && scheme
                 .chars()
                 .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '+' | '-' | '.'))

@@ -6,7 +6,8 @@ use camino::{Utf8Path, Utf8PathBuf};
 use serde::Deserialize;
 
 use crate::maps::{Script, Scripts};
-use crate::read::{is_typescript, list};
+use crate::paths::is_typescript;
+use crate::read::list;
 use crate::{Called, Coverage, PathMap, ProfileError};
 
 /// V8's `Profiler.ScriptCoverage`.
@@ -89,7 +90,7 @@ impl Calls {
                 };
                 let called = self
                     .functions
-                    .entry((file, line + 1, column + 1))
+                    .entry((Utf8PathBuf::from(file), line + 1, column + 1))
                     .or_insert_with_key(|(file, line, column)| Called {
                         file: file.clone(),
                         line: *line,

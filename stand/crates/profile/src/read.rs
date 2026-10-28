@@ -20,8 +20,6 @@ use crate::maps::Scripts;
 use crate::paths;
 use crate::{HotLine, ModuleTime, PathMap, ProfileError, Sampled, Samples};
 
-const TS_EXTENSIONS: [&str; 4] = ["ts", "tsx", "mts", "cts"];
-
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct Profile<'a> {
@@ -305,7 +303,7 @@ impl Sums<'_> {
                 (in_file == source).then_some(line + 1)
             });
         }
-        if is_typescript(file) {
+        if paths::is_typescript(file) {
             return if self.paths.local(file).is_some() {
                 Frame::Unmapped
             } else {
@@ -354,7 +352,7 @@ impl Sums<'_> {
         }
         let local = self.paths.local(file)?;
         let id = count(self.files.len());
-        self.files.push(local);
+        self.files.push(Utf8PathBuf::from(local));
         self.file_ids.insert(file.to_owned(), id);
         Some(id)
     }
@@ -402,11 +400,6 @@ impl Sums<'_> {
             modules,
         }
     }
-}
-
-/// Without a map, the positions in such a file are not its source's: it runs compiled.
-pub(crate) fn is_typescript(file: &str) -> bool {
-    paths::extension(file).is_some_and(|extension| TS_EXTENSIONS.contains(&extension))
 }
 
 fn count(n: usize) -> u32 {

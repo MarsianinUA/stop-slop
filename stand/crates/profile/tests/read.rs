@@ -134,6 +134,18 @@ fn ts_without_a_map_is_unmapped_and_only_files_of_the_tree_are_local() {
 }
 
 #[test]
+fn sources_resolve_after_the_source_root_and_a_drive_letter_is_no_guest_path() {
+    let samples = read_guest("sources");
+    // `dist/a.js` maps to `a.ts` under its `sourceRoot` `../src`, from the folder of its map. The
+    // map of `dist/c.js`, built on Windows, names only `C:/src/c.ts`, which is no file of the
+    // guest: `c.js` is its own source, as with a `webpack://` source.
+    assert_eq!(
+        functions(&samples),
+        [("dist/c.js", 1, 11, 1.0, 1.0), ("src/a.ts", 1, 1, 1.0, 1.0)]
+    );
+}
+
+#[test]
 fn a_function_has_v8s_name_and_an_anonymous_one_an_empty_name() {
     let names = |case| {
         read_guest(case)

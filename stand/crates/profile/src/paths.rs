@@ -3,7 +3,7 @@
 
 use std::borrow::Cow;
 
-use camino::Utf8PathBuf;
+const TS_EXTENSIONS: [&str; 4] = ["ts", "tsx", "mts", "cts"];
 
 /// A guest path under `guest_tree` becomes the path from the repo root by prefix; nothing is read
 /// on the host by a guest path, because the preload puts every map into `maps.json`.
@@ -22,12 +22,12 @@ impl PathMap {
 
     /// The path from the repo root, `/`-separated, of a guest path that is local: under the tree
     /// and outside `node_modules`. `guest` is normalized, as `guest_path` gives it.
-    pub(crate) fn local(&self, guest: &str) -> Option<Utf8PathBuf> {
+    pub(crate) fn local<'g>(&self, guest: &'g str) -> Option<&'g str> {
         let rest = guest.strip_prefix(&self.tree)?.strip_prefix('/')?;
         if rest.split('/').any(|part| part == "node_modules") {
             return None;
         }
-        Some(Utf8PathBuf::from(rest))
+        Some(rest)
     }
 }
 
@@ -51,11 +51,12 @@ pub(crate) fn resolve(base: &str, relative: &str) -> Option<String> {
     guest_path(&format!("{folder}/{relative}"))
 }
 
-/// The extension of the file name: `ts` of `/w/app/a.ts`, none of `/w/app/.ts`.
-pub(crate) fn extension(guest: &str) -> Option<&str> {
-    let name = guest.rsplit('/').next()?;
-    let (stem, extension) = name.rsplit_once('.')?;
-    (!stem.is_empty()).then_some(extension)
+/// Without a map, the positions in such a file are not its source's: it runs compiled. The name
+/// `.ts` has no extension.
+pub(crate) fn is_typescript(guest: &str) -> bool {
+    let name = guest.rsplit_once('/').map_or(guest, |(_, name)| name);
+    name.rsplit_once('.')
+        .is_some_and(|(stem, extension)| !stem.is_empty() && TS_EXTENSIONS.contains(&extension))
 }
 
 fn percent_decoded(text: &str) -> Option<String> {

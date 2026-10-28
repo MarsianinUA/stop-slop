@@ -51,7 +51,8 @@ pub struct Samples {
 pub struct Sampled {
     /// The original source after the source map, from the repo root and `/`-separated.
     pub file: Utf8PathBuf,
-    /// From 1: where V8 puts the function start, the `(` of its parameters.
+    /// From 1: where V8 puts the function start, the `(` of its parameters. The column counts
+    /// UTF-16 code units, as V8 and source maps do, not bytes.
     pub line: u32,
     pub column: u32,
     /// V8's function name; empty for an anonymous one.
@@ -91,7 +92,8 @@ pub struct Called {
     pub file: Utf8PathBuf,
     /// From 1: where the map puts V8's start of the function in coverage. That is not where
     /// `Sampled` has it: V8 starts a declaration at `function` here (tsc maps it to an `export`
-    /// before it), an arrow function at its parameters, a method at its name.
+    /// before it), an arrow function at its parameters, a method at its name. The column counts
+    /// UTF-16 code units, as in `Sampled`.
     pub line: u32,
     pub column: u32,
     /// V8's function name; empty for an anonymous one.
