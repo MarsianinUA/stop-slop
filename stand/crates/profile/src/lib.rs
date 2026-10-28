@@ -2,11 +2,13 @@ use std::io;
 
 use camino::{Utf8Path, Utf8PathBuf};
 
+mod coverage;
 mod env;
 mod maps;
 mod paths;
 mod read;
 
+pub use coverage::read_coverage;
 pub use env::node_env;
 pub use paths::PathMap;
 pub use read::read;
@@ -74,6 +76,28 @@ pub struct ModuleTime {
     /// From the repo root and `/`-separated.
     pub file: Utf8PathBuf,
     pub self_ms: f64,
+}
+
+/// Local functions with at least one call.
+#[derive(Debug, Default)]
+pub struct Coverage {
+    /// By file, line and column.
+    pub called: Vec<Called>,
+}
+
+#[derive(Debug, Clone)]
+pub struct Called {
+    /// From the repo root and `/`-separated.
+    pub file: Utf8PathBuf,
+    /// From 1: where the map puts V8's start of the function in coverage. That is not where
+    /// `Sampled` has it: V8 starts a declaration at `function` here (tsc maps it to an `export`
+    /// before it), an arrow function at its parameters, a method at its name.
+    pub line: u32,
+    pub column: u32,
+    /// V8's function name; empty for an anonymous one.
+    pub name: String,
+    /// Over all chunks and processes.
+    pub calls: u64,
 }
 
 #[derive(Debug, thiserror::Error)]

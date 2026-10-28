@@ -1,0 +1,9 @@
+[
+  {"scriptId":"119","url":"file:///w/app/main.js","functions":[
+    {"functionName":"","ranges":[{"startOffset":155,"endOffset":203,"count":1}],"isBlockCoverage":false,"line":4,"column":11}
+  ]},
+  {"scriptId":"120","url":"file:///w/app/dist/orders.js","functions":[
+    {"functionName":"total","ranges":[{"startOffset":975,"endOffset":1110,"count":1}],"isBlockCoverage":false,"line":24,"column":0},
+    {"functionName":"fib","ranges":[{"startOffset":1176,"endOffset":1245,"count":15}],"isBlockCoverage":false,"line":34,"column":0}
+  ]}
+]

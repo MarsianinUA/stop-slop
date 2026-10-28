@@ -66,14 +66,14 @@ struct PositionTick {
 }
 
 #[derive(Default)]
-struct Process {
-    chunks: BTreeMap<u32, Utf8PathBuf>,
-    maps: BTreeMap<u32, Utf8PathBuf>,
+pub(crate) struct Process {
+    pub(crate) chunks: BTreeMap<u32, Utf8PathBuf>,
+    pub(crate) maps: BTreeMap<u32, Utf8PathBuf>,
 }
 
 /// Sums the profiles the preload left in `dir` by function of the original sources.
 pub fn read(dir: &Utf8Path, paths: &PathMap) -> Result<Samples, ProfileError> {
-    let processes = list(dir)?;
+    let processes = list(dir, "cpuprofile")?;
     let lost = processes
         .values()
         .filter(|process| process.chunks.is_empty())
@@ -95,8 +95,12 @@ pub fn read(dir: &Utf8Path, paths: &PathMap) -> Result<Samples, ProfileError> {
     Ok(sums.finish(count(processes.len()), count(lost)))
 }
 
-/// Skips other names, such as `preload.cjs` or a `.tmp` that a kill left.
-fn list(dir: &Utf8Path) -> Result<BTreeMap<String, Process>, ProfileError> {
+/// The chunks `<id>.<n>.<suffix>` (`cpuprofile` or `coverage.json`) and the maps of each
+/// process. Skips other names, such as `preload.cjs` or a `.tmp` that a kill left.
+pub(crate) fn list(
+    dir: &Utf8Path,
+    suffix: &str,
+) -> Result<BTreeMap<String, Process>, ProfileError> {
     let mut processes: BTreeMap<String, Process> = BTreeMap::new();
     for entry in dir.read_dir_utf8().map_err(ProfileError::io(dir))? {
         let entry = entry.map_err(ProfileError::io(dir))?;
@@ -114,8 +118,8 @@ fn list(dir: &Utf8Path) -> Result<BTreeMap<String, Process>, ProfileError> {
             continue;
         };
         let files = match kind {
-            "cpuprofile" => &mut processes.entry(id.to_owned()).or_default().chunks,
             "maps.json" => &mut processes.entry(id.to_owned()).or_default().maps,
+            _ if kind == suffix => &mut processes.entry(id.to_owned()).or_default().chunks,
             _ => continue,
         };
         files.insert(n, entry.into_path());
@@ -401,7 +405,7 @@ impl Sums<'_> {
 }
 
 /// Without a map, the positions in such a file are not its source's: it runs compiled.
-fn is_typescript(file: &str) -> bool {
+pub(crate) fn is_typescript(file: &str) -> bool {
     paths::extension(file).is_some_and(|extension| TS_EXTENSIONS.contains(&extension))
 }
 
