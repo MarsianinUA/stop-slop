@@ -1,5 +1,4 @@
 x-limits: &limits { cpus: "1", memory: 512m }
-name: demo
 services:
   load:
     image: node:22

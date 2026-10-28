@@ -64,8 +64,27 @@ fn assert_refused(cases: &[(&str, &str, u32, &str)]) {
     }
 }
 
-fn names(names: &[ServiceName]) -> Vec<&str> {
-    names.iter().map(ServiceName::as_str).collect()
+fn ports(service: &Service) -> Vec<u16> {
+    service.expose.iter().map(|port| port.get()).collect()
+}
+
+/// `interval`, `timeout`, `retries` and `start_period`.
+fn health(service: &Service) -> (Duration, Duration, u32, Duration) {
+    let health = service.healthcheck.as_ref().unwrap();
+    (
+        health.interval,
+        health.timeout,
+        health.retries,
+        health.start_period,
+    )
+}
+
+fn waits(service: &Service) -> Vec<(&str, Condition)> {
+    service
+        .depends_on
+        .iter()
+        .map(|(name, condition)| (name.as_str(), *condition))
+        .collect()
 }
 
 /// `tree`, `harness <path from the fixture folder> <target>` and `volume <name> <target>`,
@@ -115,7 +134,11 @@ fn the_example_of_the_plan_reads_into_kinds_levels_defaults_and_the_prepare_serv
             ("prepare", ServiceKind::Setup),
         ]
     );
-    let levels: Vec<Vec<&str>> = stand.levels.iter().map(|level| names(level)).collect();
+    let levels: Vec<Vec<&str>> = stand
+        .levels
+        .iter()
+        .map(|level| level.iter().map(ServiceName::as_str).collect())
+        .collect();
     assert_eq!(
         levels,
         [
@@ -157,19 +180,13 @@ fn the_example_of_the_plan_reads_into_kinds_levels_defaults_and_the_prepare_serv
         db.environment,
         BTreeMap::from([("POSTGRES_PASSWORD".to_owned(), "stand".to_owned())])
     );
+    assert_eq!(ports(db), [5432]);
     assert_eq!(
-        db.expose.iter().map(|port| port.get()).collect::<Vec<_>>(),
-        [5432]
+        db.healthcheck.as_ref().unwrap().test,
+        ["pg_isready", "-U", "postgres"]
     );
-    let health = db.healthcheck.as_ref().unwrap();
-    assert_eq!(health.test, ["pg_isready", "-U", "postgres"]);
     assert_eq!(
-        (
-            health.interval,
-            health.timeout,
-            health.retries,
-            health.start_period
-        ),
+        health(db),
         (
             Duration::from_secs(1),
             Duration::from_secs(30),
@@ -180,13 +197,8 @@ fn the_example_of_the_plan_reads_into_kinds_levels_defaults_and_the_prepare_serv
     assert_eq!((db.cpus.get(), db.memory.get()), (1000, 1 << 30));
 
     let migrate = service(&stand, "migrate");
-    let waits: Vec<(&str, Condition)> = migrate
-        .depends_on
-        .iter()
-        .map(|(name, condition)| (name.as_str(), *condition))
-        .collect();
     assert_eq!(
-        waits,
+        waits(migrate),
         [
             ("db", Condition::Healthy),
             ("prepare", Condition::CompletedSuccessfully)
@@ -250,23 +262,13 @@ fn values_take_the_forms_of_compose() {
             ("MODE".to_owned(), "fast".to_owned())
         ])
     );
+    assert_eq!(ports(cache), [6379]);
     assert_eq!(
-        cache
-            .expose
-            .iter()
-            .map(|port| port.get())
-            .collect::<Vec<_>>(),
-        [6379]
+        cache.healthcheck.as_ref().unwrap().test,
+        ["sh", "-c", "redis-cli ping"]
     );
-    let health = cache.healthcheck.as_ref().unwrap();
-    assert_eq!(health.test, ["sh", "-c", "redis-cli ping"]);
     assert_eq!(
-        (
-            health.interval,
-            health.timeout,
-            health.retries,
-            health.start_period
-        ),
+        health(cache),
         (
             Duration::from_secs(30),
             Duration::from_secs(30),
@@ -289,24 +291,26 @@ fn values_take_the_forms_of_compose() {
         worker.command.as_deref(),
         Some(&["worker.js".to_owned()][..])
     );
-    // A boolean reads as Compose writes it, a number as written, `$$` as `$`.
+    // A boolean reads as Compose writes it, a number as written, also after an anchor or a tag,
+    // `$$` as `$`. An alias of a number reads as YAML gives it back.
     assert_eq!(
         worker.environment,
         BTreeMap::from([
+            ("AGAIN".to_owned(), "3000".to_owned()),
             ("DEBUG".to_owned(), "true".to_owned()),
+            ("HALF".to_owned(), "0.50".to_owned()),
+            ("NOTE".to_owned(), "naïve ☃".to_owned()),
+            ("PORT".to_owned(), "+3000".to_owned()),
             ("PRICE".to_owned(), "$5".to_owned()),
             ("RATIO".to_owned(), "0.50".to_owned()),
         ])
     );
-    let health = worker.healthcheck.as_ref().unwrap();
-    assert_eq!(health.test, ["sh", "-c", "test -f /tmp/ready"]);
     assert_eq!(
-        (
-            health.interval,
-            health.timeout,
-            health.retries,
-            health.start_period
-        ),
+        worker.healthcheck.as_ref().unwrap().test,
+        ["sh", "-c", "test -f /tmp/ready"]
+    );
+    assert_eq!(
+        health(worker),
         (
             Duration::from_millis(500),
             Duration::from_secs(2),
@@ -317,13 +321,8 @@ fn values_take_the_forms_of_compose() {
     assert_eq!((worker.cpus.get(), worker.memory.get()), (500, 1 << 30));
 
     let load = service(&stand, "load");
-    let waits: Vec<(&str, Condition)> = load
-        .depends_on
-        .iter()
-        .map(|(name, condition)| (name.as_str(), *condition))
-        .collect();
     assert_eq!(
-        waits,
+        waits(load),
         [
             ("cache", Condition::Started),
             ("worker", Condition::Started)
@@ -407,6 +406,15 @@ fn the_allowlist_refuses_keys_the_stand_does_not_read() {
             "top level or in a service",
         ),
         ("syntax", "yaml", 5, ""),
+        ("second-document", "yaml", 7, "a second document"),
+        ("mapping-key", "yaml", 4, "not a name"),
+        ("duplicate-key", "yaml", 4, "duplicated key"),
+        (
+            "merge-key",
+            "services.load.environment.<<",
+            5,
+            "merge keys are not supported",
+        ),
         (
             "wrong-type",
             "services.load.healthcheck",
@@ -463,6 +471,33 @@ fn limits_readiness_and_bind_sources_are_checked() {
             "leaves the folder",
         ),
     ]);
+}
+
+#[test]
+fn a_harness_through_a_link_leaves_the_folder() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = Utf8Path::from_path(dir.path()).unwrap();
+    #[cfg(unix)]
+    let linked = std::os::unix::fs::symlink("..", root.join("data"));
+    #[cfg(windows)]
+    let linked = std::os::windows::fs::symlink_dir("..", root.join("data"));
+    // Windows makes a link only in developer mode or for an administrator.
+    if linked.is_err() {
+        return;
+    }
+    let file = root.join("compose.yaml");
+    let text = fs::read_to_string(fixture("harness-outside"))
+        .unwrap()
+        .replace("./scripts/../../tools", "./data/tools");
+    fs::write(&file, text).unwrap();
+    let Err(SpecError::Invalid {
+        line, key, message, ..
+    }) = load(&file, &Policy::new(None).unwrap())
+    else {
+        panic!("a bind through a link is not refused");
+    };
+    assert_eq!((key.as_str(), line), ("services.load.volumes[0]", 4));
+    assert!(message.contains("through the link `data`"), "{message}");
 }
 
 #[test]
@@ -565,13 +600,13 @@ fn the_graph_has_known_names_one_condition_per_service_and_no_cycle() {
         ),
         (
             "unknown-dependency",
-            "services.load.depends_on.db",
-            4,
+            "services.load.depends_on[0]",
+            5,
             "no service `db`",
         ),
         (
             "workload-depended",
-            "services.api.depends_on.load",
+            "services.api.depends_on[0]",
             4,
             "the workload `load`",
         ),
@@ -804,6 +839,19 @@ fn what_the_stand_would_not_honour_is_refused_at_its_key() {
             "a second mount on `/harness`",
         ),
         ("port-twice", "services.load.expose[1]", 4, "listed twice"),
+        ("root-target", "services.load.volumes[0]", 4, "on `/`"),
+        (
+            "cost-twice",
+            "x-stand.expect.cost[1].measure",
+            10,
+            "`stand.wall` is declared twice",
+        ),
+        (
+            "unchanged-twice",
+            "x-stand.expect.unchanged[1].file",
+            11,
+            "`probe.orders.jsonl` is named twice",
+        ),
         (
             "tag",
             "services.load.image",
@@ -870,6 +918,46 @@ fn an_error_names_the_file_line_and_key() {
         ),
         "{error}"
     );
+}
+
+#[test]
+fn lines_and_numbers_hold_with_crlf_and_a_bom() {
+    let lf = |case: &str| {
+        fs::read_to_string(fixture(case))
+            .unwrap()
+            .replace("\r\n", "\n")
+    };
+    let forms = |text: String| {
+        let crlf = text.replace('\n', "\r\n");
+        [format!("\u{feff}{crlf}"), crlf, text]
+    };
+    for text in forms(lf("unknown-key")) {
+        let Err(SpecError::Invalid { line, key, .. }) = load_text(&text) else {
+            panic!("{text:?} is not refused as invalid");
+        };
+        assert_eq!(
+            (key.as_str(), line),
+            ("services.load.deploy.resources.limits.pids", 9)
+        );
+    }
+    for text in forms(lf("values")) {
+        let stand = load_text(&text).unwrap();
+        let environment = &service(&stand, "worker").environment;
+        assert_eq!(
+            (environment["RATIO"].as_str(), environment["PORT"].as_str()),
+            ("0.50", "+3000")
+        );
+    }
+}
+
+/// The stand file of a temporary folder with `text`.
+fn load_text(text: &str) -> Result<Stand, SpecError> {
+    let dir = tempfile::tempdir().unwrap();
+    let file = Utf8Path::from_path(dir.path())
+        .unwrap()
+        .join("compose.yaml");
+    fs::write(&file, text).unwrap();
+    load(&file, &Policy::new(None).unwrap())
 }
 
 #[test]

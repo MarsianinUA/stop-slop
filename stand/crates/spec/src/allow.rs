@@ -7,145 +7,92 @@ use crate::tree::Field;
 /// What a position of the file takes. `allow` looks at keys, and at the type only where keys are
 /// fixed: the rest is `bind`'s.
 enum Shape {
-    /// A mapping of these keys; with `extensions` also of `x-*` keys, which nothing reads.
-    Keys {
-        keys: &'static [(&'static str, Shape)],
-        extensions: bool,
-    },
+    /// A mapping of these keys.
+    Keys(&'static [(&'static str, Shape)]),
+    /// `Keys` and `x-*` keys, which nothing reads.
+    Open(&'static [(&'static str, Shape)]),
     /// A mapping of names, such as services, each value of this shape.
     Names(&'static Shape),
     Items(&'static Shape),
     Value,
 }
 
-use Shape::{Items, Keys, Names, Value};
+use Shape::{Items, Keys, Names, Open, Value};
 
-const ROOT: Shape = Keys {
-    keys: &[
-        ("services", Names(&SERVICE)),
-        ("volumes", Names(&VOLUME)),
-        ("name", Value),
-        ("x-stand", X_STAND),
-    ],
-    extensions: true,
-};
+const ROOT: Shape = Open(&[
+    ("services", Names(&SERVICE)),
+    ("volumes", Names(&VOLUME)),
+    ("x-stand", X_STAND),
+]);
 
-const SERVICE: Shape = Keys {
-    keys: &[
-        ("image", Value),
-        ("command", Value),
-        ("entrypoint", Value),
-        ("environment", Value),
-        ("working_dir", Value),
-        ("volumes", Value),
-        ("expose", Value),
-        ("depends_on", Names(&DEPENDENCY)),
-        ("healthcheck", HEALTHCHECK),
-        ("stop_signal", Value),
-        ("stop_grace_period", Value),
-        ("deploy", DEPLOY),
-        (
-            "x-stand",
-            Keys {
-                keys: &[("profile", Value), ("network", Value)],
-                extensions: false,
-            },
-        ),
-    ],
-    extensions: true,
-};
+const SERVICE: Shape = Open(&[
+    ("image", Value),
+    ("command", Value),
+    ("entrypoint", Value),
+    ("environment", Value),
+    ("working_dir", Value),
+    ("volumes", Value),
+    ("expose", Value),
+    ("depends_on", Names(&DEPENDENCY)),
+    ("healthcheck", HEALTHCHECK),
+    ("stop_signal", Value),
+    ("stop_grace_period", Value),
+    ("deploy", DEPLOY),
+    ("x-stand", Keys(&[("profile", Value), ("network", Value)])),
+]);
 
 /// `pgdata: {}`: the stand gives every volume its own disk, so a driver or options mean nothing.
-const VOLUME: Shape = Keys {
-    keys: &[],
-    extensions: false,
-};
+const VOLUME: Shape = Keys(&[]);
 
-const DEPENDENCY: Shape = Keys {
-    keys: &[("condition", Value)],
-    extensions: false,
-};
+const DEPENDENCY: Shape = Keys(&[("condition", Value)]);
 
-const HEALTHCHECK: Shape = Keys {
-    keys: &[
-        ("test", Value),
-        ("interval", Value),
-        ("timeout", Value),
-        ("retries", Value),
-        ("start_period", Value),
-    ],
-    extensions: false,
-};
+const HEALTHCHECK: Shape = Keys(&[
+    ("test", Value),
+    ("interval", Value),
+    ("timeout", Value),
+    ("retries", Value),
+    ("start_period", Value),
+]);
 
-const DEPLOY: Shape = Keys {
-    keys: &[
-        (
-            "resources",
-            Keys {
-                keys: &[(
-                    "limits",
-                    Keys {
-                        keys: &[("cpus", Value), ("memory", Value)],
-                        extensions: false,
-                    },
-                )],
-                extensions: false,
-            },
-        ),
-        ("replicas", Value),
-    ],
-    extensions: false,
-};
+const DEPLOY: Shape = Keys(&[
+    (
+        "resources",
+        Keys(&[("limits", Keys(&[("cpus", Value), ("memory", Value)]))]),
+    ),
+    ("replicas", Value),
+]);
 
-const X_STAND: Shape = Keys {
-    keys: &[
-        ("workload", Value),
-        ("repeat", Value),
-        ("setup_timeout", Value),
-        ("timeout", Value),
-        ("probes", Names(&PROBE)),
-        (
-            "expect",
-            Keys {
-                keys: &[("cost", Items(&COST)), ("unchanged", Items(&UNCHANGED))],
-                extensions: false,
-            },
-        ),
-        (
-            "fault",
-            Keys {
-                keys: &[("target", Value), ("mode", Value), ("delay", Value)],
-                extensions: false,
-            },
-        ),
-        ("second_pass", Value),
-    ],
-    extensions: false,
-};
+const X_STAND: Shape = Keys(&[
+    ("workload", Value),
+    ("repeat", Value),
+    ("setup_timeout", Value),
+    ("timeout", Value),
+    ("probes", Names(&PROBE)),
+    (
+        "expect",
+        Keys(&[("cost", Items(&COST)), ("unchanged", Items(&UNCHANGED))]),
+    ),
+    (
+        "fault",
+        Keys(&[("target", Value), ("mode", Value), ("delay", Value)]),
+    ),
+    ("second_pass", Value),
+]);
 
-const PROBE: Shape = Keys {
-    keys: &[
-        ("in", Value),
-        ("at", Value),
-        ("run", Value),
-        ("key", Value),
-        ("ignore", Value),
-    ],
-    extensions: false,
-};
+const PROBE: Shape = Keys(&[
+    ("in", Value),
+    ("at", Value),
+    ("run", Value),
+    ("key", Value),
+    ("ignore", Value),
+]);
 
-const COST: Shape = Keys {
-    keys: &[("measure", Value), ("change", Value), ("reason", Value)],
-    extensions: false,
-};
+const COST: Shape = Keys(&[("measure", Value), ("change", Value), ("reason", Value)]);
 
-const UNCHANGED: Shape = Keys {
-    keys: &[("file", Value), ("reason", Value)],
-    extensions: false,
-};
+const UNCHANGED: Shape = Keys(&[("file", Value), ("reason", Value)]);
 
 /// Keys a Compose file often has, with why the stand does without them.
-const REFUSED: [(&str, &str); 3] = [
+const REFUSED: [(&str, &str); 2] = [
     (
         "build",
         "the stand builds no image: build it elsewhere and name it in `image`",
@@ -153,10 +100,6 @@ const REFUSED: [(&str, &str); 3] = [
     (
         "ports",
         "the stand publishes no port: other services reach this one by its name and `expose`",
-    ),
-    (
-        "<<",
-        "YAML merge keys are not supported: write the keys out",
     ),
 ];
 
@@ -177,12 +120,13 @@ fn walk(field: &Field, shape: &Shape) -> Result<(), Invalid> {
             }
             Ok(())
         }
-        Keys { keys, extensions } => {
+        Keys(keys) | Open(keys) => {
+            let extensions = matches!(shape, Open(_));
             for (key, value) in field.entries()? {
                 match keys.iter().find(|(name, _)| *name == key) {
                     Some((_, inner)) => walk(&value, inner)?,
-                    None if *extensions && key.starts_with("x-") => {}
-                    None => return Err(value.invalid(unknown(key, keys, *extensions))),
+                    None if extensions && key.starts_with("x-") => {}
+                    None => return Err(value.invalid(unknown(key, keys, extensions))),
                 }
             }
             Ok(())

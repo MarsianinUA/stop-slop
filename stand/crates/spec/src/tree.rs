@@ -75,18 +75,21 @@ impl<'t> Source<'t> {
         }
     }
 
-    fn between(&self, start: &Marker, end: &Marker) -> Option<String> {
+    /// The number between the markers as written: YAML gives back `+10` as `10` and `0.50` as
+    /// `0.5`. A number has no space, so it is the last word, after an anchor or a tag; the span of
+    /// an alias is `*name`, so an alias of a number has none.
+    fn number(&self, start: &Marker, end: &Marker) -> Option<String> {
         let start = *self.offsets.get(start.index())?;
         let end = *self.offsets.get(end.index())?;
-        self.text.get(start..end).map(str::to_owned)
+        let word = self.text.get(start..end)?.split_whitespace().last()?;
+        (!word.starts_with('*')).then(|| word.to_owned())
     }
 }
 
 fn node(yaml: MarkedYaml, source: &Source) -> Result<Node, Invalid> {
     let span = yaml.span;
     let line = line(&span.start);
-    // YAML gives back `+10` as `10` and `0.50` as `0.5`.
-    let number = |read: String| source.between(&span.start, &span.end).unwrap_or(read);
+    let number = |read: String| source.number(&span.start, &span.end).unwrap_or(read);
     let value = match yaml.data {
         YamlData::Value(Scalar::Null) => Value::Null,
         YamlData::Value(Scalar::Boolean(value)) => Value::Bool(value),
@@ -119,17 +122,13 @@ fn node(yaml: MarkedYaml, source: &Source) -> Result<Node, Invalid> {
 }
 
 fn entry((key, value): (MarkedYaml, MarkedYaml), source: &Source) -> Result<Entry, Invalid> {
-    let span = key.span;
-    let line = line(&span.start);
-    let number = |read: String| source.between(&span.start, &span.end).unwrap_or(read);
-    let text = match key.data {
-        YamlData::Value(Scalar::String(text)) => text.into_owned(),
-        YamlData::Value(Scalar::Integer(read)) => number(read.to_string()),
-        YamlData::Value(Scalar::FloatingPoint(read)) => number(read.0.to_string()),
-        YamlData::Value(Scalar::Boolean(value)) => value.to_string(),
+    let key = node(key, source)?;
+    let text = match key.value {
+        Value::Text(text) => text,
+        Value::Bool(value) => value.to_string(),
         _ => {
             return Err(Invalid {
-                line,
+                line: key.line,
                 key: YAML.to_owned(),
                 message: "a key that is not a name".to_owned(),
             });
@@ -137,7 +136,7 @@ fn entry((key, value): (MarkedYaml, MarkedYaml), source: &Source) -> Result<Entr
     };
     Ok(Entry {
         key: text,
-        line,
+        line: key.line,
         value: node(value, source)?,
     })
 }
@@ -221,13 +220,19 @@ impl<'a> Field<'a> {
         }
     }
 
-    /// A null mapping has no entries.
+    /// A null mapping has no entries. A YAML merge key is refused here, which covers every mapping
+    /// the stand reads.
     pub(crate) fn entries(&self) -> Result<Vec<(&'a str, Field<'a>)>, Invalid> {
         match &self.node.value {
-            Value::Map(entries) => Ok(entries
+            Value::Map(entries) => entries
                 .iter()
-                .map(|entry| (entry.key.as_str(), self.child(entry)))
-                .collect()),
+                .map(|entry| match entry.key.as_str() {
+                    "<<" => Err(self
+                        .child(entry)
+                        .invalid("YAML merge keys are not supported: write the keys out")),
+                    key => Ok((key, self.child(entry))),
+                })
+                .collect(),
             Value::Null => Ok(Vec::new()),
             _ => Err(self.expected("a mapping")),
         }

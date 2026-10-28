@@ -3,9 +3,9 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
-use std::io;
+use std::io::{self, BufRead};
 
-use camino::{Utf8Path, Utf8PathBuf};
+use camino::Utf8Path;
 use sha2::{Digest, Sha256};
 
 use crate::SpecError;
@@ -36,30 +36,26 @@ pub(crate) fn of(dir: &Utf8Path) -> Result<Recipe, SpecError> {
     let mut files = BTreeMap::new();
     let mut folders = vec![(dir.to_owned(), String::new())];
     while let Some((folder, prefix)) = folders.pop() {
-        for entry in fs::read_dir(&folder).map_err(io(&folder))? {
-            let entry = entry.map_err(io(&folder))?;
-            let name = entry
-                .file_name()
-                .into_string()
-                .map_err(|name| SpecError::Io {
-                    file: folder.clone(),
-                    source: io::Error::new(
-                        io::ErrorKind::InvalidData,
-                        format!("{} is not UTF-8", name.to_string_lossy()),
-                    ),
-                })?;
-            let path = folder.join(&name);
-            let kind = entry.file_type().map_err(io(&path))?;
-            let bytes = if kind.is_dir() {
-                folders.push((path, format!("{prefix}{name}/")));
+        for entry in folder.read_dir_utf8().map_err(SpecError::io(&folder))? {
+            let entry = entry.map_err(SpecError::io(&folder))?;
+            let (name, path) = (entry.file_name(), entry.path());
+            let kind = entry.file_type().map_err(SpecError::io(path))?;
+            let sha = if kind.is_dir() {
+                folders.push((path.to_owned(), format!("{prefix}{name}/")));
                 continue;
             } else if kind.is_symlink() {
-                let target = fs::read_link(&path).map_err(io(&path))?;
-                target.to_string_lossy().into_owned().into_bytes()
+                let target = fs::read_link(path).map_err(SpecError::io(path))?;
+                hex(&Sha256::digest(target.as_os_str().as_encoded_bytes()))
+            } else if kind.is_file() {
+                file_sha256(path).map_err(SpecError::io(path))?
             } else {
-                fs::read(&path).map_err(io(&path))?
+                // Opening a FIFO would wait for a writer.
+                return Err(SpecError::io(path)(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "neither a file, a folder nor a link",
+                )));
             };
-            files.insert(format!("{prefix}{name}"), hex(&Sha256::digest(bytes)));
+            files.insert(format!("{prefix}{name}"), sha);
         }
     }
     let lines: String = files
@@ -72,14 +68,21 @@ pub(crate) fn of(dir: &Utf8Path) -> Result<Recipe, SpecError> {
     })
 }
 
-fn hex(bytes: &[u8]) -> String {
-    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+/// Read in chunks: a data file of the harness may be large.
+fn file_sha256(path: &Utf8Path) -> io::Result<String> {
+    let mut file = io::BufReader::with_capacity(1 << 16, fs::File::open(path)?);
+    let mut hasher = Sha256::new();
+    loop {
+        let chunk = file.fill_buf()?;
+        if chunk.is_empty() {
+            return Ok(hex(&hasher.finalize()));
+        }
+        hasher.update(chunk);
+        let read = chunk.len();
+        file.consume(read);
+    }
 }
 
-fn io(file: &Utf8Path) -> impl Fn(io::Error) -> SpecError {
-    let file: Utf8PathBuf = file.to_owned();
-    move |source| SpecError::Io {
-        file: file.clone(),
-        source,
-    }
+fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }

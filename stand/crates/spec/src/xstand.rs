@@ -3,7 +3,7 @@
 
 use std::collections::BTreeMap;
 
-use crate::bind::{name, optional, required, service_named};
+use crate::bind::{self, name, optional, required, service_named};
 use crate::tree::Field;
 use crate::{
     Cost, Fault, FaultMode, Invalid, Percent, Pointer, Policy, Probe, ProbeName, SecondPass,
@@ -11,7 +11,7 @@ use crate::{
 };
 
 /// The smallest `X` of `+X%` and `-X%`: a smaller shift is within noise, which `none` says.
-const MIN_CHANGE: u32 = 5;
+const MIN_CHANGE: u16 = 5;
 
 /// `none`, `+X%`, `-X%`, `down`, `unknown`; X a whole percent from 5.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -41,10 +41,10 @@ impl Change {
         let digits = text[1..]
             .strip_suffix('%')
             .ok_or_else(|| refused("no `%`"))?;
-        if digits.is_empty() || !digits.bytes().all(|byte| byte.is_ascii_digit()) {
+        if !units::is_whole(digits) {
             return Err(refused("X is not a whole percent"));
         }
-        let x = digits.parse::<u32>().unwrap_or(u32::MAX);
+        let x = digits.parse::<u16>().unwrap_or(u16::MAX);
         if x < MIN_CHANGE {
             return Err(refused("X is below 5, a shift within noise"));
         }
@@ -70,8 +70,6 @@ pub struct ChangeError {
     pub message: String,
 }
 
-/// A probe reads the state below the app inside a service that is up: a long-running one, and
-/// for `after-setup` one that setup starts.
 pub(crate) fn probes(
     root: &Field,
     services: &BTreeMap<ServiceName, Service>,
@@ -80,9 +78,6 @@ pub(crate) fn probes(
     let mut probes = BTreeMap::new();
     for (probe, field) in root.at("x-stand").at("probes").entries()? {
         let probe = ProbeName(name(&field, probe)?);
-        if !field.is_map() {
-            return Err(field.invalid("write `{in, at, run, key, ignore}`"));
-        }
         let within = required(&field, "in", "the long-running service the probe runs in")?;
         let service = service_named(services, &within)?;
         let kind = match services[&service].kind {
@@ -155,18 +150,23 @@ fn pointer(text: &str) -> Result<Pointer, String> {
     }
 }
 
+/// One entry per measure: with two, which bound holds would depend on the order `report` reads
+/// them in.
 pub(crate) fn expect(root: &Field, policy: &Policy) -> Result<Vec<Cost>, Invalid> {
-    let cost = root.at("x-stand").at("expect").at("cost");
-    cost.items()?
-        .iter()
-        .map(|item| self::cost(item, policy))
-        .collect()
+    let mut costs: Vec<Cost> = Vec::new();
+    for item in root.at("x-stand").at("expect").at("cost").items()? {
+        let cost = self::cost(&item, policy)?;
+        if costs.iter().any(|known| known.measure == cost.measure) {
+            return Err(item
+                .at("measure")
+                .invalid(format!("`{}` is declared twice", cost.measure)));
+        }
+        costs.push(cost);
+    }
+    Ok(costs)
 }
 
 fn cost(item: &Field, policy: &Policy) -> Result<Cost, Invalid> {
-    if !item.is_map() {
-        return Err(item.invalid("write `{measure, change, reason}`"));
-    }
     let measure = required(item, "measure", "the measure, such as `stand.wall`")?.string()?;
     let field = required(item, "change", "none, +X%, -X%, down or unknown")?;
     let text = field.string()?;
@@ -201,9 +201,6 @@ pub(crate) fn fault(
     let Some(field) = root.at("x-stand").get("fault") else {
         return Ok(None);
     };
-    if !field.is_map() {
-        return Err(field.invalid("write `{target: <service>:<port>, mode: down}`"));
-    }
     let target = target(
         &required(&field, "target", "`<service>:<port>`, such as `db:5432`")?,
         services,
@@ -225,58 +222,54 @@ pub(crate) fn fault(
     Ok(Some(Fault { target, mode }))
 }
 
-/// The relay reaches a service by its `expose` ports, so the target is one of them.
 fn target(field: &Field, services: &BTreeMap<ServiceName, Service>) -> Result<Target, Invalid> {
     let text = field.string()?;
     let Some((service, port)) = text.rsplit_once(':') else {
         return Err(field.invalid(format!("`{text}` is not `<service>:<port>`")));
     };
-    let found = services.iter().find(|(known, _)| known.as_str() == service);
-    let Some((known, definition)) = found else {
+    let name = ServiceName(service.to_owned());
+    let Some(definition) = services.get(&name) else {
         return Err(field.invalid(format!("no service `{service}`")));
     };
-    let exposed = definition
-        .expose
-        .iter()
-        .find(|exposed| exposed.get().to_string() == port);
-    let Some(&port) = exposed else {
+    let port = bind::port(port).map_err(|message| field.invalid(message))?;
+    if !definition.expose.contains(&port) {
         return Err(field.invalid(format!(
-            "`{service}` does not expose `{port}`: the relay reaches a service by its `expose`"
+            "`{service}` does not expose `{}`: the relay reaches a service by its `expose`",
+            port.get()
         )));
-    };
+    }
     Ok(Target {
-        service: known.clone(),
+        service: name,
         port,
     })
 }
 
-/// `x-stand.expect.unchanged` names files the second pass compares, so it needs the second pass.
 pub(crate) fn second_pass(root: &Field) -> Result<Option<SecondPass>, Invalid> {
     let x_stand = root.at("x-stand");
     let on = optional(&x_stand, "second_pass", Field::bool)?.unwrap_or(false);
-    let unchanged = x_stand.at("expect").get("unchanged");
-    match (on, unchanged) {
+    match (on, x_stand.at("expect").get("unchanged")) {
         (false, None) => Ok(None),
         (false, Some(field)) => Err(field.invalid(
             "`unchanged` needs `x-stand.second_pass: true`: only the second pass runs the \
              workload twice on one state",
         )),
-        (true, unchanged) => {
-            let items = unchanged.map(|field| field.items()).transpose()?;
-            let unchanged = items
-                .unwrap_or_default()
-                .iter()
-                .map(self::unchanged)
-                .collect::<Result<_, _>>()?;
-            Ok(Some(SecondPass { unchanged }))
+        (true, _) => {
+            let mut files: Vec<Unchanged> = Vec::new();
+            for item in x_stand.at("expect").at("unchanged").items()? {
+                let file = self::unchanged(&item)?;
+                if files.iter().any(|known| known.file == file.file) {
+                    return Err(item
+                        .at("file")
+                        .invalid(format!("`{}` is named twice", file.file)));
+                }
+                files.push(file);
+            }
+            Ok(Some(SecondPass { unchanged: files }))
         }
     }
 }
 
 fn unchanged(item: &Field) -> Result<Unchanged, Invalid> {
-    if !item.is_map() {
-        return Err(item.invalid("write `{file, reason}`"));
-    }
     Ok(Unchanged {
         file: required(item, "file", "a file of /stand/out or `probe.<name>.jsonl`")?.string()?,
         reason: reason(item)?,

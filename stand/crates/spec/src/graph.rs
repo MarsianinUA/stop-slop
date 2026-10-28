@@ -4,6 +4,7 @@
 use std::collections::btree_map::Entry;
 use std::collections::{BTreeMap, BTreeSet};
 
+use crate::bind::condition_name;
 use crate::tree::Field;
 use crate::{Condition, Invalid, Mount, Service, ServiceKind, ServiceName};
 
@@ -43,9 +44,7 @@ fn waits(
     let mut waited: BTreeMap<&ServiceName, (&ServiceName, Condition)> = BTreeMap::new();
     for (name, service) in services {
         for (dependency, &condition) in &service.depends_on {
-            let at = service_field(root, name.as_str())
-                .at("depends_on")
-                .at(dependency.as_str());
+            let at = dependency_field(root, name, dependency);
             let Some(target) = services.get(dependency) else {
                 return Err(at.invalid(format!("no service `{}`", dependency.as_str())));
             };
@@ -86,14 +85,6 @@ fn waits(
         .filter(|(_, (_, condition))| *condition == Condition::CompletedSuccessfully)
         .map(|(name, _)| name.clone())
         .collect())
-}
-
-fn condition_name(condition: Condition) -> &'static str {
-    match condition {
-        Condition::Started => "service_started",
-        Condition::Healthy => "service_healthy",
-        Condition::CompletedSuccessfully => "service_completed_successfully",
-    }
 }
 
 /// A service is on the level after the last level of what it depends on.
@@ -159,23 +150,17 @@ fn prepare(
     services: &BTreeMap<ServiceName, Service>,
     levels: &[Vec<ServiceName>],
 ) -> Result<Option<ServiceName>, Invalid> {
-    let on_tree = |service: &Service| {
-        service
-            .mounts
-            .iter()
-            .any(|mount| matches!(mount, Mount::Tree))
-    };
     let Some(prepare) = levels
         .iter()
         .flatten()
-        .find(|name| services[*name].kind == ServiceKind::Setup && on_tree(&services[*name]))
+        .find(|name| services[*name].kind == ServiceKind::Setup && services[*name].on_tree())
     else {
         return Ok(None);
     };
     let others = || {
         services
             .iter()
-            .filter(|(name, service)| *name != prepare && on_tree(service))
+            .filter(|(name, service)| *name != prepare && service.on_tree())
     };
     for (name, _) in others() {
         if !waits_for(services, name, prepare) {
@@ -224,30 +209,26 @@ fn waits_for(
     from: &ServiceName,
     to: &ServiceName,
 ) -> bool {
-    let mut seen = BTreeSet::new();
-    let mut next = vec![from];
-    while let Some(name) = next.pop() {
-        for dependency in services[name].depends_on.keys() {
-            if dependency == to {
-                return true;
-            }
-            if seen.insert(dependency) {
-                next.push(dependency);
-            }
-        }
-    }
-    false
+    reached(services, services[from].depends_on.keys()).contains(to)
 }
 
 /// The services that run in setup: the setup services and what they wait for, directly or
 /// through others.
 pub(crate) fn in_setup(services: &BTreeMap<ServiceName, Service>) -> BTreeSet<&ServiceName> {
-    let mut found = BTreeSet::new();
-    let mut next: Vec<&ServiceName> = services
+    let setup = services
         .iter()
         .filter(|(_, service)| service.kind == ServiceKind::Setup)
-        .map(|(name, _)| name)
-        .collect();
+        .map(|(name, _)| name);
+    reached(services, setup)
+}
+
+/// `start` and all it depends on, directly or through others.
+fn reached<'s>(
+    services: &'s BTreeMap<ServiceName, Service>,
+    start: impl IntoIterator<Item = &'s ServiceName>,
+) -> BTreeSet<&'s ServiceName> {
+    let mut found = BTreeSet::new();
+    let mut next: Vec<&ServiceName> = start.into_iter().collect();
     while let Some(name) = next.pop() {
         if found.insert(name) {
             next.extend(services[name].depends_on.keys());
@@ -258,4 +239,18 @@ pub(crate) fn in_setup(services: &BTreeMap<ServiceName, Service>) -> BTreeSet<&S
 
 fn service_field<'a>(root: &Field<'a>, name: &str) -> Field<'a> {
     root.at("services").at(name)
+}
+
+/// The entry of `dependency` in the `depends_on` of `name`: its key, or its item in a list.
+fn dependency_field<'a>(
+    root: &Field<'a>,
+    name: &ServiceName,
+    dependency: &ServiceName,
+) -> Field<'a> {
+    let depends_on = service_field(root, name.as_str()).at("depends_on");
+    let items = depends_on.items().unwrap_or_default();
+    items
+        .into_iter()
+        .find(|item| item.string().is_ok_and(|text| text == dependency.as_str()))
+        .unwrap_or_else(|| depends_on.at(dependency.as_str()))
 }

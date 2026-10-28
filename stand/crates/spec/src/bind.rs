@@ -2,6 +2,7 @@
 //! the stand. What needs every service at once is `graph`'s.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::fs;
 use std::num::NonZeroU32;
 use std::time::Duration;
 
@@ -102,12 +103,12 @@ pub(crate) fn service_named(
     services: &BTreeMap<ServiceName, Service>,
     field: &Field,
 ) -> Result<ServiceName, Invalid> {
-    let name = field.string()?;
-    services
-        .keys()
-        .find(|known| known.as_str() == name)
-        .cloned()
-        .ok_or_else(|| field.invalid(format!("no service `{name}`")))
+    let name = ServiceName(field.string()?);
+    if services.contains_key(&name) {
+        Ok(name)
+    } else {
+        Err(field.invalid(format!("no service `{}`", name.as_str())))
+    }
 }
 
 pub(crate) fn optional<'a, T>(
@@ -135,9 +136,6 @@ fn volumes(field: &Field) -> Result<BTreeSet<String>, Invalid> {
 }
 
 fn service(field: &Field, dir: &Utf8Path, volumes: &BTreeSet<String>) -> Result<Service, Invalid> {
-    if !field.is_map() {
-        return Err(field.invalid("a service is a mapping of Compose keys"));
-    }
     let image = required(
         field,
         "image",
@@ -177,24 +175,18 @@ fn service(field: &Field, dir: &Utf8Path, volumes: &BTreeSet<String>) -> Result<
     })
 }
 
-/// A volume is one service's disk, and a service on the version disk has none: a VM started
-/// from the version's snapshot cannot add a disk.
 fn mount_owners(
     field: &Field,
     name: &ServiceName,
     service: &Service,
     owners: &mut BTreeMap<String, ServiceName>,
 ) -> Result<(), Invalid> {
-    let has_tree = service
-        .mounts
-        .iter()
-        .any(|mount| matches!(mount, Mount::Tree));
     for (index, mount) in service.mounts.iter().enumerate() {
         let Mount::Volume { name: volume, .. } = mount else {
             continue;
         };
         let at = field.at("volumes").item(index);
-        if has_tree {
+        if service.on_tree() {
             return Err(at.invalid(format!(
                 "`{volume}` on a service with `${{STAND_REPO}}`: such a service starts from the \
                  snapshot of the version, which cannot add a disk; mount the volume in another \
@@ -318,12 +310,15 @@ fn mount(item: &Field, dir: &Utf8Path, volumes: &BTreeSet<String>) -> Result<Mou
         )));
     }
     let source = interpolate(source).map_err(|message| item.invalid(message))?;
-    if is_drive(&source) || source.starts_with(['/', '\\', '~']) {
+    if source.starts_with(['/', '\\', '~']) {
         return Err(item.invalid(absolute(&source)));
     }
     let target = interpolate(target).map_err(|message| item.invalid(message))?;
     let target = guest_path(&target)
         .ok_or_else(|| item.invalid(format!("`{target}` is not a path from `/`")))?;
+    if target == "/" {
+        return Err(item.invalid("a mount on `/` would cover /stand and /w, which the stand keeps"));
+    }
     if let Some(reserved) = RESERVED.iter().find(|reserved| is_under(&target, reserved)) {
         return Err(item.invalid(format!(
             "`{target}` is under {reserved}, which the stand keeps: its own files are under \
@@ -331,14 +326,18 @@ fn mount(item: &Field, dir: &Utf8Path, volumes: &BTreeSet<String>) -> Result<Mou
         )));
     }
     if source.starts_with('.') {
-        let source = harness(dir, &source).ok_or_else(|| {
+        let leaves = |how: String| {
             item.invalid(format!(
-                "`{source}` leaves the folder of the stand file, and the seal of the recipe \
+                "`{source}` leaves the folder of the stand file{how}, and the seal of the recipe \
                  keeps only that folder"
             ))
-        })?;
+        };
+        let path = harness(dir, &source).ok_or_else(|| leaves(String::new()))?;
+        if let Some(link) = link_on(dir, &path) {
+            return Err(leaves(format!(" through the link `{link}`")));
+        }
         return Ok(Mount::Harness {
-            source,
+            source: path,
             target,
             read_only,
         });
@@ -405,6 +404,19 @@ fn harness(dir: &Utf8Path, source: &str) -> Option<Utf8PathBuf> {
     )
 }
 
+/// The first link on the way from `dir` to `path`, as a path from `dir`: a bind follows it, while
+/// the recipe and its seal keep only the link.
+fn link_on(dir: &Utf8Path, path: &Utf8Path) -> Option<Utf8PathBuf> {
+    let mut on = dir.to_owned();
+    for part in path.strip_prefix(dir).ok()?.components() {
+        on.push(part);
+        if fs::symlink_metadata(&on).is_ok_and(|meta| meta.file_type().is_symlink()) {
+            return on.strip_prefix(dir).ok().map(Utf8Path::to_owned);
+        }
+    }
+    None
+}
+
 /// A path of the guest from `/` with `.`, `..` and empty parts folded; `None` when relative.
 fn guest_path(path: &str) -> Option<String> {
     let mut parts = Vec::new();
@@ -438,12 +450,10 @@ fn expose(field: &Field) -> Result<Vec<Exposed>, Invalid> {
 }
 
 /// `5432` or `"5432/tcp"`: the relay carries TCP only.
-fn port(text: &str) -> Result<Exposed, String> {
+pub(crate) fn port(text: &str) -> Result<Exposed, String> {
     let number = text.strip_suffix("/tcp").unwrap_or(text);
     match number.parse::<u16>() {
-        Ok(port) if port > 0 && number.bytes().all(|byte| byte.is_ascii_digit()) => {
-            Ok(Exposed(port))
-        }
+        Ok(port) if port > 0 && units::is_whole(number) => Ok(Exposed(port)),
         _ if text.ends_with("/udp") => Err(format!("`{text}`: the stand relays TCP only")),
         _ => Err(format!("`{text}` is not a port from 1 to 65535")),
     }
@@ -469,19 +479,32 @@ fn depends_on(field: &Field) -> Result<BTreeMap<ServiceName, Condition>, Invalid
     Ok(depends_on)
 }
 
+const CONDITIONS: [Condition; 3] = [
+    Condition::Started,
+    Condition::Healthy,
+    Condition::CompletedSuccessfully,
+];
+
 fn condition(text: &str) -> Result<Condition, String> {
-    match text {
-        "service_started" => Ok(Condition::Started),
-        "service_healthy" => Ok(Condition::Healthy),
-        "service_completed_successfully" => Ok(Condition::CompletedSuccessfully),
-        _ => Err(format!(
-            "`{text}` is not `service_started`, `service_healthy` or \
-             `service_completed_successfully`"
-        )),
+    CONDITIONS
+        .into_iter()
+        .find(|&condition| condition_name(condition) == text)
+        .ok_or_else(|| {
+            format!(
+                "`{text}` is not `service_started`, `service_healthy` or \
+                 `service_completed_successfully`"
+            )
+        })
+}
+
+pub(crate) fn condition_name(condition: Condition) -> &'static str {
+    match condition {
+        Condition::Started => "service_started",
+        Condition::Healthy => "service_healthy",
+        Condition::CompletedSuccessfully => "service_completed_successfully",
     }
 }
 
-/// The stand runs no healthcheck of the image, so `test` is required.
 fn healthcheck(field: &Field) -> Result<Healthcheck, Invalid> {
     let test = required(field, "test", "the stand runs no healthcheck of the image")?;
     let retries = optional(field, "retries", |field| field.parse(units::count))?;

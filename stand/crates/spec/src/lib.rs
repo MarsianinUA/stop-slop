@@ -26,10 +26,7 @@ pub const TREE: &str = "/w/app";
 const MAX_TOLERANCE: u16 = 25;
 
 pub fn load(path: &Utf8Path, policy: &Policy) -> Result<Stand, SpecError> {
-    let file = camino::absolute_utf8(path).map_err(|source| SpecError::Io {
-        file: path.to_owned(),
-        source,
-    })?;
+    let file = camino::absolute_utf8(path).map_err(SpecError::io(path))?;
     let text = match fs::read_to_string(&file) {
         Ok(text) => text,
         Err(error) if error.kind() == io::ErrorKind::NotFound => {
@@ -88,7 +85,7 @@ impl Policy {
     /// of `max_tolerance`.
     pub fn new(max_tolerance: Option<u16>) -> Result<Policy, PolicyError> {
         let max_tolerance = max_tolerance.unwrap_or(MAX_TOLERANCE);
-        units::percent(u32::from(max_tolerance))
+        units::percent(max_tolerance)
             .map(|max_tolerance| Policy { max_tolerance })
             .ok_or(PolicyError(max_tolerance))
     }
@@ -222,6 +219,12 @@ pub struct Service {
     pub replicas: Replicas,
     pub profile: Option<Profiler>,
     pub outbound: Outbound,
+}
+
+impl Service {
+    fn on_tree(&self) -> bool {
+        self.mounts.iter().any(|mount| matches!(mount, Mount::Tree))
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -391,6 +394,16 @@ pub enum SpecError {
         #[source]
         source: io::Error,
     },
+}
+
+impl SpecError {
+    fn io(file: &Utf8Path) -> impl Fn(io::Error) -> SpecError {
+        let file = file.to_owned();
+        move |source| SpecError::Io {
+            file: file.clone(),
+            source,
+        }
+    }
 }
 
 #[derive(Debug, thiserror::Error)]

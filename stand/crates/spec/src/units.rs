@@ -70,21 +70,23 @@ pub(crate) fn period(text: &str) -> Result<Duration, String> {
 
 /// A whole number from 1.
 pub(crate) fn count(text: &str) -> Result<NonZeroU32, String> {
-    text.bytes()
-        .all(|byte| byte.is_ascii_digit())
+    is_whole(text)
         .then(|| text.parse::<NonZeroU32>().ok())
         .flatten()
         .ok_or_else(|| format!("`{text}` is not a whole number from 1"))
 }
 
-/// Whole percents from 1 to 1000.
-pub(crate) fn percent(value: u32) -> Option<Percent> {
-    let value = u16::try_from(value).ok()?;
+pub(crate) fn percent(value: u16) -> Option<Percent> {
     (1..=1000).contains(&value).then_some(Percent(value))
+}
+
+/// Digits only: Rust's `parse` also takes a leading `+`.
+pub(crate) fn is_whole(text: &str) -> bool {
+    !text.is_empty() && text.bytes().all(|byte| byte.is_ascii_digit())
 }
 
 /// Both parts are digits, and not both are empty: `2`, `0.5`, `.5`.
 fn digits(whole: &str, fraction: &str) -> bool {
-    let all = |part: &str| part.bytes().all(|byte| byte.is_ascii_digit());
+    let all = |part: &str| part.is_empty() || is_whole(part);
     all(whole) && all(fraction) && !(whole.is_empty() && fraction.is_empty())
 }
