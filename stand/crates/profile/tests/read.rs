@@ -11,8 +11,9 @@ use tempfile::TempDir;
 ///
 /// The fixtures are written by hand, except `maps/dist/orders.js` and its map: in
 /// `fixtures/maps`, `tsc --sourceMap --target es2022 --module commonjs --experimentalDecorators
-/// --outDir dist src/orders.ts` with TypeScript 5.9. The inline maps copy its `mappings`. The
-/// frames use V8's positions in that output, from 0: `__decorate` at 1:55, `total` at 24:14,
+/// --outDir dist src/orders.ts` with TypeScript 5.9. Its `orders.js.map` is not kept as a file:
+/// `100.0.maps.json` holds it, as the preload writes it, and the inline maps copy its `mappings`.
+/// The frames use V8's positions in that output, from 0: `__decorate` at 1:55, `total` at 24:14,
 /// `report` at 31:15, `fib` at 34:12; every sample lasts 1 ms unless the test says otherwise.
 fn fixture(case: &str) -> (TempDir, Utf8PathBuf) {
     let temp = tempfile::tempdir().expect("create a temp folder");
@@ -103,8 +104,9 @@ fn functions_map_through_an_inline_map_and_through_a_map_file() {
     let (_temp, root) = fixture("maps");
     let samples = read(&root, &root).unwrap();
     // `total` runs in `{url}/src/orders.ts`, as ts-jest compiles it, with the inline map of
-    // `100.0.maps.json`; `fib` runs in `dist/orders.js`, whose map is `dist/orders.js.map`.
-    // Chunk 1 has no maps of its own and adds 2 ms of `total` to the 4 ms of chunk 0.
+    // `100.0.maps.json`; `fib` runs in `dist/orders.js`, whose map comes from
+    // `dist/orders.js.map`, a file the folder does not have: its relative source starts from
+    // that path. Chunk 1 has no maps of its own and adds 2 ms of `total` to the 4 ms of chunk 0.
     assert_eq!(
         functions(&samples, &root),
         [

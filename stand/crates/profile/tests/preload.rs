@@ -230,38 +230,140 @@ fn the_services_own_node_options_run_after_the_preload() {
 
 #[test]
 fn the_exit_code_and_error_stack_are_the_same_as_without_the_preload() {
+    for (mode, chunk) in [
+        (ProfileMode::Cpu, "0.cpuprofile"),
+        (ProfileMode::Coverage, "0.coverage.json"),
+    ] {
+        let folders = Folders::new();
+        let fail = folders.script(
+            "fail.js",
+            "function fail() {\n\
+             \x20 return new Error('boom');\n\
+             }\n\
+             // The preload turns the debugger on: these must neither stop nor slow the program.\n\
+             // They take milliseconds without the preload and 8 s when each one pauses.\n\
+             const start = Date.now();\n\
+             for (let i = 0; i < 20000; i++) debugger;\n\
+             if (Date.now() - start > 1000) process.exit(4);\n\
+             require('node:fs').writeFileSync(process.argv[2], fail().stack);\n\
+             process.exit(3);\n",
+        );
+        let with = folders.temp.path().join("with.txt");
+        let without = folders.temp.path().join("without.txt");
+        let status = folders.node(mode, None, &[fail.as_str(), with.to_str().unwrap()]);
+        let plain = Command::new("node")
+            .arg(&fail)
+            .arg(&without)
+            .status()
+            .unwrap();
+        assert_eq!(
+            (status.code(), plain.code()),
+            (Some(3), Some(3)),
+            "{mode:?}"
+        );
+        assert_eq!(
+            fs::read_to_string(with).unwrap(),
+            fs::read_to_string(without).unwrap(),
+            "{mode:?}"
+        );
+        assert_eq!(folders.kinds(), [chunk, "start.json"]);
+    }
+}
+
+#[test]
+fn coverage_writes_the_calls_of_each_function_with_the_line_and_column_of_its_start() {
     let folders = Folders::new();
-    let fail = folders.script(
-        "fail.js",
-        "function fail() {\n\
-         \x20 return new Error('boom');\n\
-         }\n\
-         // The preload turns the debugger on: these must neither stop nor slow the program.\n\
-         // They take milliseconds without the preload and 8 s when each one pauses.\n\
-         const start = Date.now();\n\
-         for (let i = 0; i < 20000; i++) debugger;\n\
-         if (Date.now() - start > 1000) process.exit(4);\n\
-         require('node:fs').writeFileSync(process.argv[2], fail().stack);\n\
-         process.exit(3);\n",
+    fs::create_dir_all(folders.temp.path().join("node_modules/dep")).unwrap();
+    folders.script("node_modules/dep/index.js", "exports.run = () => 1;\n");
+    // Line ends of Windows count as one, as in V8's own positions.
+    let count = folders.script(
+        "count.js",
+        "function add(a, b) {\r\n\
+         \x20 return a + b;\r\n\
+         }\r\n\
+         const twice = (x) => x * 2;\r\n\
+         function unused() {}\r\n\
+         class Box { take(y) { return y; } }\r\n\
+         for (let i = 0; i < 3; i++) add(i, i);\r\n\
+         twice(1);\r\n\
+         new Box().take(2);\r\n\
+         require('dep').run();\r\n",
     );
-    let with = folders.temp.path().join("with.txt");
-    let without = folders.temp.path().join("without.txt");
-    let status = folders.node(
-        ProfileMode::Cpu,
-        None,
-        &[fail.as_str(), with.to_str().unwrap()],
+    let status = folders.node(ProfileMode::Coverage, None, &[count.as_str()]);
+    assert_eq!(status.code(), Some(0));
+    assert_eq!(folders.kinds(), ["0.coverage.json", "start.json"]);
+    let scripts = folders.json(".coverage.json");
+    let urls: Vec<&str> = scripts
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|script| script["url"].as_str().unwrap())
+        .collect();
+    // Neither `node:` modules, `node_modules` nor the preload itself.
+    assert!(
+        urls.len() == 1 && urls[0].starts_with("file:///") && urls[0].ends_with("/count.js"),
+        "{urls:?}"
     );
-    let plain = Command::new("node")
-        .arg(&fail)
-        .arg(&without)
-        .status()
-        .unwrap();
-    assert_eq!((status.code(), plain.code()), (Some(3), Some(3)));
+    let functions: Vec<(&str, u64, u64, u64)> = scripts[0]["functions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|function| {
+            (
+                function["functionName"].as_str().unwrap(),
+                function["line"].as_u64().unwrap(),
+                function["column"].as_u64().unwrap(),
+                function["ranges"][0]["count"].as_u64().unwrap(),
+            )
+        })
+        .collect();
+    // V8 starts a function declaration at its `function`, an arrow function at its parameters,
+    // a method at its name.
     assert_eq!(
-        fs::read_to_string(with).unwrap(),
-        fs::read_to_string(without).unwrap()
+        functions,
+        [
+            ("", 0, 0, 1),
+            ("add", 0, 0, 3),
+            ("twice", 3, 14, 1),
+            ("unused", 4, 0, 0),
+            ("take", 5, 12, 1),
+        ]
     );
-    assert_eq!(folders.kinds(), ["0.cpuprofile", "start.json"]);
+}
+
+#[test]
+fn a_map_file_next_to_the_script_goes_into_maps_json_without_sources_content() {
+    let folders = Folders::new();
+    fs::create_dir(folders.temp.path().join("dist")).unwrap();
+    let app = folders.script(
+        "dist/app.js",
+        "function main() {}\nmain();\n//# sourceMappingURL=app.js.map\n",
+    );
+    folders.script(
+        "dist/app.js.map",
+        r#"{"version":3,"sources":["../src/app.ts"],"sourcesContent":["x"],"names":[],"mappings":"AAAA"}"#,
+    );
+    let status = folders.node(ProfileMode::Coverage, None, &[app.as_str()]);
+    assert_eq!(status.code(), Some(0));
+    assert_eq!(
+        folders.kinds(),
+        ["0.coverage.json", "0.maps.json", "start.json"]
+    );
+    let maps = folders.json(".maps.json");
+    let [(url, entry)] = maps.as_object().unwrap().iter().collect::<Vec<_>>()[..] else {
+        panic!("not one map in {maps}");
+    };
+    assert!(url.ends_with("/dist/app.js"), "{url}");
+    assert_eq!(
+        entry["map"],
+        serde_json::json!({"version": 3, "sources": ["../src/app.ts"], "names": [], "mappings": "AAAA"})
+    );
+    // The path the relative source starts from, as the guest sees it.
+    let base = Utf8Path::new(entry["base"].as_str().unwrap());
+    assert!(
+        base.ends_with("dist/app.js.map") && base.is_file(),
+        "{base}"
+    );
 }
 
 #[test]
@@ -297,5 +399,6 @@ fn code_compiled_with_vm_compile_function_gets_its_inline_map() {
     let map = &entry["map"];
     assert_eq!(map["sources"][0], source.to_str().unwrap());
     assert_eq!(map["mappings"], "AAAA;AACA");
+    assert_eq!(entry["base"], source.to_str().unwrap());
     assert!(map.get("sourcesContent").is_none(), "{map}");
 }

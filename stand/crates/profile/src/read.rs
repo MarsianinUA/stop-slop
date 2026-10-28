@@ -3,6 +3,11 @@
 //! `<id>.start.json` once the preload runs; then for chunk `n` from 0, `<id>.<n>.maps.json` with
 //! the maps of the scripts first seen in it, when there are any, and `<id>.<n>.cpuprofile`,
 //! V8's `Profiler.Profile`. The chunk files are renamed into place whole.
+//!
+//! In the `coverage` mode `<id>.<n>.coverage.json` takes the place of the `.cpuprofile`: the
+//! scripts of V8's `Profiler.takePreciseCoverage` with a call since the last chunk, `file:` URLs
+//! outside `node_modules` and the preload, each function with `line` and `column` from 0 of its
+//! start in the generated script.
 
 use std::borrow::Cow;
 use std::collections::{BTreeMap, HashMap};

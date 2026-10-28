@@ -501,7 +501,7 @@ stop-slop/
     testkit/        tests only: a temporary git repository
   stand/            the stand, a second workspace with its own Cargo.toml and Cargo.lock
     crates/
-      profile/      the Node preload that writes CPU profiles, and the reading of them
+      profile/      the Node preload, which writes CPU profiles or coverage, and their reading
   rules/            the rules, a crate of their own: Cargo.toml, build.rs, lib.rs, fixtures.rs, clippy.toml, roles.toml
     <group>/<rule-id>/
   skill/            the skill: SKILL.md, fix.md, review.md, send.md, agents/openai.yaml
