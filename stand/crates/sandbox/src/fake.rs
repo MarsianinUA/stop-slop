@@ -169,6 +169,13 @@ impl Fake {
             .expect("an earlier call of the fake panicked")
     }
 
+    /// `create` and `snapshot` journal after the work instead, with what they made.
+    fn record(&self, call: Call) -> MutexGuard<'_, State> {
+        let mut state = self.state();
+        state.journal.push(call);
+        state
+    }
+
     /// The whole batch is checked before anything is made, so a refused batch leaves nothing.
     fn make(&self, state: &mut State, batch: &[Launch]) -> Result<Vec<SandboxId>, SandboxError> {
         let mut vms = Vec::with_capacity(batch.len());
@@ -247,7 +254,7 @@ impl Sandbox for Fake {
     }
 
     fn pull(&self, images: &[ImageRef]) -> Result<Pulled, SandboxError> {
-        self.state().journal.push(Call::Pull(images.to_vec()));
+        drop(self.record(Call::Pull(images.to_vec())));
         if let Some(image) = images.iter().find(|image| self.is_missing(image)) {
             return Err(SandboxError::ImageNotFound(image.clone()));
         }
@@ -271,8 +278,7 @@ impl Sandbox for Fake {
     }
 
     fn exec_detached(&self, id: &SandboxId, argv: &[String]) -> Result<ExecId, SandboxError> {
-        let mut state = self.state();
-        state.journal.push(Call::ExecDetached {
+        let mut state = self.record(Call::ExecDetached {
             id: id.clone(),
             argv: argv.to_vec(),
         });
@@ -296,8 +302,7 @@ impl Sandbox for Fake {
     }
 
     fn wait(&self, what: &[Waitable], deadline: Instant) -> Result<Option<Exited>, SandboxError> {
-        let mut state = self.state();
-        state.journal.push(Call::Wait {
+        let mut state = self.record(Call::Wait {
             what: what.to_vec(),
             deadline,
         });
@@ -321,16 +326,10 @@ impl Sandbox for Fake {
                 });
             }
         }
-        match first {
-            Some(exited) if exited.at <= deadline => {
-                state.clock = state.clock.max(exited.at);
-                Ok(Some(exited))
-            }
-            _ => {
-                state.clock = state.clock.max(deadline);
-                Ok(None)
-            }
-        }
+        let exited = first.filter(|exited| exited.at <= deadline);
+        let until = exited.as_ref().map_or(deadline, |exited| exited.at);
+        state.clock = state.clock.max(until);
+        Ok(exited)
     }
 
     fn exec(
@@ -340,8 +339,7 @@ impl Sandbox for Fake {
         deadline: Instant,
         stdout: &Utf8Path,
     ) -> Result<ExecOutcome, SandboxError> {
-        let mut state = self.state();
-        state.journal.push(Call::Exec {
+        let state = self.record(Call::Exec {
             id: id.clone(),
             argv: argv.to_vec(),
             deadline,
@@ -362,8 +360,7 @@ impl Sandbox for Fake {
     }
 
     fn stop(&self, id: &SandboxId) -> Result<Stopped, SandboxError> {
-        let mut state = self.state();
-        state.journal.push(Call::Stop(id.clone()));
+        let mut state = self.record(Call::Stop(id.clone()));
         let clock = state.clock;
         let vm = state.vm_mut(id)?;
         // As `stand-guest stop` reports a command that ended before it.
@@ -375,8 +372,7 @@ impl Sandbox for Fake {
     }
 
     fn fault(&self, ids: &[SandboxId], fault: &Fault) -> Result<(), SandboxError> {
-        let mut state = self.state();
-        state.journal.push(Call::Fault {
+        let mut state = self.record(Call::Fault {
             ids: ids.to_vec(),
             fault: fault.clone(),
         });
@@ -390,8 +386,7 @@ impl Sandbox for Fake {
     }
 
     fn metrics(&self, id: &SandboxId) -> Result<Metrics, SandboxError> {
-        let mut state = self.state();
-        state.journal.push(Call::Metrics(id.clone()));
+        let state = self.record(Call::Metrics(id.clone()));
         let vm = state.vm(id)?;
         match &vm.script.under_fault {
             Some(under_fault) if vm.faulted => Ok(under_fault.clone()),
@@ -400,15 +395,12 @@ impl Sandbox for Fake {
     }
 
     fn logs(&self, id: &SandboxId) -> Result<Vec<u8>, SandboxError> {
-        let mut state = self.state();
-        state.journal.push(Call::Logs(id.clone()));
-        state.vm(id)?;
+        self.record(Call::Logs(id.clone())).vm(id)?;
         Ok(Vec::new())
     }
 
     fn copy_out(&self, id: &SandboxId, guest: &str, host: &Utf8Path) -> Result<(), SandboxError> {
-        let mut state = self.state();
-        state.journal.push(Call::CopyOut {
+        let state = self.record(Call::CopyOut {
             id: id.clone(),
             guest: guest.to_owned(),
             host: host.to_owned(),
@@ -429,8 +421,7 @@ impl Sandbox for Fake {
     }
 
     fn volume_sizes(&self, id: &SandboxId) -> Result<Vec<(VolumeName, u64)>, SandboxError> {
-        let mut state = self.state();
-        state.journal.push(Call::VolumeSizes(id.clone()));
+        let state = self.record(Call::VolumeSizes(id.clone()));
         let vm = state.vm(id)?;
         let sizes = volumes(&vm.launch)
             .into_iter()
@@ -449,29 +440,25 @@ impl Sandbox for Fake {
     }
 
     fn destroy(&self, id: &SandboxId) -> Result<(), SandboxError> {
-        let mut state = self.state();
-        state.journal.push(Call::Destroy(id.clone()));
+        let mut state = self.record(Call::Destroy(id.clone()));
         state.vms.retain(|vm| vm.id != *id);
         Ok(())
     }
 
     fn drop_volumes(&self, volumes: &[VolumeName]) -> Result<(), SandboxError> {
-        let mut state = self.state();
-        state.journal.push(Call::DropVolumes(volumes.to_vec()));
+        let mut state = self.record(Call::DropVolumes(volumes.to_vec()));
         state.volumes.retain(|name| !volumes.contains(name));
         Ok(())
     }
 
     fn drop_snapshot(&self, snapshot: &SnapshotId) -> Result<(), SandboxError> {
-        let mut state = self.state();
-        state.journal.push(Call::DropSnapshot(snapshot.clone()));
+        let mut state = self.record(Call::DropSnapshot(snapshot.clone()));
         state.snapshots.retain(|snap| snap.id != *snapshot);
         Ok(())
     }
 
     fn leftovers(&self) -> Result<Leftovers, SandboxError> {
-        let mut state = self.state();
-        state.journal.push(Call::Leftovers);
+        let state = self.record(Call::Leftovers);
         Ok(Leftovers {
             sandboxes: state.vms.iter().map(|vm| vm.id.clone()).collect(),
             volumes: state.volumes.clone(),
@@ -480,7 +467,7 @@ impl Sandbox for Fake {
     }
 
     fn prune_images(&self, keep: &[ImageRef]) -> Result<(), SandboxError> {
-        self.state().journal.push(Call::PruneImages(keep.to_vec()));
+        drop(self.record(Call::PruneImages(keep.to_vec())));
         Ok(())
     }
 }

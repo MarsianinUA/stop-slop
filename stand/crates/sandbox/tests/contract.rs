@@ -706,7 +706,11 @@ fn fake_a_rule_with_a_tree_follows_that_tree_into_its_snapshots() {
         rules: vec![version(&head, "head\n"), version(&before, "before\n")],
         ..Scenario::default()
     });
-    let at_head = dir.join("at-head");
+    let [at_head, restored_dir, at_before] =
+        ["at-head", "restored", "at-before"].map(|name| dir.join(name));
+    for bound in [&at_head, &restored_dir, &at_before] {
+        fs::create_dir(bound).unwrap();
+    }
     let mut api = launch("api", NODE);
     api.seed = Some(Seed::Tree {
         tar: head.clone(),
@@ -715,16 +719,15 @@ fn fake_a_rule_with_a_tree_follows_that_tree_into_its_snapshots() {
     api.mounts = vec![out(&at_head)];
     let first = fake.create(std::slice::from_ref(&api)).unwrap().remove(0);
     assert_eq!(read(&at_head.join("who")), "head\n");
+    fake.stop(&first).unwrap();
     let snapshot = fake.snapshot(&first).unwrap();
     fake.destroy(&first).unwrap();
 
-    let restored_dir = dir.join("restored");
     api.seed = Some(Seed::Snapshot(snapshot.clone()));
     api.mounts = vec![out(&restored_dir)];
     let restored = fake.create(&[api.clone()]).unwrap().remove(0);
     assert_eq!(read(&restored_dir.join("who")), "head\n");
 
-    let at_before = dir.join("at-before");
     api.seed = Some(Seed::Tree {
         tar: before,
         at: "/w/app".into(),
@@ -737,7 +740,7 @@ fn fake_a_rule_with_a_tree_follows_that_tree_into_its_snapshots() {
 }
 
 /// Runs a shared case on its own `Fake` and checks it left nothing, as the live harness does.
-fn on_fake(rules: Vec<Rule>, case: impl FnOnce(&Fake)) -> Fake {
+fn on_fake(rules: Vec<Rule>, case: impl FnOnce(&Fake)) {
     let fake = Fake::new(Scenario {
         rules,
         ..Scenario::default()
@@ -748,7 +751,6 @@ fn on_fake(rules: Vec<Rule>, case: impl FnOnce(&Fake)) -> Fake {
         left.sandboxes.is_empty() && left.volumes.is_empty() && left.snapshots.is_empty(),
         "left behind: {left:?}"
     );
-    fake
 }
 
 fn rule(service: &str, script: Script) -> Rule {
@@ -759,7 +761,6 @@ fn rule(service: &str, script: Script) -> Rule {
     }
 }
 
-/// Exits with `code` a second after `create`.
 fn exits(code: i32) -> Script {
     Script {
         exit: Some((code, Duration::from_secs(1))),
@@ -872,7 +873,7 @@ fn read(path: &Utf8Path) -> String {
     fs::read_to_string(path).unwrap_or_else(|error| panic!("{path}: {error}"))
 }
 
-/// An executable script, a file above 4 MiB and a symlink to the script, as `source::archive` writes them.
+/// An executable script, a file above 4 MiB and a symlink to the script: the entry kinds `source::archive` writes.
 fn write_tree(path: &Utf8Path) {
     let mut tar = tar::Builder::new(fs::File::create(path).unwrap());
     let mut file = |name: &str, mode: u32, bytes: &[u8]| {

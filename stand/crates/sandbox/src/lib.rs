@@ -146,11 +146,17 @@ pub enum Outbound {
 /// Opaque ids. `ImageRef` and `VolumeName` come from the caller; the others only from the port,
 /// so their constructors are the adapters'.
 macro_rules! name {
-    ($name:ident) => {
+    ($name:ident, $new:vis) => {
         #[derive(Debug, Clone, PartialEq, Eq)]
         pub struct $name(String);
 
         impl $name {
+            // A build without an adapter has no caller of the adapters' constructors.
+            #[cfg_attr(not(feature = "fake"), allow(dead_code))]
+            $new fn new(id: impl Into<String>) -> $name {
+                $name(id.into())
+            }
+
             pub fn as_str(&self) -> &str {
                 &self.0
             }
@@ -164,45 +170,11 @@ macro_rules! name {
     };
 }
 
-name!(SandboxId);
-name!(ExecId);
-name!(SnapshotId);
-name!(VolumeName);
-name!(ImageRef);
-
-impl ImageRef {
-    pub fn new(name: impl Into<String>) -> ImageRef {
-        ImageRef(name.into())
-    }
-}
-
-impl VolumeName {
-    pub fn new(name: impl Into<String>) -> VolumeName {
-        VolumeName(name.into())
-    }
-}
-
-// A build without an adapter has no caller.
-#[cfg_attr(not(feature = "fake"), allow(dead_code))]
-impl SandboxId {
-    pub(crate) fn new(id: String) -> SandboxId {
-        SandboxId(id)
-    }
-}
-
-#[cfg_attr(not(feature = "fake"), allow(dead_code))]
-impl ExecId {
-    pub(crate) fn new(id: String) -> ExecId {
-        ExecId(id)
-    }
-}
-
-#[cfg_attr(not(feature = "fake"), allow(dead_code))]
-impl SnapshotId {
-    pub(crate) fn new(id: String) -> SnapshotId {
-        SnapshotId(id)
-    }
-}
+name!(SandboxId, pub(crate));
+name!(ExecId, pub(crate));
+name!(SnapshotId, pub(crate));
+name!(VolumeName, pub);
+name!(ImageRef, pub);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Waitable {
