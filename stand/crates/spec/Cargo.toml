@@ -9,5 +9,9 @@ publish = false
 camino.workspace = true
 humantime.workspace = true
 saphyr.workspace = true
+sha2.workspace = true
 shlex.workspace = true
 thiserror.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

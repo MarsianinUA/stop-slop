@@ -11,10 +11,12 @@ use crate::tree::Field;
 mod allow;
 mod bind;
 mod graph;
+mod recipe;
 mod tree;
 mod units;
 mod xstand;
 
+pub use recipe::Recipe;
 pub use xstand::{Change, ChangeError};
 
 /// The tree of the measured version in a guest; its version disk mounts at the parent, `/w`.
@@ -35,7 +37,8 @@ pub fn load(path: &Utf8Path, policy: &Policy) -> Result<Stand, SpecError> {
         }
         Err(source) => return Err(SpecError::Io { file, source }),
     };
-    read(&text, &file, policy).map_err(|invalid| SpecError::Invalid {
+    let recipe = recipe::of(folder(&file))?;
+    read(&text, &file, recipe, policy).map_err(|invalid| SpecError::Invalid {
         file: file.clone(),
         line: invalid.line,
         key: invalid.key,
@@ -43,12 +46,11 @@ pub fn load(path: &Utf8Path, policy: &Policy) -> Result<Stand, SpecError> {
     })
 }
 
-fn read(text: &str, file: &Utf8Path, policy: &Policy) -> Result<Stand, Invalid> {
+fn read(text: &str, file: &Utf8Path, recipe: Recipe, policy: &Policy) -> Result<Stand, Invalid> {
     let node = tree::parse(text)?;
     let root = Field::root(&node);
     allow::check(&root)?;
-    let dir = file.parent().expect("a file that was read is in a folder");
-    let mut bound = bind::stand(&root, dir)?;
+    let mut bound = bind::stand(&root, folder(file))?;
     let graph = graph::of(&root, &mut bound.services, &bound.workload)?;
     let probes = xstand::probes(&root, &bound.services)?;
     let expect = xstand::expect(&root, policy)?;
@@ -56,6 +58,7 @@ fn read(text: &str, file: &Utf8Path, policy: &Policy) -> Result<Stand, Invalid> 
     let second_pass = xstand::second_pass(&root)?;
     Ok(Stand {
         file: file.to_owned(),
+        recipe,
         services: bound.services,
         levels: graph.levels,
         workload: bound.workload,
@@ -68,6 +71,11 @@ fn read(text: &str, file: &Utf8Path, policy: &Policy) -> Result<Stand, Invalid> 
         fault,
         second_pass,
     })
+}
+
+/// The folder of the recipe, which relative bind sources start from.
+fn folder(file: &Utf8Path) -> &Utf8Path {
+    file.parent().expect("a file that was read is in a folder")
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -90,6 +98,8 @@ impl Policy {
 pub struct Stand {
     /// Absolute.
     pub file: Utf8PathBuf,
+    /// Every file of the folder of `file`: the stand file, the harness and anything else there.
+    pub recipe: Recipe,
     pub services: BTreeMap<ServiceName, Service>,
     /// Every service, each after all it depends on.
     pub levels: Vec<Vec<ServiceName>>,

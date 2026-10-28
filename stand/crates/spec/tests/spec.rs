@@ -1,10 +1,11 @@
 use std::collections::BTreeMap;
+use std::fs;
 use std::time::Duration;
 
 use camino::{Utf8Path, Utf8PathBuf};
 use spec::{
-    Change, Condition, Demand, FaultMode, Mount, Outbound, Policy, PolicyError, Profiler, Service,
-    ServiceKind, ServiceName, SpecError, Stand, Tap, load,
+    Change, Condition, Demand, FaultMode, Mount, Outbound, Policy, PolicyError, Profiler, Recipe,
+    Service, ServiceKind, ServiceName, SpecError, Stand, Tap, load,
 };
 
 /// `tests/fixtures/<case>/compose.yaml`. Every refusal has its own folder: a small file that is
@@ -22,7 +23,11 @@ fn load_case(case: &str) -> Result<Stand, SpecError> {
 }
 
 fn stand(case: &str) -> Stand {
-    load_case(case).unwrap_or_else(|error| panic!("{case}: {error}"))
+    stand_at(&fixture(case))
+}
+
+fn stand_at(file: &Utf8Path) -> Stand {
+    load(file, &Policy::new(None).unwrap()).unwrap_or_else(|error| panic!("{file}: {error}"))
 }
 
 fn service<'a>(stand: &'a Stand, name: &str) -> &'a Service {
@@ -757,6 +762,52 @@ fn a_fault_targets_an_exposed_port_and_slow_has_a_delay() {
             "`flaky` is not",
         ),
     ]);
+}
+
+#[test]
+fn the_recipe_has_every_file_of_the_folder_and_changed_names_what_differs() {
+    let example = stand("example").recipe;
+    let files: Vec<&str> = example.files.keys().map(String::as_str).collect();
+    assert_eq!(files, ["compose.yaml", "load.js", "ping.js"]);
+    let sha256 = |text: &str| text.len() == 64 && text.bytes().all(|byte| byte.is_ascii_hexdigit());
+    assert!(example.files.values().all(|sha| sha256(sha)) && sha256(&example.digest));
+
+    let sealed = stand("recipe-sealed").recipe;
+    let edited = stand("recipe-edited").recipe;
+    assert!(sealed.files.contains_key("lib/util.js"));
+    assert_eq!(edited.changed(&sealed), ["load.js", "new.js", "old.js"]);
+    assert_ne!(edited.digest, sealed.digest);
+    let same = stand("recipe-same").recipe;
+    assert!(same.changed(&sealed).is_empty());
+    assert_eq!(same.digest, sealed.digest);
+}
+
+#[test]
+fn the_digest_does_not_depend_on_the_order_files_were_written_in() {
+    let compose = fs::read_to_string(fixture("recipe-sealed")).unwrap();
+    let files = [
+        ("compose.yaml", compose.as_str()),
+        ("a/z.js", "z"),
+        ("b.js", "b"),
+        ("a/c/d.js", "d"),
+    ];
+    let mut reversed = files;
+    reversed.reverse();
+    let forward = written(&files);
+    assert_eq!(forward.files.len(), 4);
+    assert_eq!(forward, written(&reversed));
+}
+
+/// The recipe of a temporary folder with the files written in this order.
+fn written(files: &[(&str, &str)]) -> Recipe {
+    let dir = tempfile::tempdir().unwrap();
+    let root = Utf8Path::from_path(dir.path()).unwrap();
+    for (path, text) in files {
+        let path = root.join(path);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, text).unwrap();
+    }
+    stand_at(&root.join("compose.yaml")).recipe
 }
 
 #[test]
