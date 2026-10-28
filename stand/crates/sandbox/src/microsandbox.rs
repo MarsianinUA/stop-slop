@@ -350,6 +350,9 @@ impl Inner {
     }
 
     async fn create(self: &Arc<Self>, batch: Vec<Launch>) -> Result<Vec<SandboxId>, SandboxError> {
+        for launch in &batch {
+            volumes::binds_exist(launch)?;
+        }
         let wired = {
             let mut ports = self.ports.lock().unwrap();
             let wire = |launch: &Launch| network::wire(&mut ports, launch);

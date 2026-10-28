@@ -1,0 +1,23 @@
+[package]
+name = "run"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+# `kept.json` keeps the host folders of the kept repeat's binds.
+camino = { workspace = true, features = ["serde1"] }
+profile = { path = "../profile" }
+report = { path = "../report" }
+sandbox = { path = "../sandbox" }
+serde.workspace = true
+serde_json.workspace = true
+spec = { path = "../spec" }
+thiserror.workspace = true
+
+[dev-dependencies]
+# Only the library: the test that every stop signal of `spec` reaches `stand-guest stop`.
+guest = { path = "../guest" }
+sandbox = { path = "../sandbox", features = ["fake"] }
+tempfile.workspace = true

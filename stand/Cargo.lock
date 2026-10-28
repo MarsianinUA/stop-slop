@@ -3539,6 +3539,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d6f6ff9a378485b298a5286656da665ba74413d36db0979633275d2e708145d4"
 
 [[package]]
+name = "report"
+version = "0.1.0"
+dependencies = [
+ "camino",
+ "profile",
+ "sandbox",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "reqwest"
 version = "0.13.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3594,6 +3605,22 @@ dependencies = [
  "libc",
  "untrusted",
  "windows-sys 0.52.0",
+]
+
+[[package]]
+name = "run"
+version = "0.1.0"
+dependencies = [
+ "camino",
+ "guest",
+ "profile",
+ "report",
+ "sandbox",
+ "serde",
+ "serde_json",
+ "spec",
+ "tempfile",
+ "thiserror",
 ]
 
 [[package]]

@@ -1,0 +1,16 @@
+[package]
+name = "report"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+# `Failure` keeps the paths of its logs and probes in `report.json` and in the line.
+camino = { workspace = true, features = ["serde1"] }
+profile = { path = "../profile" }
+sandbox = { path = "../sandbox" }
+serde.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true

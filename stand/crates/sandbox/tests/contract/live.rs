@@ -232,6 +232,7 @@ shared!(
     exec_writes_stdout_and_times_out,
     a_hung_healthcheck_is_killed_at_its_timeout,
     a_missing_command_exits_127_and_stops_at_once,
+    refuses_a_missing_bind_folder_a_probe_outside_writable_binds_and_a_taken_port,
 );
 
 /// Row 88, a stop rule of T-11: without a digest the setup cache key cannot see a new image

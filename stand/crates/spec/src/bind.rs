@@ -10,8 +10,8 @@ use camino::{Utf8Path, Utf8PathBuf};
 
 use crate::tree::{Field, interpolate};
 use crate::{
-    Condition, Exposed, Healthcheck, Invalid, Mount, Outbound, Profiler, Repeat, Replicas, Service,
-    ServiceKind, ServiceName, TREE, Timeout, units,
+    Condition, Exposed, Healthcheck, Invalid, Mount, Outbound, Profiler, Repeat, Replicas, SIGNALS,
+    Service, ServiceKind, ServiceName, TREE, Timeout, units,
 };
 
 const REPEAT: NonZeroU32 = NonZeroU32::new(3).unwrap();
@@ -25,11 +25,6 @@ const HEALTH_RETRIES: u32 = 3;
 
 /// The guest folders the stand owns: its own files under `/stand`, the version disk at `/w`.
 const RESERVED: [&str; 2] = ["/stand", "/w"];
-
-/// Linux's, without the real-time ones.
-const SIGNALS: &str = "SIGHUP SIGINT SIGQUIT SIGILL SIGTRAP SIGABRT SIGIOT SIGBUS SIGFPE SIGKILL \
-    SIGUSR1 SIGSEGV SIGUSR2 SIGPIPE SIGALRM SIGTERM SIGSTKFLT SIGCHLD SIGCONT SIGSTOP SIGTSTP \
-    SIGTTIN SIGTTOU SIGURG SIGXCPU SIGXFSZ SIGVTALRM SIGPROF SIGWINCH SIGIO SIGPOLL SIGPWR SIGSYS";
 
 pub(crate) struct Bound {
     pub(crate) services: BTreeMap<ServiceName, Service>,
@@ -412,6 +407,20 @@ fn mount(item: &Field, dir: &Utf8Path, volumes: &BTreeSet<String>) -> Result<Mou
                  there, and the recipe would change after its seal"
             )));
         }
+        // `sandbox` binds folders only: the adapter and the `Fake` refuse any other host path at
+        // `create`, and `inspect` takes it for a gone folder.
+        if !path.is_dir() {
+            return Err(item.invalid(format!(
+                "`{source}` is not a folder, and a harness bind is one: bind the folder of the \
+                 recipe that holds it"
+            )));
+        }
+        if !read_only {
+            return Err(item.invalid(format!(
+                "`{text}` lets the service write into the recipe, and the next run would find it \
+                 changed: write `{source}:{target}:ro`; a service writes its files to /stand/out"
+            )));
+        }
         return Ok(Mount::Harness {
             source: path,
             target,
@@ -426,6 +435,12 @@ fn mount(item: &Field, dir: &Utf8Path, volumes: &BTreeSet<String>) -> Result<Mou
     }
     if !volumes.contains(&source) {
         return Err(item.invalid(format!("no volume `{source}` in the top-level `volumes`")));
+    }
+    if read_only {
+        return Err(item.invalid(format!(
+            "`{text}`: a volume is the disk of the one service that mounts it, so read-only it \
+             stays empty: drop `:ro`"
+        )));
     }
     Ok(Mount::Volume {
         name: source,
@@ -617,7 +632,7 @@ fn health_test(field: &Field) -> Result<Vec<String>, Invalid> {
 }
 
 fn signal(text: &str) -> Result<String, String> {
-    if SIGNALS.split_whitespace().any(|signal| signal == text) {
+    if SIGNALS.contains(&text) {
         Ok(text.to_owned())
     } else {
         Err(format!(

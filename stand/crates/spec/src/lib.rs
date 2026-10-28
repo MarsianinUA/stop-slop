@@ -22,6 +22,43 @@ pub use xstand::{Change, ChangeError};
 /// The tree of the measured version in a guest; its version disk mounts at the parent, `/w`.
 pub const TREE: &str = "/w/app";
 
+/// The `stop_signal` names `spec` takes: Linux's, without the real-time ones.
+pub const SIGNALS: &[&str] = &[
+    "SIGHUP",
+    "SIGINT",
+    "SIGQUIT",
+    "SIGILL",
+    "SIGTRAP",
+    "SIGABRT",
+    "SIGIOT",
+    "SIGBUS",
+    "SIGFPE",
+    "SIGKILL",
+    "SIGUSR1",
+    "SIGSEGV",
+    "SIGUSR2",
+    "SIGPIPE",
+    "SIGALRM",
+    "SIGTERM",
+    "SIGSTKFLT",
+    "SIGCHLD",
+    "SIGCONT",
+    "SIGSTOP",
+    "SIGTSTP",
+    "SIGTTIN",
+    "SIGTTOU",
+    "SIGURG",
+    "SIGXCPU",
+    "SIGXFSZ",
+    "SIGVTALRM",
+    "SIGPROF",
+    "SIGWINCH",
+    "SIGIO",
+    "SIGPOLL",
+    "SIGPWR",
+    "SIGSYS",
+];
+
 /// `max_tolerance` when `stand.toml` has none.
 const MAX_TOLERANCE: u16 = 25;
 
@@ -253,7 +290,7 @@ pub enum Profiler {
 }
 
 /// `CMD-SHELL` and a string `test` become `["sh", "-c", <text>]`.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Healthcheck {
     pub test: Vec<String>,
     pub interval: Duration,
@@ -267,12 +304,14 @@ pub enum Mount {
     /// `${STAND_REPO}:/w/app`: the measured version's tree on the service's own version disk.
     Tree,
     /// A relative source, absolute here, from the folder of the file: the same for both versions.
+    /// Always `read_only`: a service that wrote there would change the recipe.
     Harness {
         source: Utf8PathBuf,
         target: String,
         read_only: bool,
     },
-    /// A name of the top-level `volumes`; one service with one replica mounts it.
+    /// A name of the top-level `volumes`; one service with one replica mounts it, never
+    /// `read_only`, or the volume would stay empty.
     Volume {
         name: String,
         target: String,
