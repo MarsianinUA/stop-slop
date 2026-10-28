@@ -7,7 +7,7 @@
 use std::collections::BTreeMap;
 use std::fmt::Debug;
 use std::fs;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use camino::{Utf8Path, Utf8PathBuf};
 use sandbox::{
@@ -16,10 +16,10 @@ use sandbox::{
 };
 use tempfile::TempDir;
 
-const ALPINE: &str = "alpine:3.20";
-const NODE: &str = "node:22-alpine";
-/// Its `USER` is 101, not root.
-const NGINX: &str = "nginxinc/nginx-unprivileged:alpine";
+mod images;
+
+use images::{ALPINE, NGINX, NODE};
+
 /// A Docker Hub account name has no `-`, so no one can push this.
 const MISSING: &str = "stop-slop-stand/no-such-image:1";
 /// Enough for a short command in a fresh VM to run and exit.
@@ -28,39 +28,47 @@ const EXIT: Duration = Duration::from_secs(60);
 fn create_batch_and_wait(sandbox: &impl Sandbox) {
     let mut quick = launch("quick", ALPINE);
     quick.command = sh("exit 3");
+    let mut later = launch("later", ALPINE);
+    later.command = sh("sleep 2; exit 5");
     let mut slow = launch("slow", ALPINE);
     slow.command = Some(argv(&["sleep", "600"]));
     let started = sandbox.now();
-    let ids = sandbox.create(&[quick, slow]).unwrap();
-    let [quick, slow] = ids.as_slice() else {
-        panic!("two ids for a batch of two: {ids:?}");
+    let ids = sandbox.create(&[quick, later, slow]).unwrap();
+    let [quick, later, slow] = ids.as_slice() else {
+        panic!("three ids for a batch of three: {ids:?}");
     };
-    let both = [
-        Waitable::Sandbox(quick.clone()),
-        Waitable::Sandbox(slow.clone()),
-    ];
-    let exited = sandbox
-        .wait(&both, sandbox.now() + EXIT)
+    let [quick, later, running] = [quick, later, slow].map(|id| Waitable::Sandbox(id.clone()));
+    let last = sandbox
+        .wait(std::slice::from_ref(&later), sandbox.now() + EXIT)
         .unwrap()
-        .expect("quick exits");
-    assert_eq!((&exited.what, exited.code), (&both[0], Some(3)));
+        .expect("later exits");
+    assert_eq!(last.code, Some(5));
+    // Both have ended by now: the earlier exit comes first, whatever the order of `what`.
+    let all = [later, running.clone(), quick.clone()];
+    let exited = sandbox
+        .wait(&all, sandbox.now() + EXIT)
+        .unwrap()
+        .expect("quick has exited");
+    assert_eq!((&exited.what, exited.code), (&quick, Some(3)));
     assert!(
-        started <= exited.at && exited.at <= sandbox.now(),
-        "{exited:?}"
+        started <= exited.at && exited.at < last.at,
+        "{exited:?} before {last:?}"
     );
 
-    let check = sandbox
-        .exec_detached(slow, &argv(&["sh", "-c", "exit 4"]))
-        .unwrap();
-    let check = Waitable::Exec(check);
-    let ended = sandbox
-        .wait(std::slice::from_ref(&check), sandbox.now() + EXIT)
-        .unwrap();
-    let ended = ended.expect("the healthcheck ends");
-    assert_eq!((ended.what, ended.code), (check, Some(4)));
+    for (check, code) in [
+        (argv(&["sh", "-c", "exit 4"]), 4),
+        (argv(&["no-such-check"]), 127),
+    ] {
+        let job = Waitable::Exec(sandbox.exec_detached(slow, &check, EXIT).unwrap());
+        let ended = sandbox
+            .wait(std::slice::from_ref(&job), sandbox.now() + EXIT)
+            .unwrap()
+            .expect("the healthcheck ends");
+        assert_eq!((ended.what, ended.code), (job, Some(code)), "{check:?}");
+    }
 
     let deadline = sandbox.now() + Duration::from_secs(1);
-    assert!(sandbox.wait(&both[1..], deadline).unwrap().is_none());
+    assert!(sandbox.wait(&[running], deadline).unwrap().is_none());
     assert!(sandbox.now() >= deadline);
     destroy(sandbox, &ids);
 }
@@ -71,9 +79,16 @@ fn fake_create_batch_and_wait() {
         vec![
             rule("quick", exits(3)),
             rule(
+                "later",
+                Script {
+                    exit: Some((5, Duration::from_secs(2))),
+                    ..Script::default()
+                },
+            ),
+            rule(
                 "slow",
                 Script {
-                    health: vec![4],
+                    health: vec![Some(4), Some(127)],
                     ..Script::default()
                 },
             ),
@@ -111,6 +126,7 @@ fn stop_then_the_rest_work(sandbox: &impl Sandbox) {
     let id = create(sandbox, worker);
     let stopped = sandbox.stop(&id).unwrap();
     assert!(!stopped.killed && stopped.after < grace, "{stopped:?}");
+    assert_eq!(wait_exit(sandbox, &id), Some(0), "the code of the trap");
     let sizes = sandbox.volume_sizes(&id).unwrap();
     assert_eq!(names(&sizes), std::slice::from_ref(&data));
     let snapshot = sandbox.snapshot(&id).unwrap();
@@ -118,7 +134,6 @@ fn stop_then_the_rest_work(sandbox: &impl Sandbox) {
     sandbox.metrics(&id).unwrap();
     sandbox.destroy(&id).unwrap();
     sandbox.drop_snapshot(&snapshot).unwrap();
-    sandbox.drop_volumes(&[data]).unwrap();
 }
 
 #[test]
@@ -132,6 +147,26 @@ fn fake_stop_then_the_rest_work() {
         ..Script::default()
     };
     on_fake(vec![rule("worker", script)], stop_then_the_rest_work);
+}
+
+/// A command that is not there is the app's failure: `wait` gives 127, and `stop` has nothing to
+/// stop.
+fn a_missing_command_exits_127_and_stops_at_once(sandbox: &impl Sandbox) {
+    let mut missing = launch("missing", ALPINE);
+    missing.command = Some(argv(&["no-such-command"]));
+    let id = create(sandbox, missing);
+    assert_eq!(wait_exit(sandbox, &id), Some(127));
+    let stopped = sandbox.stop(&id).unwrap();
+    assert!(!stopped.killed && stopped.after.is_zero(), "{stopped:?}");
+    sandbox.destroy(&id).unwrap();
+}
+
+#[test]
+fn fake_a_missing_command_exits_127_and_stops_at_once() {
+    on_fake(
+        vec![rule("missing", exits(127))],
+        a_missing_command_exits_127_and_stops_at_once,
+    );
 }
 
 fn snapshot_seeds_a_volume(sandbox: &impl Sandbox) {
@@ -164,7 +199,6 @@ fn snapshot_seeds_a_volume(sandbox: &impl Sandbox) {
     assert_eq!(read(&second.join("seen")), "setup\ncached\n");
     sandbox.destroy(&reader).unwrap();
     sandbox.drop_snapshot(&snapshot).unwrap();
-    sandbox.drop_volumes(&[data, cache]).unwrap();
 }
 
 #[test]
@@ -275,7 +309,6 @@ fn restore_refuses_a_missing_bind_and_a_new_volume(sandbox: &impl Sandbox) {
     let left = sandbox.leftovers().unwrap();
     assert!(left.sandboxes.is_empty(), "a refused restore left {left:?}");
     sandbox.drop_snapshot(&snapshot).unwrap();
-    sandbox.drop_volumes(&[data, extra]).unwrap();
 }
 
 #[test]
@@ -367,13 +400,23 @@ fn copy_out_brings_the_scratch_folder(sandbox: &impl Sandbox) {
     sandbox.stop(&id).unwrap();
     let host = dir.join("profile");
     fs::create_dir(&host).unwrap();
-    sandbox.copy_out(&id, "/stand/profile", &host).unwrap();
-    assert_eq!(read(&host.join("a.txt")), "one\n");
-    assert_eq!(read(&host.join("sub").join("b.txt")), "two\n");
-    sandbox.destroy(&id).unwrap();
+    let refused = sandbox.copy_out(&id, "/stand/profile", &dir);
+    assert!(
+        matches!(refused, Err(SandboxError::Backend { .. })),
+        "into a folder that is not empty: {refused:?}"
+    );
     let again = dir.join("again");
     fs::create_dir(&again).unwrap();
-    assert_gone(sandbox.copy_out(&id, "/stand/profile", &again), &id);
+    // A VM may have more than one folder to bring out.
+    for host in [&host, &again] {
+        sandbox.copy_out(&id, "/stand/profile", host).unwrap();
+        assert_eq!(read(&host.join("a.txt")), "one\n");
+        assert_eq!(read(&host.join("sub").join("b.txt")), "two\n");
+    }
+    sandbox.destroy(&id).unwrap();
+    let gone = dir.join("gone");
+    fs::create_dir(&gone).unwrap();
+    assert_gone(sandbox.copy_out(&id, "/stand/profile", &gone), &id);
 }
 
 #[test]
@@ -454,6 +497,43 @@ fn fake_exec_writes_stdout_and_times_out() {
     );
 }
 
+/// As Docker ends a healthcheck past its `timeout`, and no process the attempt started outlives it.
+fn a_hung_healthcheck_is_killed_at_its_timeout(sandbox: &impl Sandbox) {
+    let (_dir, dir) = folder();
+    let mut checked = launch("checked", ALPINE);
+    checked.command = Some(argv(&["sleep", "600"]));
+    checked.mounts = vec![out(&dir)];
+    let id = create(sandbox, checked);
+    let timeout = Duration::from_secs(1);
+    let started = sandbox.now();
+    let hung = argv(&["sh", "-c", "sleep 271 & wait"]);
+    let check = Waitable::Exec(sandbox.exec_detached(&id, &hung, timeout).unwrap());
+    let ended = sandbox
+        .wait(std::slice::from_ref(&check), sandbox.now() + EXIT)
+        .unwrap()
+        .expect("the attempt ends at its timeout");
+    assert_eq!((&ended.what, ended.code), (&check, None));
+    assert!(ended.at >= started + timeout, "{ended:?}");
+    let left = dir.join("left.txt");
+    let pgrep = argv(&["pgrep", "-f", "^sleep 271$"]);
+    let found = sandbox.exec(&id, &pgrep, sandbox.now() + EXIT, &left);
+    assert_eq!(found.unwrap(), ExecOutcome::Exited(1), "{}", read(&left));
+    sandbox.destroy(&id).unwrap();
+}
+
+#[test]
+fn fake_a_hung_healthcheck_is_killed_at_its_timeout() {
+    let script = Script {
+        health: vec![None],
+        probes: vec![("left.txt".into(), ExecOutcome::Exited(1), Vec::new())],
+        ..Script::default()
+    };
+    on_fake(
+        vec![rule("checked", script)],
+        a_hung_healthcheck_is_killed_at_its_timeout,
+    );
+}
+
 fn leftovers_sees_what_was_made(sandbox: &impl Sandbox) {
     let data = VolumeName::new("data");
     let mut kept = launch("kept", ALPINE);
@@ -469,10 +549,9 @@ fn leftovers_sees_what_was_made(sandbox: &impl Sandbox) {
     );
     sandbox.destroy(&id).unwrap();
     sandbox.drop_snapshot(&snapshot).unwrap();
-    sandbox.drop_volumes(&[data]).unwrap();
     let left = sandbox.leftovers().unwrap();
     assert!(
-        left.sandboxes.is_empty() && left.volumes.is_empty() && left.snapshots.is_empty(),
+        left.sandboxes.is_empty() && left.snapshots.is_empty(),
         "{left:?}"
     );
 }
@@ -577,14 +656,14 @@ fn fake_a_snapshot_outlives_its_vm() {
 }
 
 #[test]
-fn fake_time_moves_only_in_wait_and_a_healthcheck_repeats_its_last_code() {
+fn fake_time_moves_only_in_wait_and_a_healthcheck_ends_at_once_or_at_its_timeout() {
     let fake = Fake::new(Scenario {
         rules: vec![
             rule(
                 "api",
                 Script {
                     exit: Some((0, Duration::from_secs(30))),
-                    health: vec![1, 0],
+                    health: vec![Some(1), None, Some(0)],
                     ..Script::default()
                 },
             ),
@@ -599,14 +678,31 @@ fn fake_time_moves_only_in_wait_and_a_healthcheck_repeats_its_last_code() {
     let [api, db] = ids.as_slice() else {
         panic!("{ids:?}")
     };
-    let codes: Vec<Option<i32>> = (0..3)
+    let timeout = Duration::from_secs(5);
+    let attempts: Vec<(Option<i32>, Instant)> = (0..4)
         .map(|_| {
-            let check = Waitable::Exec(fake.exec_detached(api, &[]).unwrap());
-            fake.wait(&[check], fake.now()).unwrap().unwrap().code
+            let check = Waitable::Exec(fake.exec_detached(api, &[], timeout).unwrap());
+            let ended = fake.wait(&[check], fake.now() + timeout).unwrap().unwrap();
+            (ended.code, ended.at)
         })
         .collect();
-    assert_eq!(codes, [Some(1), Some(0), Some(0)]);
-    assert_eq!(fake.now(), start);
+    let late = start + timeout;
+    assert_eq!(
+        attempts,
+        [
+            (Some(1), start),
+            (None, late),
+            (Some(0), late),
+            (Some(0), late)
+        ]
+    );
+    assert_eq!(fake.now(), late);
+    let journal = fake.journal();
+    let given = journal.iter().filter_map(|call| match call {
+        Call::ExecDetached { timeout, .. } => Some(*timeout),
+        _ => None,
+    });
+    assert!(given.eq([timeout; 4]), "{journal:#?}");
 
     let api_exit = [Waitable::Sandbox(api.clone())];
     assert!(
@@ -641,7 +737,7 @@ fn fake_time_moves_only_in_wait_and_a_healthcheck_repeats_its_last_code() {
     let stopped = fake.wait(&db_exit, fake.now() + EXIT).unwrap().unwrap();
     assert_eq!(
         (stopped.code, stopped.at),
-        (None, start + Duration::from_secs(40))
+        (Some(0), start + Duration::from_secs(40))
     );
     destroy(&fake, &ids);
 }
@@ -748,7 +844,7 @@ fn on_fake(rules: Vec<Rule>, case: impl FnOnce(&Fake)) {
     case(&fake);
     let left = fake.leftovers().unwrap();
     assert!(
-        left.sandboxes.is_empty() && left.volumes.is_empty() && left.snapshots.is_empty(),
+        left.sandboxes.is_empty() && left.snapshots.is_empty(),
         "left behind: {left:?}"
     );
 }
@@ -793,7 +889,7 @@ fn launch(service: &str, image: &str) -> Launch {
         ports: Vec::new(),
         peers: Vec::new(),
         outbound: Outbound::Off,
-        stop_signal: "SIGTERM".into(),
+        stop_signal: None,
         stop_grace: Duration::from_secs(5),
         max_duration: Duration::from_secs(15 * 60),
         seed: None,
@@ -892,3 +988,6 @@ fn write_tree(path: &Utf8Path) {
     tar.append_link(&mut link, "link", "run.sh").unwrap();
     tar.finish().unwrap();
 }
+
+#[cfg(feature = "microsandbox")]
+mod live;

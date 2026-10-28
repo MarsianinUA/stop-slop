@@ -49,6 +49,12 @@ jobs:
           node-version: 22
       - run: cargo fmt --check
       - run: cargo clippy --locked --workspace --all-targets -- -D warnings
+      # No crate of the workspace turns the adapter on before T-14, so without these two steps no OS
+      # of CI would build the SDK or lint the adapter.
+      - name: Lint the microsandbox adapter
+        run: cargo clippy --locked -p sandbox --features microsandbox --all-targets -- -D warnings
+      - name: Unit tests of the adapter
+        run: cargo test --locked -p sandbox --features microsandbox --lib
       # guest-release.yml builds this on a tag; here a break shows on the PR instead.
       - name: Build stand-guest for musl, as the release does
         if: runner.os == 'Linux'
@@ -63,8 +69,20 @@ jobs:
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
           echo STAND_GUEST_NF_REQUIRED=1 >> "$GITHUB_ENV"
       - run: cargo test --locked --workspace
-      # The root cases of guest (the probe's privilege drop, FITRIM on a loop-mounted ext4) skipped
-      # above; here they run as root, where a skip fails, and the count shows the filter matched both.
+      # The root case of `run` starts the test's stand-guest as another user, who must pass through
+      # every folder above it; the runner's home is not open to other users.
+      - name: Let other users reach the test build
+        if: runner.os == 'Linux'
+        run: |
+          dir="$PWD/target/debug"
+          while [ "$dir" != / ]; do
+            if [ -O "$dir" ]; then chmod o+x "$dir"; fi
+            dir=$(dirname "$dir")
+          done
+          namei -l "$PWD/target/debug/stand-guest"
+      # The root cases of guest (the probe's privilege drop, a service's stdio of another user, FITRIM
+      # on a loop-mounted ext4 and on one whose disk takes no discard) skipped above; here they run
+      # as root, where a skip fails, and the count shows the filter matched each.
       # `--workspace` rather than `-p guest` keeps the features of the build above, so nothing is rebuilt.
       - name: Run the root cases of guest under sudo
         if: runner.os == 'Linux'
@@ -75,5 +93,52 @@ jobs:
         run: |
           cargo test --locked --workspace --test guest -- --exact \
             process::exec_under_root_takes_the_probe_group_and_the_user \
-            trim::trim_under_root_frees_the_blocks_of_deleted_files | tee "$RUNNER_TEMP/root.log"
-          grep -q ' 2 passed;' "$RUNNER_TEMP/root.log"
+            process::run_gives_a_command_of_another_user_stdio_it_can_reopen \
+            trim::trim_under_root_frees_the_blocks_of_deleted_files \
+            trim::trim_under_root_tells_a_disk_without_discard_from_a_failure | tee "$RUNNER_TEMP/root.log"
+          grep -q ' 4 passed;' "$RUNNER_TEMP/root.log"
+
+  # Runs the stand-guest of this commit, not the pinned release, so a change to the guest shows here
+  # before it is released.
+  live:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    defaults:
+      run:
+        working-directory: stand
+    env:
+      STOP_SLOP_STAND_LIVE: "1"
+    steps:
+      - uses: actions/checkout@v7
+      # /dev/kvm belongs to root and the kvm group, and the runner's user, who starts the VMs, is in
+      # neither.
+      - name: Let the runner's user open /dev/kvm
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+          ls -l /dev/kvm
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: stand -> target
+      - name: Build stand-guest for the guest
+        run: |
+          rustup target add x86_64-unknown-linux-musl
+          cargo build --locked -p guest --release --target x86_64-unknown-linux-musl
+          echo "STOP_SLOP_STAND_GUEST=$PWD/target/x86_64-unknown-linux-musl/release/stand-guest" >> "$GITHUB_ENV"
+      # The SDK's runtime and the images of the set download once per key, not per run (Docker Hub
+      # limits anonymous pulls). The SDK takes whatever runtime its home holds without checking its
+      # version, so a home only comes back to the same Cargo.lock; images.rs names the images.
+      - name: Keep the microsandbox home between runs
+        uses: actions/cache@v6
+        with:
+          path: /tmp/stop-slop-stand-live
+          key: stand-live-${{ hashFiles('stand/Cargo.lock') }}-${{ hashFiles('stand/crates/sandbox/tests/contract/images.rs') }}
+          restore-keys: stand-live-${{ hashFiles('stand/Cargo.lock') }}-
+      # One case at a time: `leftovers` sees every VM of the home, another case's too.
+      - name: The contract set on microsandbox VMs
+        run: cargo test --locked -p sandbox --features microsandbox --test contract -- --test-threads=1
+      - name: Notes of the live run for the PR description
+        if: always()
+        run: cat /tmp/stop-slop-stand-live/notes.txt || true

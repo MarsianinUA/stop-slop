@@ -77,11 +77,12 @@ fn argument_round_trip_for_every_subcommand() {
             fault: "fault.json".into(),
         }),
         Command::Run(RunArgs {
-            status: "/stand/net/status.json".into(),
+            status: "/stand/run/status.json".into(),
+            log: "/stand/run/output.log".into(),
             command: vec!["node".into(), "server.js".into()],
         }),
         Command::Stop(StopArgs {
-            status: "/stand/net/status.json".into(),
+            status: "/stand/run/status.json".into(),
             signal: "SIGTERM".into(),
             grace: Duration::from_millis(10_000),
         }),
@@ -810,6 +811,75 @@ mod process {
         assert!(!ExecStatus::path(&out).exists());
     }
 
+    /// In a guest the agent's pipes are root's, open to root only, and the service runs as the
+    /// image's user; the pipes of the test are root's here.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn run_gives_a_command_of_another_user_stdio_it_can_reopen() {
+        use std::os::unix::fs::PermissionsExt;
+        use std::os::unix::process::CommandExt;
+
+        if unsafe { libc::geteuid() } != 0 {
+            return skip_root_case(
+                "run_gives_a_command_of_another_user_stdio_it_can_reopen",
+                "not root",
+            );
+        }
+        let temp = tempfile::tempdir().unwrap();
+        fs::set_permissions(temp.path(), fs::Permissions::from_mode(0o777)).unwrap();
+        let status = temp.path().join("status.json");
+        let script = "echo out > /dev/stdout && echo err > /dev/stderr";
+        let output = guest(&run(&status, script, &[]))
+            .uid(4321)
+            .gid(4321)
+            .output()
+            .unwrap();
+        let log = fs::read_to_string(temp.path().join("output.log")).unwrap();
+        // Two pipes: the two lines come in either order.
+        let mut lines: Vec<&str> = log.lines().collect();
+        lines.sort_unstable();
+        assert_eq!((output.status.code(), lines), (Some(0), vec!["err", "out"]));
+    }
+
+    /// Beyond the last MiB that the agent keeps of a job, both streams, and none on `run`'s own.
+    #[test]
+    fn run_keeps_the_whole_output_of_its_command_in_its_log() {
+        let temp = tempfile::tempdir().unwrap();
+        let status = temp.path().join("status.json");
+        let script = "echo first; sleep 0.2; echo err >&2; sleep 0.2; \
+                      head -c 3145728 /dev/zero | tr '\\0' x; echo; echo last";
+        let output = guest(&run(&status, script, &[])).output().unwrap();
+        assert_eq!(output.status.code(), Some(0));
+        assert!(output.stdout.is_empty() && output.stderr.is_empty());
+        let log = fs::read_to_string(temp.path().join("output.log")).unwrap();
+        let x = "x".repeat(3 << 20);
+        assert!(
+            log == format!("first\nerr\n{x}\nlast\n"),
+            "{} bytes",
+            log.len()
+        );
+    }
+
+    /// The service goes on when its log refuses a write: `/dev/full` takes none.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn run_tells_a_failed_log_write_once_and_its_command_runs_on() {
+        let temp = tempfile::tempdir().unwrap();
+        let status = temp.path().join("status.json");
+        let script = "head -c 1048576 /dev/zero; echo err >&2; exit 3";
+        let output = guest(&Command::Run(RunArgs {
+            status: status.clone(),
+            log: "/dev/full".into(),
+            command: sh(script, &[]),
+        }))
+        .output()
+        .unwrap();
+        let stderr = String::from_utf8(output.stderr).unwrap();
+        assert_eq!(output.status.code(), Some(3), "{stderr}");
+        assert_eq!(recorded(&status)["code"], 3);
+        assert_eq!(stderr.matches("write /dev/full").count(), 1, "{stderr}");
+    }
+
     /// `sh -c <script>` with `$1`, `$2`... set to `args`.
     fn sh(script: &str, args: &[&Path]) -> Vec<String> {
         let shell = ["sh", "-c", script, "sh"].map(String::from);
@@ -817,9 +887,11 @@ mod process {
         shell.into_iter().chain(args).collect()
     }
 
+    /// The log beside the status file.
     fn run(status: &Path, script: &str, args: &[&Path]) -> Command {
         Command::Run(RunArgs {
             status: status.into(),
+            log: status.with_file_name("output.log"),
             command: sh(script, args),
         })
     }
@@ -946,6 +1018,41 @@ mod trim {
         );
     }
 
+    #[test]
+    fn trim_under_root_tells_a_disk_without_discard_from_a_failure() {
+        const NAME: &str = "trim_under_root_tells_a_disk_without_discard_from_a_failure";
+        if unsafe { libc::geteuid() } != 0 {
+            return skip_root_case(NAME, "not root");
+        }
+        let disk = match Ext4::without_discard() {
+            Ok(disk) => disk,
+            Err(why) => return skip_root_case(NAME, &why),
+        };
+        let no_discard = format!(
+            "stand-guest trim: FITRIM {}: its disk does not support discard",
+            disk.dir.display()
+        );
+        let output = trim(&[&disk.dir]);
+        let stderr = String::from_utf8(output.stderr).unwrap();
+        assert_eq!(
+            output.status.code(),
+            Some(i32::from(guest::TRIM_NO_DISCARD)),
+            "{stderr}"
+        );
+        assert_eq!(stderr.lines().collect::<Vec<_>>(), [no_discard.as_str()]);
+
+        let output = trim(&[&disk.dir, Path::new("/proc")]);
+        assert_eq!(output.status.code(), Some(125));
+        let stderr = String::from_utf8(output.stderr).unwrap();
+        assert_eq!(
+            stderr.lines().collect::<Vec<_>>(),
+            [
+                no_discard.as_str(),
+                "stand-guest trim: FITRIM /proc: not supported by its file system"
+            ]
+        );
+    }
+
     fn trim(mounts: &[&Path]) -> Output {
         let mounts = mounts.iter().map(|mount| mount.to_path_buf()).collect();
         guest(&Command::Trim(TrimArgs { mounts })).output().unwrap()
@@ -955,31 +1062,54 @@ mod trim {
     struct Ext4 {
         image: PathBuf,
         dir: PathBuf,
-        _temp: tempfile::TempDir,
+        /// The ramfs the image is on, if any.
+        ram: Option<PathBuf>,
+        temp: tempfile::TempDir,
     }
 
     impl Ext4 {
         fn mount() -> Result<Ext4, String> {
+            Ext4::make(false)
+        }
+
+        /// The image on a ramfs, which has no `fallocate`, so its loop device takes no discard.
+        fn without_discard() -> Result<Ext4, String> {
+            Ext4::make(true)
+        }
+
+        fn make(on_ram: bool) -> Result<Ext4, String> {
             let temp = tempfile::tempdir().unwrap();
-            let image = temp.path().join("disk.img");
-            let dir = temp.path().join("w");
-            File::create(&image).unwrap().set_len(64 << 20).unwrap();
-            fs::create_dir(&dir).unwrap();
+            let mut disk = Ext4 {
+                image: temp.path().join("disk.img"),
+                dir: temp.path().join("w"),
+                ram: None,
+                temp,
+            };
+            if on_ram {
+                let ram = disk.temp.path().join("ram");
+                fs::create_dir(&ram).unwrap();
+                ran(Process::new("mount")
+                    .args(["-t", "ramfs", "ramfs"])
+                    .arg(&ram))?;
+                disk.image = ram.join("disk.img");
+                disk.ram = Some(ram);
+            }
+            File::create(&disk.image)
+                .unwrap()
+                .set_len(64 << 20)
+                .unwrap();
+            fs::create_dir(&disk.dir).unwrap();
             // The inode tables and the journal are written now, not by a kernel thread while the
             // image is measured.
             let lazy = "lazy_itable_init=0,lazy_journal_init=0";
             ran(Process::new("mkfs.ext4")
                 .args(["-q", "-F", "-b", "4096", "-E", lazy])
-                .arg(&image))?;
+                .arg(&disk.image))?;
             ran(Process::new("mount")
                 .args(["-o", "loop"])
-                .arg(&image)
-                .arg(&dir))?;
-            Ok(Ext4 {
-                image,
-                dir,
-                _temp: temp,
-            })
+                .arg(&disk.image)
+                .arg(&disk.dir))?;
+            Ok(disk)
         }
 
         fn allocated(&self) -> u64 {
@@ -987,10 +1117,15 @@ mod trim {
         }
     }
 
-    /// `mount -o loop` frees the loop device on the unmount.
+    /// `mount -o loop` frees the loop device on the unmount. Also runs when `make` failed half
+    /// way, so the ramfs never outlives the test; `output` keeps the complaint about what was not
+    /// mounted yet out of the run.
     impl Drop for Ext4 {
         fn drop(&mut self) {
-            let _ = Process::new("umount").arg(&self.dir).status();
+            let _ = Process::new("umount").arg(&self.dir).output();
+            if let Some(ram) = &self.ram {
+                let _ = Process::new("umount").arg(ram).output();
+            }
         }
     }
 

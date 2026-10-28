@@ -1,6 +1,7 @@
 //! What the sandbox adapter and `stand-guest` exchange: the subcommand arguments, the files of
-//! `/stand/net` and the status of an `exec`. The adapter writes the arguments and `FaultSwitch` and
-//! reads `Counters`, `StopReport` and `ExecStatus`; the binary does the opposite.
+//! `/stand/net`, the status of `run` and of an `exec`. The adapter writes the arguments and
+//! `FaultSwitch` and reads `Counters`, `RunStatus`, `StopReport` and `ExecStatus`; the binary does the
+//! opposite.
 
 use std::fs;
 use std::io::{self, Write};
@@ -61,10 +62,12 @@ pub struct UnexposedName {
     pub address: Ipv4Addr,
 }
 
-/// `stand-guest run`: runs the command in its own process group, as the user of the exec; exits with its code.
+/// `stand-guest run`: runs the command in its own process group, as the user of the exec, its stdout and
+/// stderr through pipes of that user into `log`, as they come; exits with its code.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RunArgs {
     pub status: PathBuf,
+    pub log: PathBuf,
     pub command: Vec<String>,
 }
 
@@ -90,15 +93,21 @@ pub struct ExecArgs {
 }
 
 /// `stand-guest trim`: as root, the FITRIM ioctl on each mount point of an owned disk, without image tools.
-/// The root disk does not support it, so the adapter never names it.
+/// The root disk does not support it, so the adapter never names it. Exits 0 when every mount was
+/// trimmed, `TRIM_NO_DISCARD` when the only ones left are on disks that take no discard, 125 when any
+/// other failed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TrimArgs {
     pub mounts: Vec<PathBuf>,
 }
 
+/// Not 125: a disk that takes no discard, as the owned disks of VMs on CI's Linux runner, is nothing
+/// the guest could fix.
+pub const TRIM_NO_DISCARD: u8 = 3;
+
 impl Command {
     /// The arguments after the binary's path, for example
-    /// `stop --status /stand/net/status.json --signal SIGTERM --grace 10000`.
+    /// `stop --status /stand/run/status.json --signal SIGTERM --grace 10000`.
     pub fn to_args(&self) -> Vec<String> {
         let mut args = Args::default();
         match self {
@@ -129,6 +138,7 @@ impl Command {
             Command::Run(run) => {
                 args.word("run");
                 args.path("--status", &run.status);
+                args.path("--log", &run.log);
                 args.rest(&run.command);
             }
             Command::Stop(stop) => {
@@ -178,6 +188,7 @@ impl Command {
             }),
             "run" => Command::Run(RunArgs {
                 status: flags.one("--status")?.into(),
+                log: flags.one("--log")?.into(),
                 command: flags.command()?,
             }),
             "stop" => Command::Stop(StopArgs {
@@ -428,6 +439,29 @@ impl FaultSwitch {
     pub fn parse(text: &str) -> Result<FaultSwitch, GuestError> {
         serde_json::from_str(text)
             .map_err(|error| GuestError::File(format!("fault switch: {error}")))
+    }
+}
+
+/// The status file of `stand-guest run`, written when the command starts and again with its shell code
+/// when it ends. `run` exits with that code too, but its own failure is also 125, so the adapter takes
+/// the code of a service only from this file.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RunStatus {
+    pub pid: i32,
+    pub pgid: i32,
+    pub code: Option<i32>,
+    /// Milliseconds since the Unix epoch.
+    pub exited_at: Option<u64>,
+}
+
+impl RunStatus {
+    pub fn write(&self, path: &Path) -> io::Result<()> {
+        write_whole(path, &json(self))
+    }
+
+    pub fn parse(text: &str) -> Result<RunStatus, GuestError> {
+        serde_json::from_str(text).map_err(|error| GuestError::File(format!("run status: {error}")))
     }
 }
 

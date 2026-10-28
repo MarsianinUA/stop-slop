@@ -210,8 +210,8 @@ pub struct Service {
     pub expose: Vec<Exposed>,
     pub depends_on: BTreeMap<ServiceName, Condition>,
     pub healthcheck: Option<Healthcheck>,
-    /// `SIGTERM` unless `stop_signal` names another.
-    pub stop_signal: String,
+    /// `None`: the image's `STOPSIGNAL`, else `SIGTERM`, as Docker does; the sandbox reads the image.
+    pub stop_signal: Option<String>,
     /// 10s unless `stop_grace_period` says otherwise.
     pub stop_grace: Duration,
     pub cpus: Cpus,

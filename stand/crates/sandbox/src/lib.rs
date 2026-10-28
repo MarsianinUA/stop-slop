@@ -1,5 +1,6 @@
 //! The port to the VMs of a stand run. `run` and `cli` see only the trait and these types: no
-//! Compose types (`spec`) and no SDK. The adapters sit behind features: `fake` for tests.
+//! Compose types (`spec`) and no SDK. The adapters sit behind features: `fake` for tests,
+//! `microsandbox` for real VMs.
 
 use std::collections::BTreeMap;
 use std::fmt;
@@ -14,6 +15,14 @@ mod fake;
 #[cfg(feature = "fake")]
 pub use fake::{Call, Fake, Rule, Scenario, Script};
 
+// The module shares its name with the SDK crate: a bare `microsandbox::` path is ambiguous here,
+// so the re-export goes through `self::`, and the module names the SDK `::microsandbox`.
+#[cfg(feature = "microsandbox")]
+mod microsandbox;
+
+#[cfg(feature = "microsandbox")]
+pub use self::microsandbox::Microsandbox;
+
 pub trait Sandbox {
     /// Virtual in `Fake`: it moves only in `wait`.
     fn now(&self) -> Instant;
@@ -23,7 +32,15 @@ pub trait Sandbox {
     /// never onto the VM (a restored VM has no VM env), and every later exec of the VM gets the same env.
     fn create(&self, batch: &[Launch]) -> Result<Vec<SandboxId>, SandboxError>;
     /// Healthcheck attempts: `run` waits on them together with every sandbox of the batch and `Cancel`.
-    fn exec_detached(&self, id: &SandboxId, argv: &[String]) -> Result<ExecId, SandboxError>;
+    /// At `timeout` the guest kills the attempt with its process group, as Docker kills a check past
+    /// its `timeout`, and `wait` gives it `code: None`. A program that does not start ends the
+    /// attempt at once with 127, as a shell gives it.
+    fn exec_detached(
+        &self,
+        id: &SandboxId,
+        argv: &[String],
+        timeout: Duration,
+    ) -> Result<ExecId, SandboxError>;
     /// The first of `what` to exit, or `None` at `deadline`.
     fn wait(&self, what: &[Waitable], deadline: Instant) -> Result<Option<Exited>, SandboxError>;
     /// Probes and `inspect`: killed at `deadline`; its sockets reach only the guest's own loopback;
@@ -41,20 +58,21 @@ pub trait Sandbox {
     fn fault(&self, ids: &[SandboxId], fault: &Fault) -> Result<(), SandboxError>;
     // `metrics`, `logs`, `copy_out` work only before `destroy`; after it they are `Gone`.
     fn metrics(&self, id: &SandboxId) -> Result<Metrics, SandboxError>;
+    /// The service's stdout and stderr, whole since its start, the two interleaved as they came.
     fn logs(&self, id: &SandboxId) -> Result<Vec<u8>, SandboxError>;
-    /// The guest folder as one tar packed in the guest, one SDK copy, unpacked into the empty folder `host`.
+    /// The guest folder as one tar packed in the guest and unpacked into `host`, which must be an
+    /// existing empty folder (`Backend` otherwise).
     fn copy_out(&self, id: &SandboxId, guest: &str, host: &Utf8Path) -> Result<(), SandboxError>;
-    /// Used bytes of each volume of `id`, by `du -sb` in the guest; after `stop`, before `snapshot`.
+    /// Used bytes of each volume of `id`, by `du -sk` in the guest; after `stop`, before `snapshot`.
     fn volume_sizes(&self, id: &SandboxId) -> Result<Vec<(VolumeName, u64)>, SandboxError>;
     /// After `stop`, or the exit of the prepare service, before `destroy`. FITRIM on every owned disk first,
-    /// so deleted blocks stay out; a failed trim still snapshots. The snapshot carries the VM with its disks.
+    /// so deleted blocks stay out where the disk takes discards (not on CI's Linux runner); a failed trim
+    /// still snapshots. The snapshot carries the VM with its disks.
     fn snapshot(&self, id: &SandboxId) -> Result<SnapshotId, SandboxError>;
-    /// Kills whatever still runs; destroying twice is not an error.
+    /// Kills whatever still runs, and the VM's volumes go with it; destroying twice is not an error.
     fn destroy(&self, id: &SandboxId) -> Result<(), SandboxError>;
-    /// Goes, with `Leftovers.volumes`, if T-11 shows that owned disks die with their VM.
-    fn drop_volumes(&self, volumes: &[VolumeName]) -> Result<(), SandboxError>;
     fn drop_snapshot(&self, snapshot: &SnapshotId) -> Result<(), SandboxError>;
-    /// Everything under the stand's namespace label, which the adapter puts on every sandbox, volume and snapshot.
+    /// Every sandbox and snapshot in the stand's namespace, also those of an earlier process.
     fn leftovers(&self) -> Result<Leftovers, SandboxError>;
     fn prune_images(&self, keep: &[ImageRef]) -> Result<(), SandboxError>;
 }
@@ -80,7 +98,8 @@ pub struct Launch {
     /// Every service of the version, with and without `expose`.
     pub peers: Vec<Peer>,
     pub outbound: Outbound,
-    pub stop_signal: String,
+    /// `None`: the image's `STOPSIGNAL`, else `SIGTERM`, as Docker does.
+    pub stop_signal: Option<String>,
     pub stop_grace: Duration,
     /// `run::span(&Stand)`.
     pub max_duration: Duration,
@@ -100,8 +119,8 @@ pub struct Pulled {
 pub enum Seed {
     /// The image, root disk and owned disks come from the snapshot; cpus, memory, outbound, ports and
     /// binds from the `Launch` (plan, row 87). `image` equals the snapshot's (`spec` and `run` keep it so);
-    /// a `Mount::Volume` names a disk the snapshot carries, since a restore adds none. A bind path of the
-    /// snapshotted VM missing from `mounts` is `Backend`, in `Fake` too.
+    /// a `Mount::Volume` names by its guest path a disk the snapshot carries, since a restore adds
+    /// none. A bind path of the snapshotted VM missing from `mounts` is `Backend`, in `Fake` too.
     Snapshot(SnapshotId),
     /// A fresh owned ext4 version disk at the parent folder of `at`, and `tar` unpacked into `at` by the
     /// image's user before the command. Input goes through `stdin_pipe` in chunks up to 1 MiB: `stdin_bytes`
@@ -152,7 +171,7 @@ macro_rules! name {
 
         impl $name {
             // A build without an adapter has no caller of the adapters' constructors.
-            #[cfg_attr(not(feature = "fake"), allow(dead_code))]
+            #[cfg_attr(not(any(feature = "fake", feature = "microsandbox")), allow(dead_code))]
             $new fn new(id: impl Into<String>) -> $name {
                 $name(id.into())
             }
@@ -182,7 +201,9 @@ pub enum Waitable {
     Exec(ExecId),
 }
 
-/// `code` is `None` when the process was killed without one.
+/// `code` is `None` when there is none to give: the VM went away under the process, or the guest
+/// killed a healthcheck attempt at its `timeout`. A service ended by `stop` has the code it ended
+/// with, 137 after the kill at grace. `at` is when it ended, not when `wait` saw it.
 #[derive(Debug, Clone)]
 pub struct Exited {
     pub what: Waitable,
@@ -249,7 +270,6 @@ pub struct Unexposed {
 #[derive(Debug, Default)]
 pub struct Leftovers {
     pub sandboxes: Vec<SandboxId>,
-    pub volumes: Vec<VolumeName>,
     pub snapshots: Vec<SnapshotId>,
 }
 

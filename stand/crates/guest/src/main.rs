@@ -2,6 +2,7 @@
 //! failed, and one line on stderr says why. `run` exits with its command's code as a shell gives it:
 //! 126 when the command could not start, 127 when it was not found, 128 + n when signal n killed it.
 //! `exec` exits 0 once it wrote how its command ended to `<out>.status` (`guest::ExecStatus`).
+//! `trim` exits `guest::TRIM_NO_DISCARD` when the only mounts it left are on disks without discard.
 
 #[cfg(unix)]
 mod net;

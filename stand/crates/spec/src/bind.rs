@@ -17,7 +17,6 @@ use crate::{
 const REPEAT: NonZeroU32 = NonZeroU32::new(3).unwrap();
 const SETUP_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 const TIMEOUT: Duration = Duration::from_secs(5 * 60);
-const STOP_SIGNAL: &str = "SIGTERM";
 const STOP_GRACE: Duration = Duration::from_secs(10);
 /// Compose's defaults of a healthcheck; `start_period` is 0.
 const HEALTH_INTERVAL: Duration = Duration::from_secs(30);
@@ -225,8 +224,7 @@ fn service(field: &Field, dir: &Utf8Path, volumes: &BTreeSet<String>) -> Result<
         expose: optional(field, "expose", expose)?.unwrap_or_default(),
         depends_on: optional(field, "depends_on", depends_on)?.unwrap_or_default(),
         healthcheck: optional(field, "healthcheck", healthcheck)?,
-        stop_signal: optional(field, "stop_signal", |field| field.parse(signal))?
-            .unwrap_or_else(|| STOP_SIGNAL.to_owned()),
+        stop_signal: optional(field, "stop_signal", |field| field.parse(signal))?,
         stop_grace: optional(field, "stop_grace_period", |field| {
             field.parse(units::duration)
         })?

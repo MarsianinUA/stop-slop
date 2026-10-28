@@ -6,48 +6,69 @@
 //! a container's processes end with its main one.
 
 use std::fs::{self, File};
-use std::io::{self, Write};
+use std::io::{self, Read, Write};
 use std::os::unix::process::{CommandExt, ExitStatusExt};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Command as Process, ExitCode, ExitStatus, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::{self, Receiver};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use guest::{
-    ExecArgs, ExecEnd, ExecStatus, PROBE_GID, RunArgs, StopArgs, StopReport, signal_number,
+    ExecArgs, ExecEnd, ExecStatus, PROBE_GID, RunArgs, RunStatus, StopArgs, StopReport,
+    signal_number,
 };
-use serde::{Deserialize, Serialize};
 
 const POLL: Duration = Duration::from_millis(5);
 /// How long `stop` waits for `run` to record the code once the command is gone or killed.
 const CODE_WAIT: Duration = Duration::from_secs(2);
-
-/// The status file. `run` writes the pid and the group when the command starts, and its
-/// `shell_code` and the time when it ends.
-#[derive(Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct Status {
-    pid: libc::pid_t,
-    pgid: libc::pid_t,
-    code: Option<i32>,
-    /// Milliseconds since the Unix epoch.
-    exited_at: Option<u64>,
-}
+/// How long `run` goes on writing into the log what its command wrote before it ended.
+const DRAIN: Duration = Duration::from_secs(1);
 
 pub fn run(args: &RunArgs) -> ExitCode {
     const WHO: &str = "stand-guest run";
-    let mut child = match command(&args.command).process_group(0).spawn() {
-        Ok(child) => child,
-        Err(error) => return not_started(WHO, &args.command[0], &error),
+    // The agent keeps only the last MiB of a job's output, so the command's goes into a file of
+    // its own, made first, so that a command that does not start says why there too.
+    let mut file = match File::create(&args.log) {
+        Ok(file) => file,
+        Err(error) => return crate::failed(WHO, format!("create {}: {error}", args.log.display())),
     };
+    // Pipes, not the file: a command may reopen `/dev/stdout` by name, as nginx opens
+    // `/dev/stderr` for its log, and a file opened anew would write over the log from its start.
+    // The agent's own pipes are root's and open to root only, so they would refuse such a command
+    // of another user.
+    let spawned = command(&args.command)
+        .process_group(0)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn();
+    let mut child = match spawned {
+        Ok(child) => child,
+        Err(error) => {
+            let (why, _) = start_failure(&args.command[0], &error);
+            let _ = writeln!(file, "{WHO}: {why}");
+            return not_started(WHO, &args.command[0], &error);
+        }
+    };
+    let log = Arc::new(Log {
+        file: Mutex::new(file),
+        path: args.log.clone(),
+        failed: AtomicBool::new(false),
+    });
+    let relays = [
+        child.stdout.take().map(|out| relay(out, Arc::clone(&log))),
+        child.stderr.take().map(|err| relay(err, Arc::clone(&log))),
+    ];
     let pid = child.id() as libc::pid_t;
-    let mut status = Status {
+    let mut status = RunStatus {
         pid,
         pgid: pid,
         code: None,
         exited_at: None,
     };
-    if let Err(error) = write_status(&args.status, &status) {
+    if let Err(error) = status.write(&args.status) {
         // `stop` could not reach a command that has no status file.
         kill_group(pid);
         let _ = child.wait();
@@ -58,10 +79,55 @@ pub fn run(args: &RunArgs) -> ExitCode {
     let code = shell_code(exit);
     status.code = Some(code.into());
     status.exited_at = Some(now_ms());
-    if let Err(error) = write_status(&args.status, &status) {
+    if let Err(error) = status.write(&args.status) {
         eprintln!("{WHO}: write {}: {error}", args.status.display());
     }
+    // The group is gone, so the pipes end once drained, unless a process that left the group
+    // still holds one: the service has ended all the same.
+    let drained_by = Instant::now() + DRAIN;
+    for relay in relays.into_iter().flatten() {
+        let _ = relay.recv_timeout(drained_by.saturating_duration_since(Instant::now()));
+    }
     ExitCode::from(code)
+}
+
+/// The command's stdout and stderr in one file, each read written whole under the lock, so the two
+/// interleave as they come.
+struct Log {
+    file: Mutex<File>,
+    path: PathBuf,
+    failed: AtomicBool,
+}
+
+impl Log {
+    /// A failed write is told once on `run`'s stderr, which the agent keeps, and the relays go on
+    /// reading: the service must neither block on a full pipe nor die for its log.
+    fn write(&self, bytes: &[u8]) {
+        let mut file = self.file.lock().unwrap_or_else(PoisonError::into_inner);
+        if let Err(error) = file.write_all(bytes)
+            && !self.failed.swap(true, Ordering::Relaxed)
+        {
+            eprintln!("stand-guest run: write {}: {error}", self.path.display());
+        }
+    }
+}
+
+/// Copies `from` into `log` until its end, and tells when it got there.
+fn relay(mut from: impl Read + Send + 'static, log: Arc<Log>) -> Receiver<()> {
+    let (done, finished) = mpsc::channel();
+    thread::spawn(move || {
+        let mut buf = vec![0; 1 << 16];
+        loop {
+            match from.read(&mut buf) {
+                Ok(0) => break,
+                Ok(n) => log.write(&buf[..n]),
+                Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
+                Err(_) => break,
+            }
+        }
+        let _ = done.send(());
+    });
+    finished
 }
 
 pub fn stop(args: &StopArgs) -> ExitCode {
@@ -328,20 +394,11 @@ fn report(report: StopReport) -> ExitCode {
     ExitCode::SUCCESS
 }
 
-/// Through a temporary file, so `stop` never reads a part.
-fn write_status(path: &Path, status: &Status) -> io::Result<()> {
-    let mut tmp = path.as_os_str().to_owned();
-    tmp.push(".tmp");
-    let text = serde_json::to_string(status).expect("a status serializes");
-    fs::write(&tmp, text)?;
-    fs::rename(&tmp, path)
-}
-
-fn read_status(path: &Path) -> Result<Status, String> {
+fn read_status(path: &Path) -> Result<RunStatus, String> {
     let text =
         fs::read_to_string(path).map_err(|error| format!("read {}: {error}", path.display()))?;
-    let status: Status = serde_json::from_str(&text)
-        .map_err(|error| format!("parse {}: {error}", path.display()))?;
+    let status =
+        RunStatus::parse(&text).map_err(|error| format!("parse {}: {error}", path.display()))?;
     // The service's user can write the file, and `kill` and `killpg` read 0, -1 and 1 as whole
     // sets of processes, which a root `stop` would reach.
     if status.pid <= 1 || status.pgid <= 1 {

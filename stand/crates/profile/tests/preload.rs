@@ -219,15 +219,20 @@ fn a_worker_thread_gets_files_of_its_own() {
     assert_eq!(status.code(), Some(0));
     let names = folders.names();
     let pid: String = names[0].chars().take_while(char::is_ascii_digit).collect();
-    assert_eq!(
-        names,
-        [
-            format!("{pid}-t1.0.cpuprofile"),
-            format!("{pid}-t1.start.json"),
-            format!("{pid}.0.cpuprofile"),
-            format!("{pid}.start.json"),
-        ]
-    );
+    // Besides the chunk at `exit`, each thread writes one every 2 s while its loop runs, and the
+    // main thread runs until the worker ends: on a Windows runner that took over 4 s.
+    let mut expected = Vec::new();
+    for id in [format!("{pid}-t1"), pid] {
+        let chunks = names
+            .iter()
+            .filter(|name| name.starts_with(&format!("{id}.")) && name.ends_with(".cpuprofile"))
+            .count();
+        assert!(chunks >= 1, "no chunk of {id} in {names:?}");
+        expected.extend((0..chunks).map(|n| format!("{id}.{n}.cpuprofile")));
+        expected.push(format!("{id}.start.json"));
+    }
+    expected.sort();
+    assert_eq!(names, expected);
     assert_eq!(folders.read().processes, 2);
 }
 

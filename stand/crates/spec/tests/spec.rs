@@ -179,8 +179,8 @@ fn the_example_of_the_plan_reads_into_kinds_levels_defaults_and_the_prepare_serv
             "{name}"
         );
         assert_eq!(
-            (service.stop_signal.as_str(), service.stop_grace),
-            ("SIGTERM", Duration::from_secs(10))
+            (service.stop_signal.as_deref(), service.stop_grace),
+            (None, Duration::from_secs(10))
         );
         let outbound = if name == "prepare" {
             Outbound::Public
@@ -242,8 +242,8 @@ fn values_take_the_forms_of_compose() {
         )
     );
     assert_eq!(
-        (cache.stop_signal.as_str(), cache.stop_grace),
-        ("SIGINT", Duration::from_secs(90))
+        (cache.stop_signal.as_deref(), cache.stop_grace),
+        (Some("SIGINT"), Duration::from_secs(90))
     );
     assert_eq!(
         (cache.cpus.get(), cache.memory.get(), cache.replicas.get()),
