@@ -83,6 +83,23 @@ fn lost_a_race(error: &str) -> bool {
     error.contains(RELAY_RACE) || (cfg!(windows) && shared_bind)
 }
 
+/// Checked before any VM boots: the runtime finds a missing folder only in the boot, names it by
+/// its mount tag alone (`mount stand_out_<hash>: ... (os error 2)`), and on Windows that reads as
+/// the race of `with_one_retry`, so a second VM boots for nothing.
+pub(super) fn binds_exist(launch: &Launch) -> Result<(), SandboxError> {
+    for mount in &launch.mounts {
+        if let Mount::Bind { host, guest, .. } = mount
+            && !host.is_dir()
+        {
+            return Err(backend(format!(
+                "{host}, bound on {guest} for `{}`, is not a folder on the host",
+                launch.service
+            )));
+        }
+    }
+    Ok(())
+}
+
 /// Every bind of a VM, fresh or restored, as (guest, host, read-only): `stand-guest`, the
 /// adapter's two folders, then the `Launch`'s.
 fn binds<'a>(
