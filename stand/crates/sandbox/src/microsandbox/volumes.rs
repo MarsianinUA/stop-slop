@@ -33,18 +33,27 @@ const TREE: Duration = Duration::from_secs(300);
 /// The first FITRIM after a mount walks all free space of the disk.
 const TRIM: Duration = Duration::from_secs(120);
 const SNAPSHOT: Duration = Duration::from_secs(300);
-/// The one `create` failure worth a retry: right after a cold pull, the VM process may exit before
-/// its agent relay is up (spike state, 1 of about 40 creates).
+/// Right after a cold pull, the VM process may exit before its agent relay is up (spike state, 1
+/// of about 40 creates).
 const RELAY_RACE: &str = "before agent relay became available";
 
+/// The `create` failures worth one retry: the relay race, and on Windows two VMs of a batch that
+/// bind one writable host folder. Each checks the folder by writing, reading back and removing
+/// the same `msb._probe` stream on it (`microsandbox-filesystem` `stat_store.rs`), so the second
+/// can find the stream gone and fail `mount <tag>: ... (os error 2)`; a moment later it passes.
 pub(super) async fn create_with_retry(
     name: &str,
     make: impl Fn() -> SandboxBuilder,
 ) -> Result<msb::Sandbox, msb::MicrosandboxError> {
     match create_once(name, make()).await {
-        Err(error) if error.to_string().contains(RELAY_RACE) => create_once(name, make()).await,
+        Err(error) if lost_a_race(&error.to_string()) => create_once(name, make()).await,
         other => other,
     }
+}
+
+fn lost_a_race(error: &str) -> bool {
+    let shared_bind = error.contains(": mount ") && error.ends_with("(os error 2)");
+    error.contains(RELAY_RACE) || (cfg!(windows) && shared_bind)
 }
 
 /// A failed `create` may leave its VM behind, so it goes; the error that made it fail is the one
@@ -231,36 +240,47 @@ pub(super) async fn restore(
         }
     }
     let (run, net) = (process::run_dir(folder), network::net_dir(folder));
-    let mut builder = msb::Sandbox::restore_ref(found.reference())
-        .name(name)
-        .cpus(cpus(launch)?)
-        .memory(mib(launch.memory))
-        .max_duration(secs(launch.max_duration))
-        .network_policy(network::policy(launch.outbound))
-        .volume(super::guest::DIR, |m| {
-            m.bind(binary.dir.as_std_path()).readonly()
-        })
-        .volume(process::RUN_DIR, |m| m.bind(run.as_std_path()))
-        .volume(network::NET_DIR, |m| m.bind(net.as_std_path()));
-    for &(host, guest) in published {
-        builder = builder.port(host, guest);
-    }
-    for mount in &launch.mounts {
-        builder = match mount {
-            Mount::Bind {
-                host,
-                guest,
-                read_only,
-            } => builder.volume(guest, |m| bind(m, host, *read_only)),
-            Mount::Volume { guest, .. } => builder.volume(guest, MountBuilder::captured),
-            Mount::Scratch { .. } => builder,
-        };
-    }
-    let restored = within(CREATE, "restore a snapshot", builder.restore()).await;
-    let restored = restored.and_then(|result| result.map_err(restore_error));
-    if restored.is_err() {
-        let _ = destroy_vm(name).await;
-    }
+    let cpus = cpus(launch)?;
+    let make = || {
+        let mut builder = msb::Sandbox::restore_ref(found.reference())
+            .name(name)
+            .cpus(cpus)
+            .memory(mib(launch.memory))
+            .max_duration(secs(launch.max_duration))
+            .network_policy(network::policy(launch.outbound))
+            .volume(super::guest::DIR, |m| {
+                m.bind(binary.dir.as_std_path()).readonly()
+            })
+            .volume(process::RUN_DIR, |m| m.bind(run.as_std_path()))
+            .volume(network::NET_DIR, |m| m.bind(net.as_std_path()));
+        for &(host, guest) in published {
+            builder = builder.port(host, guest);
+        }
+        for mount in &launch.mounts {
+            builder = match mount {
+                Mount::Bind {
+                    host,
+                    guest,
+                    read_only,
+                } => builder.volume(guest, |m| bind(m, host, *read_only)),
+                Mount::Volume { guest, .. } => builder.volume(guest, MountBuilder::captured),
+                Mount::Scratch { .. } => builder,
+            };
+        }
+        builder
+    };
+    let attempt = || async {
+        let restored = within(CREATE, "restore a snapshot", make().restore()).await;
+        let restored = restored.and_then(|result| result.map_err(restore_error));
+        if restored.is_err() {
+            let _ = destroy_vm(name).await;
+        }
+        restored
+    };
+    let restored = match attempt().await {
+        Err(error) if lost_a_race(&error.to_string()) => attempt().await,
+        other => other,
+    };
     let owned = carried.into_iter().map(|disk| disk.mount.guest).collect();
     Ok((restored?, owned))
 }
