@@ -2,18 +2,28 @@ use std::io;
 
 use camino::{Utf8Path, Utf8PathBuf};
 
+mod env;
 mod maps;
 mod read;
-mod run;
 
+pub use env::node_env;
 pub use read::read;
-pub use run::run;
+
+/// The file the caller writes as `<preload_dir>/preload.cjs` of `node_env`.
+pub const PRELOAD: &str = include_str!("preload.cjs");
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Exited {
-    Code(i32),
-    /// Only on Unix: on Windows a killed process has an exit code too.
-    Signal,
+pub enum ProfileMode {
+    Cpu,
+    Coverage,
+}
+
+/// `NODE_OPTIONS`, `STOP_SLOP_PROFILE_DIR`, `STOP_SLOP_PROFILE_MODE`.
+#[derive(Debug, PartialEq, Eq)]
+pub struct NodeEnv {
+    pub node_options: String,
+    pub profile_dir: String,
+    pub profile_mode: &'static str,
 }
 
 #[derive(Debug)]
@@ -63,8 +73,6 @@ pub struct ModuleTime {
 
 #[derive(Debug, thiserror::Error)]
 pub enum ProfileError {
-    #[error("cannot start `{program}`: {source}")]
-    Spawn { program: String, source: io::Error },
     #[error("no Node process wrote a profile: the command must start Node 20 or later")]
     NoProfile,
     #[error("{path}: {message}")]

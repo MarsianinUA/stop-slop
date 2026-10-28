@@ -63,7 +63,7 @@ struct Process {
     maps: BTreeMap<u32, Utf8PathBuf>,
 }
 
-/// Sums the profiles `run` left in `dir` by function of the original sources.
+/// Sums the profiles the preload left in `dir` by function of the original sources.
 pub fn read(dir: &Utf8Path, root: &Utf8Path) -> Result<Samples, ProfileError> {
     let processes = list(dir)?;
     let lost = processes

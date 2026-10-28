@@ -1,11 +1,12 @@
 'use strict';
-// `stop-slop profile` writes this file into the profile folder and starts the command with
-// NODE_OPTIONS="--require <this file>", so it runs in every Node process and worker thread
-// the command starts. What it writes is read by `read.rs`. The program must run as it would
-// without it: no signal listeners, no `process.setSourceMapsEnabled` (it rewrites
-// `Error.stack`), and no error of the preload reaches the program. The one exception: its
-// `exit` listener counts toward the program's limit, so a program with exactly 10 `exit`
-// listeners of its own gets a MaxListenersExceededWarning.
+// The stand starts a Node service with the variables of `node_env` (`env.rs`):
+// NODE_OPTIONS="--require <this file>", so it runs in every Node process and worker thread of
+// the service, and STOP_SLOP_PROFILE_DIR, the folder of the chunks. What it writes is read by
+// `read.rs`. The program must run as it would without it: no signal listeners, no
+// `process.setSourceMapsEnabled` (it rewrites `Error.stack`), and no error of the preload
+// reaches the program. The one exception: its `exit` listener counts toward the program's
+// limit, so a program with exactly 10 `exit` listeners of its own gets a
+// MaxListenersExceededWarning.
 
 const dir = process.env.STOP_SLOP_PROFILE_DIR;
 if (dir) {
