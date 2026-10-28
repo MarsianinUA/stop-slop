@@ -2,7 +2,7 @@
 //! guest paths in setup, in every repeat and in `inspect`, only the host folders differ: a restore
 //! needs every bind path the snapshot's VM had (plan, row 87).
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::time::Duration;
 
 use camino::Utf8Path;
@@ -42,23 +42,6 @@ pub(crate) struct Frame<'a> {
     /// The host folder of `/stand/preload`.
     pub(crate) preload: &'a Utf8Path,
     pub(crate) span: Duration,
-}
-
-/// The services of setup: the setup services and all they wait for, directly or through others.
-pub(crate) fn in_setup(stand: &Stand) -> BTreeSet<&ServiceName> {
-    let mut found = BTreeSet::new();
-    let mut next: Vec<&ServiceName> = stand
-        .services
-        .iter()
-        .filter(|(_, service)| service.kind == ServiceKind::Setup)
-        .map(|(name, _)| name)
-        .collect();
-    while let Some(name) = next.pop() {
-        if found.insert(name) {
-            next.extend(stand.services[name].depends_on.keys());
-        }
-    }
-    found
 }
 
 /// The levels of `stand` with only the services `keep` takes; empty levels left out.
@@ -184,11 +167,7 @@ pub(crate) fn of(stand: &Stand, name: &ServiceName, replica: u32, frame: &Frame)
 /// when there is no prepare service. A service with a volume starts from its setup snapshot once
 /// setup took one.
 fn seed(name: &ServiceName, service: &Service, frame: &Frame) -> Option<Seed> {
-    if service
-        .mounts
-        .iter()
-        .any(|mount| matches!(mount, spec::Mount::Tree))
-    {
+    if service.on_tree() {
         let fresh = || Seed::Tree {
             tar: frame.tar.to_owned(),
             at: spec::TREE.to_owned(),

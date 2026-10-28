@@ -307,7 +307,7 @@ fn start_setup<S: Sandbox>(
     deadline: Instant,
 ) -> Result<(), Halt> {
     let stand = ctx.stand;
-    let in_setup = launch::in_setup(stand);
+    let in_setup = stand.in_setup();
     for level in launch::levels(stand, |name, _| in_setup.contains(name)) {
         for name in &level {
             wait_for(ctx, fleet, name, deadline)?;
