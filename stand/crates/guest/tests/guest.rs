@@ -1,8 +1,8 @@
 //! `stand-guest` driven on the host. The forwarder runs in `--direct` mode, so no root or netfilter
 //! is needed: a listener binds each route's loopback `address:port`, and the relay is the same code
 //! the guest uses behind REDIRECT. macOS has only `127.0.0.1` on loopback, so the routes share that
-//! address and differ by port. The forwarder is Unix only; the arguments, the files and the Windows
-//! stub are checked everywhere.
+//! address and differ by port. The forwarder, `run`, `stop` and `exec` are Unix only; the
+//! arguments, the files and the Windows stub are checked everywhere.
 
 use std::net::Ipv4Addr;
 use std::path::PathBuf;
@@ -427,5 +427,212 @@ mod forwarder {
         let fwd = Forwarder::start(vec![route("api", &[upstream(b"a"), upstream(b"b")])]);
         let replies: Vec<Vec<u8>> = (0..3).map(|_| fwd.request(0, b"ping")).collect();
         assert_eq!(replies, [b"a", b"b", b"a"]);
+    }
+}
+
+#[cfg(unix)]
+mod process {
+    use std::fs;
+    use std::path::Path;
+    use std::process::{Child, Command as Process};
+    use std::thread;
+    use std::time::Instant;
+
+    use super::*;
+
+    const LONG: Duration = Duration::from_secs(10);
+
+    #[test]
+    fn run_exits_with_the_code_of_the_command_and_its_group_ends_with_it() {
+        for (script, code) in [("sleep 30 & exit 3", 3), ("sleep 30 & kill -KILL $$", 137)] {
+            let temp = tempfile::tempdir().unwrap();
+            let status = temp.path().join("status.json");
+            let exit = guest(&run(&status, script, &[])).status().unwrap();
+            assert_eq!(exit.code(), Some(code), "{script}");
+            let recorded = recorded(&status);
+            assert_eq!(recorded["code"], code, "{script}");
+            assert_eq!(recorded["pgid"], recorded["pid"]);
+            assert!(recorded["exitedAt"].is_u64());
+            assert_group_ends(recorded["pgid"].as_i64().unwrap() as libc::pid_t);
+        }
+    }
+
+    #[test]
+    fn stop_signals_the_command_and_reports_its_exit() {
+        let (mut run, status, _temp) = service("trap 'exit 7' TERM");
+        let report = stop(&status, LONG);
+        assert_eq!((report.killed, report.code), (false, Some(7)), "{report:?}");
+        assert_eq!(run.wait().unwrap().code(), Some(7));
+    }
+
+    /// The pid of a command that has ended may be another process's by now.
+    #[test]
+    fn stop_leaves_the_pid_of_an_ended_command_alone() {
+        let temp = tempfile::tempdir().unwrap();
+        let status = temp.path().join("status.json");
+        let mut other = Process::new("sleep").arg("30").spawn().unwrap();
+        let pid = other.id();
+        let ended = serde_json::json!({"pid": pid, "pgid": pid, "code": 0, "exitedAt": 1});
+        fs::write(&status, ended.to_string()).unwrap();
+        let report = StopReport {
+            after_ms: 0,
+            killed: false,
+            code: Some(0),
+        };
+        assert_eq!(stop(&status, LONG), report);
+        assert!(other.try_wait().unwrap().is_none());
+        let _ = other.kill();
+        let _ = other.wait();
+    }
+
+    #[test]
+    fn a_command_that_ignores_the_signal_is_killed_with_its_group_at_the_grace() {
+        let (mut run, status, _temp) = service("trap '' TERM");
+        let report = stop(&status, Duration::from_millis(300));
+        assert_eq!(
+            (report.killed, report.code),
+            (true, Some(137)),
+            "{report:?}"
+        );
+        assert!((300..1300).contains(&report.after_ms), "{report:?}");
+        assert_eq!(run.wait().unwrap().code(), Some(137));
+        assert_group_ends(recorded(&status)["pgid"].as_i64().unwrap() as libc::pid_t);
+    }
+
+    #[test]
+    fn exec_writes_the_outputs_to_files_and_its_group_ends_with_the_command() {
+        let temp = tempfile::tempdir().unwrap();
+        let out = temp.path().join("probe.jsonl");
+        let script = "sleep 30 & echo $$; echo oops >&2; exit 3";
+        let exit = exec(&out, LONG, "", script).status().unwrap();
+        assert_eq!(exit.code(), Some(3));
+        let err = fs::read_to_string(temp.path().join("probe.jsonl.err")).unwrap();
+        assert_eq!(err, "oops\n");
+        assert_group_ends(fs::read_to_string(&out).unwrap().trim().parse().unwrap());
+    }
+
+    #[test]
+    fn exec_kills_the_group_at_the_deadline() {
+        let temp = tempfile::tempdir().unwrap();
+        let out = temp.path().join("probe.jsonl");
+        let deadline = Duration::from_millis(500);
+        let started = Instant::now();
+        let exit = exec(&out, deadline, "", "sleep 30 & echo $$; wait")
+            .status()
+            .unwrap();
+        assert_eq!(exit.code(), Some(124));
+        assert!((deadline..LONG).contains(&started.elapsed()));
+        assert_group_ends(fs::read_to_string(&out).unwrap().trim().parse().unwrap());
+    }
+
+    /// In a guest `exec` starts as root; without root here the case is skipped.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn exec_under_root_takes_the_probe_group_and_the_user() {
+        use std::io::Write;
+
+        if unsafe { libc::geteuid() } != 0 {
+            // Past the harness's capture, so the skip shows in a passing run.
+            let _ = writeln!(
+                std::io::stderr(),
+                "skipped exec_under_root_takes_the_probe_group_and_the_user: not root"
+            );
+            return;
+        }
+        let nobody = Process::new("id").args(["-u", "nobody"]).output().unwrap();
+        let nobody = String::from_utf8(nobody.stdout).unwrap();
+        let temp = tempfile::tempdir().unwrap();
+        let out = temp.path().join("probe.jsonl");
+        let gid = guest::PROBE_GID;
+        for (user, uid) in [("", "0"), ("nobody", nobody.trim()), ("4321:4321", "4321")] {
+            let exit = exec(&out, LONG, user, "id -u; id -g; id -G")
+                .status()
+                .unwrap();
+            assert_eq!(exit.code(), Some(0), "{user:?}");
+            let ids = fs::read_to_string(&out).unwrap();
+            assert_eq!(ids, format!("{uid}\n{gid}\n{gid}\n"), "{user:?}");
+        }
+    }
+
+    fn guest(command: &Command) -> Process {
+        let mut process = Process::new(BIN);
+        process.args(command.to_args());
+        process
+    }
+
+    /// `sh -c <script>` with `$1`, `$2`... set to `args`.
+    fn sh(script: &str, args: &[&Path]) -> Vec<String> {
+        let shell = ["sh", "-c", script, "sh"].map(String::from);
+        let args = args.iter().map(|arg| arg.display().to_string());
+        shell.into_iter().chain(args).collect()
+    }
+
+    fn run(status: &Path, script: &str, args: &[&Path]) -> Command {
+        Command::Run(RunArgs {
+            status: status.into(),
+            command: sh(script, args),
+        })
+    }
+
+    /// `run` of a shell that sets `traps` and then waits on a child. Returns once the status file
+    /// is there and the traps are set, so the signal cannot come first.
+    fn service(traps: &str) -> (Child, PathBuf, tempfile::TempDir) {
+        let temp = tempfile::tempdir().unwrap();
+        let status = temp.path().join("status.json");
+        let ready = temp.path().join("ready");
+        let script = format!("{traps}; : > \"$1\"; sleep 30 & wait");
+        let child = guest(&run(&status, &script, &[&ready])).spawn().unwrap();
+        wait_for(&status);
+        wait_for(&ready);
+        (child, status, temp)
+    }
+
+    fn stop(status: &Path, grace: Duration) -> StopReport {
+        let stop = Command::Stop(StopArgs {
+            status: status.into(),
+            signal: "SIGTERM".into(),
+            grace,
+        });
+        let output = guest(&stop).output().unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        StopReport::parse(&String::from_utf8(output.stdout).unwrap()).unwrap()
+    }
+
+    fn exec(out: &Path, deadline: Duration, user: &str, script: &str) -> Process {
+        guest(&Command::Exec(ExecArgs {
+            out: out.into(),
+            deadline,
+            user: user.into(),
+            argv: sh(script, &[]),
+        }))
+    }
+
+    fn recorded(status: &Path) -> serde_json::Value {
+        serde_json::from_str(&fs::read_to_string(status).unwrap()).unwrap()
+    }
+
+    fn wait_for(path: &Path) {
+        let deadline = Instant::now() + LONG;
+        while !path.exists() {
+            assert!(
+                Instant::now() < deadline,
+                "{} never appeared",
+                path.display()
+            );
+            thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    /// Init reaps the killed children, so they may stay in the group a moment as zombies.
+    fn assert_group_ends(pgid: libc::pid_t) {
+        let deadline = Instant::now() + LONG;
+        while unsafe { libc::killpg(pgid, 0) } == 0 {
+            assert!(Instant::now() < deadline, "group {pgid} still runs");
+            thread::sleep(Duration::from_millis(10));
+        }
     }
 }

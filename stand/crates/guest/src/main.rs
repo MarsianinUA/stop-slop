@@ -1,10 +1,14 @@
-//! `stand-guest`, run by the sandbox adapter inside each guest. It exits 125 when it fails itself,
-//! with one line on stderr saying why.
+//! `stand-guest`, run by the sandbox adapter inside each guest. Exit codes follow `timeout(1)`: the
+//! command's own code, 124 when `exec` hit its deadline, 125 when `stand-guest` itself failed (one
+//! line on stderr says why), 126 when the command could not start, 127 when it was not found,
+//! 128 + n when signal n killed it.
 
 #[cfg(unix)]
 mod net;
 #[cfg(target_os = "linux")]
 mod nf;
+#[cfg(unix)]
+mod process;
 #[cfg(unix)]
 mod relay;
 #[cfg(unix)]
@@ -23,7 +27,10 @@ fn main() -> ExitCode {
     };
     match guest::Command::parse(&args) {
         Ok(guest::Command::Net(routes)) => net::run(&routes),
-        Ok(_) => failed("stand-guest", "only net is built so far"),
+        Ok(guest::Command::Run(args)) => process::run(&args),
+        Ok(guest::Command::Stop(args)) => process::stop(&args),
+        Ok(guest::Command::Exec(args)) => process::exec(&args),
+        Ok(guest::Command::Trim(_)) => failed("stand-guest", "trim is not built yet"),
         Err(error) => failed("stand-guest", error),
     }
 }
