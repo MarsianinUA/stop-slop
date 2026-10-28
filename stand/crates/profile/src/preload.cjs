@@ -72,11 +72,23 @@ function start(dir, coverage) {
   // handler and loses what ran since its last chunk: up to 2 s, or a whole synchronous run
   // that kept the timer from firing.
   setInterval(flush, 2000).unref();
-  process.on('exit', flush);
-
-  function flush() {
+  process.on('exit', () => {
+    flush(true);
     try {
-      const { kind, value, urls } = coverage ? takeCoverage() : takeProfile();
+      // `process.exit()` leaves this session open, and on Windows V8 samples this thread by
+      // suspending and resuming it from a thread of its own, which the exit kills: killed
+      // between the two, it left this thread suspended and the process never ended (about
+      // one run in 400). V8 joins that thread when its last profile stops; `disable` stops the
+      // anchor without sending the whole run's profile, as `console.profileEnd` would.
+      post('Profiler.disable');
+    } catch {
+      // The rare hang above, not an error in the program's exit.
+    }
+  });
+
+  function flush(last) {
+    try {
+      const { kind, value, urls } = coverage ? takeCoverage() : takeProfile(last);
       const fresh = new Set();
       const maps = {};
       for (const url of urls) {
@@ -100,9 +112,9 @@ function start(dir, coverage) {
     }
   }
 
-  function takeProfile() {
+  function takeProfile(last) {
     const { profile } = post('Profiler.stop');
-    post('Profiler.start');
+    if (!last) post('Profiler.start');
     const urls = profile.nodes.map((node) => node.callFrame.url);
     return { kind: 'cpuprofile', value: profile, urls };
   }

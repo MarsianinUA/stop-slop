@@ -2,11 +2,35 @@
 
 use std::fs;
 use std::process::{Command, ExitStatus};
+use std::thread;
+use std::time::{Duration, Instant};
 
 use camino::{Utf8Path, Utf8PathBuf};
 use profile::{NodeEnv, PRELOAD, PathMap, ProfileMode, Samples, node_env, read};
 use serde_json::Value;
 use tempfile::TempDir;
+
+/// The longest run, the hard kill, takes 4 s.
+const LIMIT: Duration = Duration::from_secs(60);
+
+/// A run that hangs fails its test at `LIMIT` instead of holding the job until CI cancels it.
+fn run(command: &mut Command) -> ExitStatus {
+    let mut child = command.spawn().expect("start node");
+    let start = Instant::now();
+    while start.elapsed() < LIMIT {
+        if let Some(status) = child.try_wait().expect("wait for node") {
+            return status;
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+    // A child that is gone by now has nothing left to kill.
+    let _ = child.kill();
+    let _ = child.wait();
+    panic!(
+        "node ran over {} s and was killed: {command:?}",
+        LIMIT.as_secs()
+    );
+}
 
 /// In a temp folder, the preload folder with `PRELOAD` in it, as the stand writes it, and the
 /// empty profile folder. Their paths have a space, and on Windows `\`, which `NODE_OPTIONS`
@@ -52,12 +76,10 @@ impl Folders {
             inherited,
             mode,
         );
-        Command::new("node")
+        run(Command::new("node")
             .args(args)
             .current_dir(&self.dir)
-            .envs(env.into_vars())
-            .status()
-            .expect("start node")
+            .envs(env.into_vars()))
     }
 
     fn names(&self) -> Vec<String> {
@@ -252,11 +274,7 @@ fn the_exit_code_and_error_stack_are_the_same_as_without_the_preload() {
         let with = folders.dir.join("with.txt");
         let without = folders.dir.join("without.txt");
         let status = folders.node(mode, None, &[fail.as_str(), with.as_str()]);
-        let plain = Command::new("node")
-            .arg(&fail)
-            .arg(&without)
-            .status()
-            .unwrap();
+        let plain = run(Command::new("node").arg(&fail).arg(&without));
         assert_eq!(
             (status.code(), plain.code()),
             (Some(3), Some(3)),
