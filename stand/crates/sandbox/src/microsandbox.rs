@@ -20,7 +20,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use ::microsandbox as msb;
 use camino::{Utf8Path, Utf8PathBuf};
-use msb::jobs::{Job, JobLogOptions, JobState};
+use msb::jobs::{Job, JobState};
 use msb::sandbox::DestroyOptions;
 use tokio::sync::OnceCell;
 use tokio::time::timeout;
@@ -174,14 +174,7 @@ impl Sandbox for Microsandbox {
 
     fn logs(&self, id: &SandboxId) -> Result<Vec<u8>, SandboxError> {
         let id = id.clone();
-        self.block(|inner| async move {
-            let live = inner.live(&id)?;
-            let options = JobLogOptions::default();
-            let entries = within(GUEST_CALL, "read the logs", live.service.logs(&options))
-                .await?
-                .map_err(backend)?;
-            Ok(entries.into_iter().flat_map(|entry| entry.data).collect())
-        })
+        self.block(|inner| async move { process::log(&inner.live(&id)?.service).await })
     }
 
     fn copy_out(&self, id: &SandboxId, guest: &str, host: &Utf8Path) -> Result<(), SandboxError> {
@@ -330,15 +323,14 @@ impl Inner {
     async fn pull_through_a_vm(&self, image: &ImageRef) -> Result<(), SandboxError> {
         let name = self.name("pull", "image");
         // Held until the destroy: dropping an attached VM stops it on its own.
-        let _vm = volumes::create_with_retry(&name, || {
+        let _vm = volumes::create_with_retry(&name, image, || {
             msb::Sandbox::builder(&name)
                 .image(image.as_str())
                 .cpus(1)
                 .memory(volumes::PULL_MEMORY_MIB)
                 .label(NAMESPACE, "1")
         })
-        .await
-        .map_err(|error| image_error(image, error))?;
+        .await?;
         destroy_vm(&name).await
     }
 
@@ -350,8 +342,10 @@ impl Inner {
         };
         let binary = self.install().await?.clone();
         let mut tasks = tokio::task::JoinSet::new();
+        let mut names = Vec::new();
         for (index, (launch, wiring)) in batch.into_iter().zip(wired).enumerate() {
             let name = self.name("vm", &format!("{}-{}", launch.service, launch.replica));
+            names.push(name.clone());
             let (inner, binary) = (Arc::clone(self), binary.clone());
             tasks.spawn(async move { (index, inner.start(name, launch, wiring, &binary).await) });
         }
@@ -369,8 +363,15 @@ impl Inner {
             }
         }
         if let Some(error) = failure {
-            for (_, live) in started {
-                let _ = self.remove(&live).await;
+            for (_, live) in &started {
+                let _ = self.remove(live).await;
+            }
+            // A start that failed cleaned up after itself, but one that panicked did not.
+            for (index, name) in names.iter().enumerate() {
+                if !started.iter().any(|(done, _)| *done == index) {
+                    let _ = destroy_vm(name).await;
+                    remove_folder(&self.folder(name));
+                }
             }
             return Err(error);
         }
@@ -701,21 +702,37 @@ fn remove_folder(folder: &Utf8Path) {
     let _ = std::fs::remove_dir_all(folder);
 }
 
+/// A Windows bind shows every file as `rwxrwxrwx` in the guest, so only a Unix host needs it.
+#[cfg(unix)]
+fn set_mode(path: &Utf8Path, mode: u32) -> std::io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode))
+}
+
+#[cfg(not(unix))]
+fn set_mode(_: &Utf8Path, _: u32) -> std::io::Result<()> {
+    Ok(())
+}
+
 /// A call into the guest or the SDK past `limit` is a stand failure, not a hang.
 async fn within<T>(
     limit: Duration,
     what: &str,
     call: impl Future<Output = T>,
 ) -> Result<T, SandboxError> {
-    timeout(limit, call).await.map_err(|_| SandboxError::Guest {
-        message: format!("{what}: no answer within {} s", limit.as_secs()),
-    })
+    timeout(limit, call)
+        .await
+        .map_err(|_| guest_error(format!("{what}: no answer within {} s", limit.as_secs())))
 }
 
 fn backend(error: impl Display) -> SandboxError {
     SandboxError::Backend {
         message: error.to_string(),
     }
+}
+
+fn guest_error(message: String) -> SandboxError {
+    SandboxError::Guest { message }
 }
 
 /// The SDK does not export the registry's error type, so a missing image is told by its text;

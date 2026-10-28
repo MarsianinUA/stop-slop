@@ -16,7 +16,7 @@ use microsandbox_image::{GlobalCache, Reference};
 use msb::jobs::{Job, JobInfo, JobLogOptions, JobState};
 use msb::sandbox::{ExecOptionsBuilder, FsSetAttrs};
 
-use super::{GUEST_CALL, Live, POLL, backend, guest, within};
+use super::{GUEST_CALL, Live, POLL, backend, guest, guest_error, within};
 use crate::{ExecOutcome, ImageRef, Launch, Mount, SandboxError, Stopped};
 
 /// Where `run` keeps its status file: the service's user writes it, so it is a bind of its own and
@@ -29,6 +29,8 @@ const MARGIN: Duration = Duration::from_secs(10);
 const COPY_TAR: &str = "/tmp/stop-slop-stand-copy.tar";
 const STOP_SIGNAL: &str = "SIGTERM";
 const COPY: Duration = Duration::from_secs(300);
+/// `run` passes on its command's output for at most 1 s after the end.
+const RUN_END: Duration = Duration::from_secs(5);
 
 /// The host side of `RUN_DIR` in the adapter's folder of a VM.
 pub(super) fn run_dir(folder: &Utf8Path) -> Utf8PathBuf {
@@ -109,7 +111,19 @@ async fn image_stop_signal(
     Ok(metadata
         .config
         .stop_signal
-        .filter(|signal| !signal.is_empty()))
+        .filter(|signal| !signal.is_empty())
+        .map(|signal| docker_signal_name(&signal)))
+}
+
+/// Docker reads `STOPSIGNAL` in any case and with or without `SIG`, `quit` as `SIGQUIT`, the one
+/// form `stand-guest` takes. A number stays as written, and `image_defaults` refuses it.
+fn docker_signal_name(signal: &str) -> String {
+    let upper = signal.trim().to_ascii_uppercase();
+    if upper.starts_with("SIG") || upper.bytes().all(|byte| byte.is_ascii_digit()) {
+        upper
+    } else {
+        format!("SIG{upper}")
+    }
 }
 
 /// As Compose combines them: a new `entrypoint` drops the image's CMD unless `command` is set too.
@@ -229,6 +243,20 @@ pub(super) async fn stop(live: &Live) -> Result<Stopped, SandboxError> {
     }
     let report = StopReport::parse(&String::from_utf8_lossy(output.stdout_bytes()))
         .map_err(|error| guest_error(error.to_string()))?;
+    // `run` passes on the command's last output after it records the code, and `logs` reads what
+    // the job passed on, so the stop returns once the job has ended too. Without a code `run`
+    // still waits for the command, and the stop does not.
+    if report.code.is_some() {
+        let ended = async {
+            loop {
+                match live.service.inspect().await {
+                    Ok(info) if info.state.is_active() => tokio::time::sleep(POLL).await,
+                    _ => break,
+                }
+            }
+        };
+        let _ = tokio::time::timeout(RUN_END, ended).await;
+    }
     Ok(Stopped {
         after: Duration::from_millis(report.after_ms),
         killed: report.killed,
@@ -252,22 +280,20 @@ pub(super) async fn exec(
         argv: argv.to_vec(),
     })
     .to_args();
-    let call = live.vm.exec_with(guest::BIN, |options| {
-        let options = options.args(args).user("root").timeout(left + MARGIN);
-        with_env(options, &live.launch, &live.image)
-    });
-    let output = within(left + MARGIN + MARGIN, "run a probe", call)
-        .await?
-        .map_err(backend)?;
+    let output = run_for(&live.vm, guest::BIN, left + MARGIN, |options| {
+        with_env(options.args(args).user("root"), &live.launch, &live.image)
+    })
+    .await?;
     if output.status().code != 0 {
         return Err(guest_failed("stand-guest exec", &output));
     }
-    let path = Utf8PathBuf::from(format!("{stdout}.status"));
+    let path = ExecStatus::path(stdout.as_std_path());
     let read = std::fs::read_to_string(&path);
     let _ = std::fs::remove_file(&path);
-    let text = read.map_err(|error| guest_error(format!("{path}: {error}")))?;
+    let shown = path.display();
+    let text = read.map_err(|error| guest_error(format!("{shown}: {error}")))?;
     let status =
-        ExecStatus::parse(&text).map_err(|error| guest_error(format!("{path}: {error}")))?;
+        ExecStatus::parse(&text).map_err(|error| guest_error(format!("{shown}: {error}")))?;
     Ok(match (status.timed_out, status.end) {
         (true, _) => ExecOutcome::TimedOut,
         (false, ExecEnd::Code(code)) => ExecOutcome::Exited(code),
@@ -309,17 +335,16 @@ fn guest_path(mounts: &[Mount], stdout: &Utf8Path) -> Result<String, SandboxErro
     ))
 }
 
-/// uid and gid.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) struct Owner(u32, u32);
+pub(super) struct Owner {
+    uid: u32,
+    gid: u32,
+}
 
 /// Whom the agent runs an exec as by default, the image's user: `id` resolves it in the guest as
 /// the service's processes see it, whatever form `USER` has in the image.
 pub(super) async fn owner(vm: &msb::Sandbox) -> Result<Owner, SandboxError> {
-    let call = vm.exec_with("id", |options| options.timeout(GUEST_CALL));
-    let output = within(GUEST_CALL + MARGIN, "id", call)
-        .await?
-        .map_err(backend)?;
+    let output = run_for(vm, "id", GUEST_CALL, |options| options).await?;
     let text = String::from_utf8_lossy(output.stdout_bytes());
     match parse_id(&text) {
         Some(owner) if output.status().code == 0 => Ok(owner),
@@ -336,14 +361,17 @@ fn parse_id(text: &str) -> Option<Owner> {
         let digits = value.split(|c: char| !c.is_ascii_digit()).next()?;
         digits.parse().ok()
     };
-    Some(Owner(number("uid=")?, number("gid=")?))
+    Some(Owner {
+        uid: number("uid=")?,
+        gid: number("gid=")?,
+    })
 }
 
 /// Through the agent, which is root.
 pub(super) async fn give(
     vm: &msb::Sandbox,
     path: &str,
-    Owner(uid, gid): Owner,
+    Owner { uid, gid }: Owner,
 ) -> Result<(), SandboxError> {
     let attrs = FsSetAttrs {
         uid: Some(uid),
@@ -413,9 +441,21 @@ pub(super) async fn root(
     args: Vec<String>,
     limit: Duration,
 ) -> Result<msb::ExecOutput, SandboxError> {
-    let call = vm.exec_with(program, |options| {
-        options.args(args).user("root").timeout(limit)
-    });
+    run_for(vm, program, limit, |options| {
+        options.args(args).user("root")
+    })
+    .await
+}
+
+/// The SDK kills `program` in the guest at `limit`; the adapter gives up on an SDK that has not
+/// answered `MARGIN` later.
+async fn run_for(
+    vm: &msb::Sandbox,
+    program: &str,
+    limit: Duration,
+    options: impl FnOnce(ExecOptionsBuilder) -> ExecOptionsBuilder,
+) -> Result<msb::ExecOutput, SandboxError> {
+    let call = vm.exec_with(program, |given| options(given).timeout(limit));
     within(limit + MARGIN, program, call)
         .await?
         .map_err(backend)
@@ -447,18 +487,21 @@ pub(super) async fn wait_for_file(
     }
 }
 
-/// A job of `stand-guest` that ended when it should not have, with what it said.
-pub(super) async fn ended(job: &Job, what: &str, info: &JobInfo) -> SandboxError {
-    let read = within(
+/// What the job wrote on stdout and stderr, in order.
+pub(super) async fn log(job: &Job) -> Result<Vec<u8>, SandboxError> {
+    let entries = within(
         GUEST_CALL,
         "read a log",
         job.logs(&JobLogOptions::default()),
     )
-    .await;
-    let log: Vec<u8> = match read {
-        Ok(Ok(entries)) => entries.into_iter().flat_map(|entry| entry.data).collect(),
-        _ => Vec::new(),
-    };
+    .await?
+    .map_err(backend)?;
+    Ok(entries.into_iter().flat_map(|entry| entry.data).collect())
+}
+
+/// A job of `stand-guest` that ended when it should not have, with what it said.
+pub(super) async fn ended(job: &Job, what: &str, info: &JobInfo) -> SandboxError {
+    let log = log(job).await.unwrap_or_default();
     let failure = info
         .failure
         .as_ref()
@@ -473,16 +516,12 @@ pub(super) async fn ended(job: &Job, what: &str, info: &JobInfo) -> SandboxError
     ))
 }
 
-fn guest_failed(what: &str, output: &msb::ExecOutput) -> SandboxError {
+pub(super) fn guest_failed(what: &str, output: &msb::ExecOutput) -> SandboxError {
     guest_error(format!(
         "{what} exited with {}: {}",
         output.status().code,
         String::from_utf8_lossy(output.stderr_bytes()).trim()
     ))
-}
-
-fn guest_error(message: String) -> SandboxError {
-    SandboxError::Guest { message }
 }
 
 #[cfg(test)]
@@ -538,11 +577,18 @@ mod tests {
     }
 
     #[test]
+    fn a_stop_signal_of_the_image_takes_the_name_stand_guest_sends() {
+        let named = ["SIGINT", "quit", "SigTerm", " WINCH ", "3"].map(docker_signal_name);
+        assert_eq!(named, ["SIGINT", "SIGQUIT", "SIGTERM", "SIGWINCH", "3"]);
+    }
+
+    #[test]
     fn id_gives_the_uid_and_gid_of_gnu_and_busybox() {
+        let owner = |uid, gid| Some(Owner { uid, gid });
         let gnu = "uid=1000(node) gid=1000(node) groups=1000(node)\n";
-        assert_eq!(parse_id(gnu), Some(Owner(1000, 1000)));
+        assert_eq!(parse_id(gnu), owner(1000, 1000));
         let unnamed = "uid=101 gid=0(root) groups=0(root)";
-        assert_eq!(parse_id(unnamed), Some(Owner(101, 0)));
+        assert_eq!(parse_id(unnamed), owner(101, 0));
         assert_eq!(parse_id("id: unknown user"), None);
     }
 

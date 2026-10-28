@@ -447,6 +447,10 @@ pub struct RunStatus {
 }
 
 impl RunStatus {
+    pub fn write(&self, path: &Path) -> io::Result<()> {
+        write_whole(path, &json(self))
+    }
+
     pub fn parse(text: &str) -> Result<RunStatus, GuestError> {
         serde_json::from_str(text).map_err(|error| GuestError::File(format!("run status: {error}")))
     }

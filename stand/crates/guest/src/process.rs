@@ -50,7 +50,7 @@ pub fn run(args: &RunArgs) -> ExitCode {
         code: None,
         exited_at: None,
     };
-    if let Err(error) = write_status(&args.status, &status) {
+    if let Err(error) = status.write(&args.status) {
         // `stop` could not reach a command that has no status file.
         kill_group(pid);
         let _ = child.wait();
@@ -61,7 +61,7 @@ pub fn run(args: &RunArgs) -> ExitCode {
     let code = shell_code(exit);
     status.code = Some(code.into());
     status.exited_at = Some(now_ms());
-    if let Err(error) = write_status(&args.status, &status) {
+    if let Err(error) = status.write(&args.status) {
         eprintln!("{WHO}: write {}: {error}", args.status.display());
     }
     // The group is gone, so the pipes end once drained, unless a process that left the group
@@ -362,20 +362,11 @@ fn report(report: StopReport) -> ExitCode {
     ExitCode::SUCCESS
 }
 
-/// Through a temporary file, so `stop` never reads a part.
-fn write_status(path: &Path, status: &RunStatus) -> io::Result<()> {
-    let mut tmp = path.as_os_str().to_owned();
-    tmp.push(".tmp");
-    let text = serde_json::to_string(status).expect("a status serializes");
-    fs::write(&tmp, text)?;
-    fs::rename(&tmp, path)
-}
-
 fn read_status(path: &Path) -> Result<RunStatus, String> {
     let text =
         fs::read_to_string(path).map_err(|error| format!("read {}: {error}", path.display()))?;
-    let status: RunStatus = serde_json::from_str(&text)
-        .map_err(|error| format!("parse {}: {error}", path.display()))?;
+    let status =
+        RunStatus::parse(&text).map_err(|error| format!("parse {}: {error}", path.display()))?;
     // The service's user can write the file, and `kill` and `killpg` read 0, -1 and 1 as whole
     // sets of processes, which a root `stop` would reach.
     if status.pid <= 1 || status.pgid <= 1 {

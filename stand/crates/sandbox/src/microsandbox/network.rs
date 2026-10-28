@@ -30,6 +30,7 @@ const HOSTS_END: &str = "# stop-slop-stand end";
 const MAX_NAMES: usize = 253;
 /// `net` reads the switch every 100 ms and says nothing back.
 const FAULT_SETTLE: Duration = Duration::from_millis(200);
+const FREE_PORT_TRIES: usize = 16;
 
 /// The host side of `NET_DIR` in the adapter's folder of a VM.
 pub(super) fn net_dir(folder: &Utf8Path) -> Utf8PathBuf {
@@ -52,12 +53,20 @@ impl Ports {
         if let Some(host) = self.0.get(&key) {
             return Ok(*host);
         }
-        let host = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
-            .and_then(|listener| listener.local_addr())
-            .map_err(|error| backend(format!("find a free host port: {error}")))?
-            .port();
-        self.0.insert(key, host);
-        Ok(host)
+        // The listener closes at once, so the OS may give the same port again to a later key.
+        for _ in 0..FREE_PORT_TRIES {
+            let host = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
+                .and_then(|listener| listener.local_addr())
+                .map_err(|error| backend(format!("find a free host port: {error}")))?
+                .port();
+            if !self.0.values().any(|&taken| taken == host) {
+                self.0.insert(key, host);
+                return Ok(host);
+            }
+        }
+        Err(backend(format!(
+            "no free host port the adapter has not given out, in {FREE_PORT_TRIES} tries"
+        )))
     }
 }
 
@@ -164,7 +173,8 @@ pub(super) async fn start(
 
 /// The switch goes in as a temporary file and is renamed there, so the guest's own view of the
 /// bind has it at once, whatever virtio-fs caches of the host's, and `net` never reads a part.
-/// Each VM gets it before the wait, so the wait is paid once.
+/// Every VM gets its copy before any rename, so a failed copy turns the fault on nowhere, and
+/// the wait is paid once.
 pub(super) async fn fault(lives: &[Arc<Live>], fault: &Fault) -> Result<(), SandboxError> {
     let mode = match fault.mode {
         FaultMode::Down => FaultSwitchMode::Down,
@@ -191,6 +201,9 @@ pub(super) async fn fault(lives: &[Arc<Live>], fault: &Fault) -> Result<(), Sand
         let copied = within(GUEST_CALL, "copy the fault switch in", copy).await;
         let _ = std::fs::remove_file(&staged);
         copied?.map_err(backend)?;
+    }
+    for live in lives {
+        let fs = live.vm.fs();
         within(GUEST_CALL, "turn the fault on", fs.rename(&tmp, &path))
             .await?
             .map_err(backend)?;
@@ -273,5 +286,18 @@ mod tests {
             hosts_with(&first, &api),
             "127.0.0.1 localhost\n# stop-slop-stand begin\n127.0.0.2 api\n# stop-slop-stand end\n"
         );
+    }
+
+    #[test]
+    fn each_replica_port_keeps_a_host_port_of_its_own() {
+        let mut ports = Ports::default();
+        let given: Vec<u16> = (1..=64)
+            .map(|replica| ports.of("srv", replica, 8080).unwrap())
+            .collect();
+        let mut distinct = given.clone();
+        distinct.sort_unstable();
+        distinct.dedup();
+        assert_eq!(distinct.len(), given.len(), "{given:?}");
+        assert_eq!(ports.of("srv", 7, 8080).unwrap(), given[6]);
     }
 }

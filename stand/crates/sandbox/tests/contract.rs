@@ -1158,11 +1158,12 @@ mod live {
     }
 
     /// Row 72, a stop rule of T-11: the signal of `stand-guest stop` must reach the service, also a
-    /// `SIGQUIT` (the stop signal of nginx images). An ignored signal survives `exec`, so no command
-    /// of the service may start with one. Each service logs `ready` once its trap is set, the clean
-    /// one on stderr and after the signals ignored or blocked in `run`, as the agent starts it, and
-    /// in a command of the service; not in the shell itself, since busybox `sh` ignores `SIGQUIT` on
-    /// its own and blocks every signal while it waits for a child.
+    /// `SIGQUIT` (the stop signal of nginx images), and what the trap says last is in `logs` once
+    /// `stop` returns. An ignored signal survives `exec`, so no command of the service may start
+    /// with one. Each service logs `ready` once its trap is set, the clean one on stderr and after
+    /// the signals ignored or blocked in `run`, as the agent starts it, and in a command of the
+    /// service; not in the shell itself, since busybox `sh` ignores `SIGQUIT` on its own and blocks
+    /// every signal while it waits for a child.
     #[test]
     fn live_stop_signals_the_service_and_kills_it_at_grace() {
         let Some(case) = Case::start() else { return };
@@ -1170,10 +1171,11 @@ mod live {
         clean.command = sh(
             "awk '/^Sig(Ign|Blk)/ {print \"run\", $0}' /proc/$PPID/status; \
              awk '/^Sig(Ign|Blk)/ {print \"service\", $0}' /proc/self/status; \
-             trap 'exit 0' TERM; echo ready >&2; while true; do sleep 0.1; done",
+             trap 'echo bye; exit 0' TERM; echo ready >&2; while true; do sleep 0.1; done",
         );
         let mut quitter = launch("quitter", ALPINE);
-        quitter.command = sh("trap 'exit 0' QUIT; echo ready; while true; do sleep 0.1; done");
+        quitter.command =
+            sh("trap 'echo bye; exit 0' QUIT; echo ready; while true; do sleep 0.1; done");
         quitter.stop_signal = Some("SIGQUIT".into());
         let mut stubborn = launch("stubborn", ALPINE);
         stubborn.command = sh("trap '' TERM; echo ready; while true; do sleep 0.1; done");
@@ -1192,6 +1194,8 @@ mod live {
             let stopped = case.sandbox.stop(id).unwrap();
             let fast = stopped.after < Duration::from_secs(2);
             assert!(!stopped.killed && fast, "{id}: {stopped:?}");
+            let last = case.log(id);
+            assert!(last.lines().any(|line| line == "bye"), "{id}: {last}");
             assert_eq!(wait_exit(case.sandbox, id), Some(0), "{id}: the trap ran");
         }
         let killed = case.sandbox.stop(&ids[2]).unwrap();
@@ -1306,8 +1310,8 @@ const ghost = () => new Promise(ok => { const c = net.connect(1234, 'ghost');
         case.finish(&ids);
     }
 
-    /// Also notes whether the guest has IPv6 beside `lo`: the probe chain of `net` covers IPv4
-    /// only until stage 5 of T-11.
+    /// Also notes whether the guest has IPv6 beside `lo`, which microsandbox gives it only when the
+    /// host has an IPv6 route.
     #[test]
     fn live_off_refuses_an_outside_address_at_once_and_public_reaches_it() {
         let Some(case) = Case::start() else { return };
@@ -1356,7 +1360,7 @@ const ghost = () => new Promise(ok => { const c = net.connect(1234, 'ghost');
         let dbs = ["db", "db2"].map(|service| postgres(service, &peers, case.out()));
         let ids = case.create(dbs.to_vec());
         for id in &ids {
-            case.until_passes(id, "pg_isready -h 127.0.0.1 -U postgres");
+            case.until_passes(id, PG_READY);
         }
         let ask = |host: &str| {
             let sql = format!("PGPASSWORD=pw psql -h {host} -U postgres -tAc 'show cluster_name'");
@@ -1613,6 +1617,16 @@ const dial = () => new Promise(ok => {
         case.finish(&[]);
     }
 
+    /// By its digest in the listing, as the adapter finds it.
+    fn listed(snapshot: &SnapshotId) -> msb::SnapshotHandle {
+        let digest = snapshot.as_str().to_owned();
+        sdk(async move {
+            let all = msb::Snapshot::list().await.unwrap();
+            let found = all.into_iter().find(|listed| listed.digest() == digest);
+            found.expect("listed")
+        })
+    }
+
     fn cached(image: &'static str) -> bool {
         sdk(async move { msb::Image::get(image).await.is_ok() })
     }
@@ -1632,18 +1646,8 @@ const dial = () => new Promise(ok => {
         case.sandbox.destroy(&id).unwrap();
         let left = case.sandbox.leftovers().unwrap();
         assert!(left.snapshots.contains(&snapshot), "{left:?}");
-        let digest = snapshot.as_str().to_owned();
-        let labels = sdk(async move {
-            let all = msb::Snapshot::list().await.unwrap();
-            let found = all.into_iter().find(|listed| listed.digest() == digest);
-            found
-                .expect("listed")
-                .open()
-                .await
-                .unwrap()
-                .labels()
-                .clone()
-        });
+        let found = listed(&snapshot);
+        let labels = sdk(async move { found.open().await.unwrap().labels().clone() });
         let label = labels.get("stop-slop-stand").map(String::as_str);
         assert_eq!(label, Some("1"), "{labels:?}");
         case.sandbox.prune_images(&keep).unwrap();
@@ -1811,13 +1815,7 @@ fs.copyFileSync('src/server.js', 'dist/server.js');
     /// What the snapshot takes on the host's disk: the allocated blocks of its files, as `du`
     /// counts them, since its disk layers are sparse files as big as the disks.
     fn snapshot_bytes(snapshot: &SnapshotId) -> u64 {
-        let digest = snapshot.as_str().to_owned();
-        let folder = sdk(async move {
-            let all = msb::Snapshot::list().await.unwrap();
-            let found = all.into_iter().find(|listed| listed.digest() == digest);
-            found.expect("listed").path().unwrap().to_owned()
-        });
-        allocated_under(&folder)
+        allocated_under(listed(snapshot).path().unwrap())
     }
 
     fn allocated_under(path: &Path) -> u64 {

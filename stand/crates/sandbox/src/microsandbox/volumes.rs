@@ -11,16 +11,17 @@ use std::time::Duration;
 
 use ::guest::{Command, TrimArgs};
 use ::microsandbox as msb;
-use camino::Utf8Path;
+use camino::{Utf8Path, Utf8PathBuf};
 use msb::sandbox::{MountBuilder, SandboxBuilder};
 use tokio::io::AsyncReadExt;
 
 use super::guest::Binary;
 use super::process::Owner;
 use super::{
-    CREATE, GUEST_CALL, Live, NAMESPACE, backend, destroy_vm, guest, network, process, within,
+    CREATE, GUEST_CALL, Live, NAMESPACE, backend, destroy_vm, guest, guest_error, network, process,
+    within,
 };
-use crate::{Launch, Mount, SandboxError, Seed, SnapshotId, VolumeName};
+use crate::{ImageRef, Launch, Mount, SandboxError, Seed, SnapshotId, VolumeName};
 
 pub(super) const PULL_MEMORY_MIB: u32 = 512;
 /// Sparse: the host pays for what the guest writes.
@@ -37,16 +38,42 @@ const SNAPSHOT: Duration = Duration::from_secs(300);
 /// of about 40 creates).
 const RELAY_RACE: &str = "before agent relay became available";
 
-/// The `create` failures worth one retry: the relay race, and on Windows two VMs of a batch that
-/// bind one writable host folder. Each checks the folder by writing, reading back and removing
-/// the same `msb._probe` stream on it (`microsandbox-filesystem` `stat_store.rs`), so the second
-/// can find the stream gone and fail `mount <tag>: ... (os error 2)`; a moment later it passes.
 pub(super) async fn create_with_retry(
     name: &str,
+    image: &ImageRef,
     make: impl Fn() -> SandboxBuilder,
-) -> Result<msb::Sandbox, msb::MicrosandboxError> {
-    match create_once(name, make()).await {
-        Err(error) if lost_a_race(&error.to_string()) => create_once(name, make()).await,
+) -> Result<msb::Sandbox, SandboxError> {
+    let make = &make;
+    with_one_retry(name, move || async move {
+        within(CREATE, "create a VM", make().create())
+            .await
+            .and_then(|created| created.map_err(|error| super::image_error(image, error)))
+    })
+    .await
+}
+
+/// The failures of `create` and `restore` worth one more try: the relay race, and on Windows two
+/// VMs of a batch that bind one writable host folder. Each checks the folder by writing, reading
+/// back and removing the same `msb._probe` stream on it (`microsandbox-filesystem`
+/// `stat_store.rs`), so the second can find the stream gone and fail `mount <tag>: ... (os error
+/// 2)`; a moment later it passes. A failed try may leave its VM behind, so it goes; the error that
+/// made it fail is the one returned.
+async fn with_one_retry<F>(
+    name: &str,
+    attempt: impl Fn() -> F,
+) -> Result<msb::Sandbox, SandboxError>
+where
+    F: Future<Output = Result<msb::Sandbox, SandboxError>>,
+{
+    let once = || async {
+        let made = attempt().await;
+        if made.is_err() {
+            let _ = destroy_vm(name).await;
+        }
+        made
+    };
+    match once().await {
+        Err(error) if lost_a_race(&error.to_string()) => once().await,
         other => other,
     }
 }
@@ -56,28 +83,33 @@ fn lost_a_race(error: &str) -> bool {
     error.contains(RELAY_RACE) || (cfg!(windows) && shared_bind)
 }
 
-/// A failed `create` may leave its VM behind, so it goes; the error that made it fail is the one
-/// returned.
-async fn create_once(
-    name: &str,
-    builder: SandboxBuilder,
-) -> Result<msb::Sandbox, msb::MicrosandboxError> {
-    let created = tokio::time::timeout(CREATE, builder.create())
-        .await
-        .unwrap_or_else(|_| {
-            Err(msb::MicrosandboxError::Custom(format!(
-                "create: no answer within {} s",
-                CREATE.as_secs()
-            )))
-        });
-    if created.is_err() {
-        let _ = destroy_vm(name).await;
+/// Every bind of a VM, fresh or restored, as (guest, host, read-only): `stand-guest`, the
+/// adapter's two folders, then the `Launch`'s.
+fn binds<'a>(
+    launch: &'a Launch,
+    folder: &Utf8Path,
+    binary: &Binary,
+) -> Vec<(&'a str, Utf8PathBuf, bool)> {
+    let mut binds = vec![
+        (super::guest::DIR, binary.dir.clone(), true),
+        (process::RUN_DIR, process::run_dir(folder), false),
+        (network::NET_DIR, network::net_dir(folder), false),
+    ];
+    for mount in &launch.mounts {
+        if let Mount::Bind {
+            host,
+            guest,
+            read_only,
+        } = mount
+        {
+            binds.push((guest.as_str(), host.clone(), *read_only));
+        }
     }
-    created
+    binds
 }
 
-/// `folder` is the adapter's folder of the VM, not a bind itself; `published` is (host, guest).
-/// Gives the VM and the guest paths of its owned disks.
+/// `folder` is the adapter's folder of the VM, not a bind itself. Gives the VM and the guest paths
+/// of its owned disks.
 pub(super) async fn fresh(
     name: &str,
     launch: &Launch,
@@ -86,39 +118,31 @@ pub(super) async fn fresh(
     binary: &Binary,
 ) -> Result<(msb::Sandbox, Vec<String>), SandboxError> {
     let (cpus, memory, lifetime) = (cpus(launch)?, mib(launch.memory), secs(launch.max_duration));
-    let (run, net) = (process::run_dir(folder), network::net_dir(folder));
+    let binds = binds(launch, folder, binary);
     let tree = match &launch.seed {
         Some(Seed::Tree { at, .. }) => Some(tree_disk(at)),
         _ => None,
     };
-    let made = create_with_retry(name, || {
+    let made = create_with_retry(name, &launch.image, || {
         let mut builder = msb::Sandbox::builder(name)
             .image(launch.image.as_str())
             .cpus(cpus)
             .memory(memory)
             .max_duration(lifetime)
             .label(NAMESPACE, "1")
-            .network(|network| network.policy(network::policy(launch.outbound)))
-            .volume(super::guest::DIR, |m| {
-                m.bind(binary.dir.as_std_path()).readonly()
-            })
-            .volume(process::RUN_DIR, |m| m.bind(run.as_std_path()))
-            .volume(network::NET_DIR, |m| m.bind(net.as_std_path()));
+            .network(|network| network.policy(network::policy(launch.outbound)));
+        for (guest, host, read_only) in &binds {
+            builder = builder.volume(*guest, |m| bind(m, host, *read_only));
+        }
         for &(host, guest) in published {
             builder = builder.port(host, guest);
         }
         for mount in &launch.mounts {
-            builder = match mount {
-                Mount::Bind {
-                    host,
-                    guest,
-                    read_only,
-                } => builder.volume(guest, |m| bind(m, host, *read_only)),
-                Mount::Volume { guest, .. } => builder.volume(guest, |m| {
+            if let Mount::Volume { guest, .. } = mount {
+                builder = builder.volume(guest, |m| {
                     m.owned_with(|disk| disk.disk().size(VOLUME_DISK_MIB))
-                }),
-                Mount::Scratch { .. } => builder,
-            };
+                });
+            }
         }
         if let Some(disk) = tree {
             builder = builder.volume(disk, |m| {
@@ -127,8 +151,7 @@ pub(super) async fn fresh(
         }
         builder
     })
-    .await
-    .map_err(|error| super::image_error(&launch.image, error))?;
+    .await?;
     let volumes = launch.mounts.iter().filter_map(|mount| match mount {
         Mount::Volume { guest, .. } => Some(guest.clone()),
         _ => None,
@@ -196,13 +219,7 @@ pub(super) async fn seed_tree(
     };
     let (sent, output) = within(TREE + GUEST_CALL, "unpack the version tree", unpack).await??;
     if output.status().code != 0 {
-        return Err(SandboxError::Guest {
-            message: format!(
-                "tar -x into {at} exited with {}: {}",
-                output.status().code,
-                String::from_utf8_lossy(output.stderr_bytes()).trim()
-            ),
-        });
+        return Err(process::guest_failed(&format!("tar -x into {at}"), &output));
     }
     sent.map_err(backend)
 }
@@ -239,50 +256,37 @@ pub(super) async fn restore(
             )));
         }
     }
-    let (run, net) = (process::run_dir(folder), network::net_dir(folder));
     let cpus = cpus(launch)?;
+    let binds = binds(launch, folder, binary);
     let make = || {
         let mut builder = msb::Sandbox::restore_ref(found.reference())
             .name(name)
             .cpus(cpus)
             .memory(mib(launch.memory))
             .max_duration(secs(launch.max_duration))
-            .network_policy(network::policy(launch.outbound))
-            .volume(super::guest::DIR, |m| {
-                m.bind(binary.dir.as_std_path()).readonly()
-            })
-            .volume(process::RUN_DIR, |m| m.bind(run.as_std_path()))
-            .volume(network::NET_DIR, |m| m.bind(net.as_std_path()));
+            .network_policy(network::policy(launch.outbound));
+        for (guest, host, read_only) in &binds {
+            builder = builder.volume(*guest, |m| bind(m, host, *read_only));
+        }
         for &(host, guest) in published {
             builder = builder.port(host, guest);
         }
         for mount in &launch.mounts {
-            builder = match mount {
-                Mount::Bind {
-                    host,
-                    guest,
-                    read_only,
-                } => builder.volume(guest, |m| bind(m, host, *read_only)),
-                Mount::Volume { guest, .. } => builder.volume(guest, MountBuilder::captured),
-                Mount::Scratch { .. } => builder,
-            };
+            if let Mount::Volume { guest, .. } = mount {
+                builder = builder.volume(guest, MountBuilder::captured);
+            }
         }
         builder
     };
-    let attempt = || async {
-        let restored = within(CREATE, "restore a snapshot", make().restore()).await;
-        let restored = restored.and_then(|result| result.map_err(restore_error));
-        if restored.is_err() {
-            let _ = destroy_vm(name).await;
-        }
-        restored
-    };
-    let restored = match attempt().await {
-        Err(error) if lost_a_race(&error.to_string()) => attempt().await,
-        other => other,
-    };
+    let make = &make;
+    let restored = with_one_retry(name, move || async move {
+        within(CREATE, "restore a snapshot", make().restore())
+            .await
+            .and_then(|restored| restored.map_err(restore_error))
+    })
+    .await?;
     let owned = carried.into_iter().map(|disk| disk.mount.guest).collect();
-    Ok((restored?, owned))
+    Ok((restored, owned))
 }
 
 /// A VM from a snapshot is a detached process (`CREATE_BREAKAWAY_FROM_JOB`), and Windows refuses
@@ -338,14 +342,12 @@ pub(super) async fn sizes(live: &Live) -> Result<Vec<(VolumeName, u64)>, Sandbox
         match kib {
             Some(kib) if output.status().code == 0 => sizes.push((name.clone(), kib * 1024)),
             _ => {
-                return Err(SandboxError::Guest {
-                    message: format!(
-                        "du -sk {guest} exited with {}: `{}` {}",
-                        output.status().code,
-                        text.trim(),
-                        String::from_utf8_lossy(output.stderr_bytes()).trim()
-                    ),
-                });
+                return Err(guest_error(format!(
+                    "du -sk {guest} exited with {}: `{}` {}",
+                    output.status().code,
+                    text.trim(),
+                    String::from_utf8_lossy(output.stderr_bytes()).trim()
+                )));
             }
         }
     }
@@ -399,17 +401,8 @@ pub(super) fn make_folder(folder: &Utf8Path) -> Result<(), SandboxError> {
     open_to_every_user(folder)
 }
 
-#[cfg(unix)]
 pub(super) fn open_to_every_user(folder: &Utf8Path) -> Result<(), SandboxError> {
-    use std::os::unix::fs::PermissionsExt;
-    std::fs::set_permissions(folder, std::fs::Permissions::from_mode(0o777))
-        .map_err(|error| backend(format!("{folder}: {error}")))
-}
-
-/// A Windows bind shows every file as `rwxrwxrwx` in the guest.
-#[cfg(not(unix))]
-pub(super) fn open_to_every_user(_: &Utf8Path) -> Result<(), SandboxError> {
-    Ok(())
+    super::set_mode(folder, 0o777).map_err(|error| backend(format!("{folder}: {error}")))
 }
 
 fn cpus(launch: &Launch) -> Result<u8, SandboxError> {

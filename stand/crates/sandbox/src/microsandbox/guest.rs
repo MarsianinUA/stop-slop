@@ -7,7 +7,7 @@
 use camino::{Utf8Path, Utf8PathBuf};
 use sha2::{Digest, Sha256};
 
-use super::backend;
+use super::{backend, guest_error};
 use crate::{PortStats, SandboxError, Unexposed};
 
 /// In the guest, bound read-only from `Binary::dir`.
@@ -69,29 +69,34 @@ pub(super) async fn install(
     home: &Utf8Path,
     local: Option<Utf8PathBuf>,
 ) -> Result<Binary, SandboxError> {
-    let (version, bytes) = match source(local, std::env::consts::ARCH)? {
+    let dir_of = |version: &str| home.join("guest").join(version);
+    // Only what is not in place yet: a running VM may have the file open through its bind, and
+    // Windows refuses to replace it.
+    let (version, missing) = match source(local, std::env::consts::ARCH)? {
         Source::Local(path) => {
             let bytes = tokio::fs::read(&path)
                 .await
                 .map_err(|error| guest_error(format!("{LOCAL_BUILD}={path}: {error}")))?;
-            (format!("dev-{}", hex(&Sha256::digest(&bytes))), bytes)
+            let version = format!("dev-{}", hex(&Sha256::digest(&bytes)));
+            // Named by its sha256, and placed whole or not at all.
+            let placed = dir_of(&version).join(FILE).exists();
+            (version, (!placed).then_some(bytes))
         }
         Source::Release { url, sha256 } => {
-            let placed = home.join("guest").join(PIN.version).join(FILE);
-            let bytes = match tokio::fs::read(&placed).await {
-                Ok(bytes) if checked(&bytes, sha256).is_ok() => bytes,
+            let placed = tokio::fs::read(dir_of(PIN.version).join(FILE)).await;
+            let missing = match placed {
+                Ok(bytes) if checked(&bytes, sha256).is_ok() => None,
                 _ => {
                     let bytes = download(&url).await?;
                     checked(&bytes, sha256)?;
-                    bytes
+                    Some(bytes)
                 }
             };
-            (PIN.version.to_owned(), bytes)
+            (PIN.version.to_owned(), missing)
         }
     };
-    let dir = home.join("guest").join(&version);
-    // A running VM may have the file open through its bind, and Windows refuses to replace it.
-    if std::fs::read(dir.join(FILE)).ok().as_deref() != Some(bytes.as_slice()) {
+    let dir = dir_of(&version);
+    if let Some(bytes) = missing {
         place(&dir, &bytes)?;
     }
     Ok(Binary { dir, version })
@@ -121,21 +126,9 @@ fn place(dir: &Utf8Path, bytes: &[u8]) -> Result<(), SandboxError> {
     std::fs::create_dir_all(dir).map_err(failed)?;
     let tmp = dir.join(format!("{FILE}.tmp"));
     std::fs::write(&tmp, bytes).map_err(failed)?;
-    executable(&tmp).map_err(failed)?;
+    // A downloaded asset has no exec bit.
+    super::set_mode(&tmp, 0o755).map_err(failed)?;
     std::fs::rename(&tmp, dir.join(FILE)).map_err(failed)
-}
-
-/// A downloaded asset has no exec bit.
-#[cfg(unix)]
-fn executable(path: &Utf8Path) -> std::io::Result<()> {
-    use std::os::unix::fs::PermissionsExt;
-    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755))
-}
-
-/// A Windows bind shows every file as `rwxrwxrwx` in the guest.
-#[cfg(not(unix))]
-fn executable(_: &Utf8Path) -> std::io::Result<()> {
-    Ok(())
 }
 
 /// What `net` counted so far. `net` writes the file before the service starts, so a missing one
@@ -169,10 +162,6 @@ pub(super) fn traffic(
         })
         .collect();
     Ok((ports, unexposed))
-}
-
-fn guest_error(message: String) -> SandboxError {
-    SandboxError::Guest { message }
 }
 
 fn hex(bytes: &[u8]) -> String {
