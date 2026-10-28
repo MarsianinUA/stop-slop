@@ -49,8 +49,8 @@ pub fn cached_ids(entry: &Utf8Path) -> Result<Option<Vec<SnapshotId>>, StandFaul
     }))
 }
 
-/// Once the whole setup of a version passed: its outputs first, then `entry.json` through a
-/// rename, so its presence says the entry is whole.
+/// Once the whole setup of a version passed: its outputs first, then `entry.json`, so its presence
+/// says the entry is whole.
 pub(crate) fn write(entry: &Utf8Path, seeds: &Seeds, setup: &SetupSide) -> Result<(), StandFault> {
     copy_dir(&setup.out_dir, &entry.join(OUT))?;
     let probes = setup.probes.iter().map(|probe| EntryProbe {
@@ -68,10 +68,7 @@ pub(crate) fn write(entry: &Utf8Path, seeds: &Seeds, setup: &SetupSide) -> Resul
         sizes: setup.sizes.clone(),
         probes: probes.collect(),
     };
-    let temporary = entry.join(format!("{ENTRY}.tmp"));
-    crate::write_json(&temporary, &file)?;
-    let path = entry.join(ENTRY);
-    fs::rename(&temporary, &path).map_err(StandFault::io(&path))
+    crate::write_whole(&entry.join(ENTRY), &file)
 }
 
 /// A hit: what the repeats start from, and the outputs of the setup that built the entry, its

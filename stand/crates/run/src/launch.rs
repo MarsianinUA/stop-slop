@@ -13,6 +13,7 @@ use spec::{Profiler, Service, ServiceKind, ServiceName, Stand};
 use crate::ready::Start;
 
 pub(crate) const OUT: &str = "/stand/out";
+const OUT_2: &str = "/stand/out-2";
 const PRELOAD: &str = "/stand/preload";
 pub(crate) const PROFILE: &str = "/stand/profile";
 
@@ -33,11 +34,13 @@ impl Seeds {
 
 /// What differs between the phases of a version.
 pub(crate) struct Frame<'a> {
-    /// The host folder of `/stand/out` for the workload.
+    /// The host folder of `/stand/out` for the workload and every service with a probe.
     pub(crate) out: &'a Utf8Path,
-    /// The host folder of `/stand/out` for every service with a probe: `out`, but in the second
-    /// pass the folder that holds the `out-<n>/` of each pass, so its probes reach both.
-    pub(crate) probed: &'a Utf8Path,
+    /// In the second pass, the folder of its second workload: a service with a probe binds it too,
+    /// on `/stand/out-2`, so its probes after each pass write beside that pass's workload. A bind
+    /// of its own, not a folder in `out`: there the guest could swap it for a link, and the second
+    /// `create` would bind wherever the link points.
+    pub(crate) second: Option<&'a Utf8Path>,
     pub(crate) tar: &'a Utf8Path,
     pub(crate) seeds: &'a Seeds,
     /// `None` in setup, the fault repeats and the second pass: no measure reads a profile of them.
@@ -117,15 +120,17 @@ pub(crate) fn of(stand: &Stand, name: &ServiceName, replica: u32, frame: &Frame)
             }),
         }
     }
-    let out = match service.kind {
-        ServiceKind::Workload => Some(frame.out),
-        _ if probed(stand, name) => Some(frame.probed),
-        _ => None,
-    };
-    if let Some(out) = out {
+    if service.kind == ServiceKind::Workload || probed(stand, name) {
         mounts.push(Mount::Bind {
-            host: out.to_owned(),
+            host: frame.out.to_owned(),
             guest: OUT.to_owned(),
+            read_only: false,
+        });
+    }
+    if let Some(second) = frame.second.filter(|_| probed(stand, name)) {
+        mounts.push(Mount::Bind {
+            host: second.to_owned(),
+            guest: OUT_2.to_owned(),
             read_only: false,
         });
     }

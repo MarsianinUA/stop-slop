@@ -1,7 +1,7 @@
 //! `run` and `inspect` on a `Fake` with its virtual clock. Each case loads a recipe with
 //! `spec::load` (only `spec` builds its newtypes), runs it, and reads the journal of the `Fake`.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::time::{Duration, Instant};
@@ -413,6 +413,12 @@ x-stand: { workload: load }
         run::span(&extras.stand),
         run::span(&example.stand) + Duration::from_secs(40 * 60)
     );
+    // `spec` bounds `repeat` by `u32` only: the halves saturate, they never wrap.
+    let most = Case::new(&every_repeat().replace("  repeat: 3\n", "  repeat: 4294967295\n"));
+    assert_eq!(
+        run::span(&most.stand),
+        Duration::from_secs(20 * 60 + u64::from(u32::MAX) * 150 + 10 * 60)
+    );
 }
 
 #[test]
@@ -608,6 +614,31 @@ fn a_failed_setup_is_an_app_failure_that_drops_its_snapshots_and_writes_no_entry
             .any(|call| matches!(call, Call::DropSnapshot(id) if *id == version))
     );
     assert_clean(&fake, &case.left());
+
+    // `db` ends the moment `migrate` exits 0, 22 s after `db` started: no wait gave its exit, the
+    // look after the last setup service does, and no snapshot keeps the crashed database.
+    let case = Case::new(EXAMPLE);
+    let fake = crate::fake(example_rules());
+    let sandbox = Hooked {
+        ends: vec![end("db", 1, 1, 22 * SECOND)],
+        ..Hooked::new(&fake)
+    };
+    let failed = app_failure(sandbox.run(&case, &case.versions(false)));
+    let failure = &failed.failure;
+    assert_eq!(
+        (failure.phase, failure.service.as_deref(), &failure.cause),
+        (Phase::Setup, Some("db"), &Cause::Died)
+    );
+    assert_eq!(run::cached_ids(&case.entry(Side::Head)).unwrap(), None);
+    let journal = fake.journal();
+    let db = &created(&journal)[0];
+    assert_eq!(db.0.service, "db");
+    let snapshots = journal.iter().filter(|call| match call {
+        Call::Snapshot { id, .. } | Call::VolumeSizes(id) => *id == db.1,
+        _ => false,
+    });
+    assert_eq!(snapshots.count(), 0);
+    assert_clean(&fake, &case.left());
 }
 
 #[test]
@@ -781,19 +812,21 @@ fn each_launch_has_span_as_its_max_duration_and_the_stop_of_its_service() {
 
 /// The `Fake` with what a script cannot say: `cancel` set once a `create` starts `cancel_at`
 /// (Ctrl+C in the middle of a phase); `hang`: the `n`-th VM of a service, from 1, never ends,
-/// its exit kept out of every `wait`; `fail_stop`, `fail_fault`: every `stop`, every `fault` is
-/// a `Backend` error; `logs_grow`: each `logs` of a VM is one line longer than the one before, as
-/// the output of a running service grows; `latency`: a `wait` that saw an exit returns this much
-/// after it, as the adapter's poll does, while `Exited.at` keeps when it ended; `entry`: a file
-/// whose presence each `create` and `destroy` notes in `seen`, by VM; `ends`: VMs that end on
-/// their own.
+/// its exit kept out of every `wait`; `fail_stop`: every `stop` is a `Backend` error, and
+/// `fail_fault`: the `n`-th `fault`, from 1, and every later one; `logs_grow`: each `logs` of a
+/// VM is one line longer than the one before, as the output of a running service grows;
+/// `latency`: a `wait` that saw an exit returns this much after it, as the adapter's poll does,
+/// while `Exited.at` keeps when it ended; `entry`: a file whose presence each `create` and
+/// `destroy` notes in `seen`, by VM; `ends`: VMs that end on their own.
 struct Hooked<'f> {
     fake: &'f Fake,
     cancel_at: Option<&'static str>,
     cancel: Cancel,
     hang: Option<(&'static str, usize)>,
     fail_stop: bool,
-    fail_fault: bool,
+    fail_fault: Option<usize>,
+    /// `fault` calls so far.
+    switched: Cell<usize>,
     logs_grow: bool,
     latency: Duration,
     ends: Vec<End>,
@@ -801,7 +834,7 @@ struct Hooked<'f> {
     made: RefCell<BTreeMap<String, usize>>,
     hidden: RefCell<Vec<SandboxId>>,
     /// The VMs of `ends` once made and not yet ended: when each ends, and its code.
-    ending: RefCell<Vec<(SandboxId, Instant, i32)>>,
+    ending: RefCell<Vec<(SandboxId, Instant, Option<i32>)>>,
     /// `logs` calls so far, by VM.
     reads: RefCell<Vec<(SandboxId, usize)>>,
     /// The time each `exec` had left at its call.
@@ -811,12 +844,12 @@ struct Hooked<'f> {
 }
 
 /// The `nth` VM of `service`, from 1, ends with `code` that long after its `create`, whatever its
-/// script says.
+/// script says; `None` is a kill without a code.
 #[derive(Debug, Clone, Copy)]
 struct End {
     service: &'static str,
     nth: usize,
-    code: i32,
+    code: Option<i32>,
     after: Duration,
 }
 
@@ -828,7 +861,8 @@ impl<'f> Hooked<'f> {
             cancel: Cancel::new(),
             hang: None,
             fail_stop: false,
-            fail_fault: false,
+            fail_fault: None,
+            switched: Cell::new(0),
             logs_grow: false,
             latency: Duration::ZERO,
             ends: Vec::new(),
@@ -896,7 +930,7 @@ impl Sandbox for Hooked<'_> {
     }
     fn wait(&self, what: &[Waitable], deadline: Instant) -> Result<Option<Exited>, SandboxError> {
         let hidden = self.hidden.borrow();
-        let ending: Vec<(SandboxId, Instant, i32)> = self
+        let ending: Vec<(SandboxId, Instant, Option<i32>)> = self
             .ending
             .borrow()
             .iter()
@@ -911,7 +945,8 @@ impl Sandbox for Hooked<'_> {
             )
             .cloned()
             .collect();
-        let first = ending.into_iter().min_by_key(|(_, at, _)| *at);
+        // Of VMs that end at one moment, the one made last comes first: a `wait` may give any.
+        let first = ending.into_iter().rev().min_by_key(|(_, at, _)| *at);
         let until = first
             .as_ref()
             .map_or(deadline, |(_, at, _)| deadline.min(*at));
@@ -922,11 +957,7 @@ impl Sandbox for Hooked<'_> {
         {
             self.ending.borrow_mut().retain(|(ends, ..)| *ends != id);
             let what = Waitable::Sandbox(id);
-            exited = Some(Exited {
-                what,
-                code: Some(code),
-                at,
-            });
+            exited = Some(Exited { what, code, at });
         }
         if exited.is_some() && !self.latency.is_zero() {
             // Nothing to wait for: the `Fake` moves its clock to the deadline.
@@ -953,7 +984,11 @@ impl Sandbox for Hooked<'_> {
         self.fake.stop(id)
     }
     fn fault(&self, ids: &[SandboxId], fault: &Fault) -> Result<(), SandboxError> {
-        if self.fail_fault {
+        self.switched.set(self.switched.get() + 1);
+        if self
+            .fail_fault
+            .is_some_and(|nth| self.switched.get() >= nth)
+        {
             let message = "the relay is gone".to_owned();
             return Err(SandboxError::Backend { message });
         }
@@ -1189,7 +1224,7 @@ fn out_of(launch: &Launch) -> Option<&Utf8Path> {
 }
 
 /// The folder of the phase whose `/stand/out` `launch` binds: `setup-head`, `repeat-2-before`,
-/// `pass2-head` (for its `out/` and for each `out/out-<n>/`).
+/// `pass2-head` (for each `out-<n>/` of its passes).
 fn phase_of(launch: &Launch) -> &str {
     let out = out_of(launch).expect("a bind of /stand/out");
     let mut folders = out.ancestors().filter_map(Utf8Path::file_name);
@@ -1485,6 +1520,28 @@ fn a_failure_of_the_head_in_a_repeat_ends_the_run_with_what_it_collected() {
     let db = &created(&journal)[3 + 4].1;
     // The first wait ends a chunk of 1 s after the start, the last one at the deadline.
     assert_eq!(waited(&journal, db), 299 * SECOND);
+    assert_clean(&fake, &case.left());
+
+    // `db` ends the moment the workload exits 0, 30 s after both started: no wait gave its exit,
+    // the look before the cut does, and the repeat it would have measured fails.
+    let case = Case::new(EXAMPLE);
+    let fake = crate::fake(example_rules());
+    let sandbox = Hooked {
+        ends: vec![end("db", 2, 1, 30 * SECOND)],
+        ..Hooked::new(&fake)
+    };
+    let failed = app_failure(sandbox.run(&case, &case.versions(false)));
+    let failure = &failed.failure;
+    assert_eq!(
+        (
+            failure.phase,
+            failure.service.as_deref(),
+            &failure.cause,
+            failure.repeat
+        ),
+        (Phase::Workload, Some("db"), &Cause::Died, Some(1))
+    );
+    assert_eq!(failed.raw.head[0].wall, 30 * SECOND);
     assert_clean(&fake, &case.left());
 }
 
@@ -3379,7 +3436,10 @@ fn two_fault_repeats_per_version_take_turns_after_the_measured_ones_with_the_fau
         let numbers: Vec<u32> = repeats.iter().map(|repeat| repeat.repeat).collect();
         assert_eq!(numbers, [1, 2]);
         for repeat in repeats {
-            assert_eq!((repeat.workload, repeat.exited.len()), (Some(0), 0));
+            assert_eq!(
+                (repeat.workload, repeat.exited.len(), &repeat.failure),
+                (Some(0), 0, &None)
+            );
             let seen: Vec<(&str, u32, u64)> = repeat
                 .instances
                 .iter()
@@ -3516,8 +3576,15 @@ fn end(service: &'static str, nth: usize, code: i32, after: Duration) -> End {
     End {
         service,
         nth,
-        code,
+        code: Some(code),
         after,
+    }
+}
+
+fn killed(service: &'static str, nth: usize, after: Duration) -> End {
+    End {
+        code: None,
+        ..end(service, nth, 0, after)
     }
 }
 
@@ -3533,13 +3600,15 @@ fn a_fault_repeat_turns_the_workload_code_its_timeout_and_a_dead_service_into_ca
     // Head only. By service, the VMs of setup come first, then those of the three measured repeats
     // and the coverage repeat: the first fault repeat makes the fifth `load` and the ninth and
     // tenth `api`.
-    /// `hang` and `ends` of `Hooked`, and the categories of the first fault repeat.
+    /// `hang` and `ends` of `Hooked`, and the categories of the first fault repeat: its failure as
+    /// phase, service and cause.
     struct Ending {
         rules: Vec<Rule>,
         hang: Option<(&'static str, usize)>,
         ends: Vec<End>,
         workload: Option<i32>,
         exited: &'static [&'static str],
+        failure: Option<(Phase, &'static str, Cause)>,
     }
     let cases = [
         // The workload ends with 3.
@@ -3549,6 +3618,7 @@ fn a_fault_repeat_turns_the_workload_code_its_timeout_and_a_dead_service_into_ca
             ends: vec![end("load", 5, 3, 10 * SECOND)],
             workload: Some(3),
             exited: &[],
+            failure: Some((Phase::Workload, "load", Cause::Exit(3))),
         },
         // The workload hangs until the deadline of the repeat.
         Ending {
@@ -3557,6 +3627,16 @@ fn a_fault_repeat_turns_the_workload_code_its_timeout_and_a_dead_service_into_ca
             ends: Vec::new(),
             workload: None,
             exited: &[],
+            failure: Some((Phase::Workload, "load", Cause::Timeout)),
+        },
+        // The workload is killed without a code.
+        Ending {
+            rules: fault_rules(),
+            hang: None,
+            ends: vec![killed("load", 5, 10 * SECOND)],
+            workload: None,
+            exited: &[],
+            failure: Some((Phase::Workload, "load", Cause::Died)),
         },
         // `api` dies under the fault, and the repeat goes on until the workload ends.
         Ending {
@@ -3565,6 +3645,7 @@ fn a_fault_repeat_turns_the_workload_code_its_timeout_and_a_dead_service_into_ca
             ends: vec![end("api", 9, 1, 5 * SECOND)],
             workload: Some(0),
             exited: &["api"],
+            failure: None,
         },
         // Both replicas of `api` die under the fault: one service ended.
         Ending {
@@ -3573,6 +3654,7 @@ fn a_fault_repeat_turns_the_workload_code_its_timeout_and_a_dead_service_into_ca
             ends: vec![end("api", 9, 1, 5 * SECOND), end("api", 10, 1, 6 * SECOND)],
             workload: Some(0),
             exited: &["api"],
+            failure: None,
         },
         // `db` and `api` die the moment the workload ends, 30 s after all three started: no wait
         // gave their exits yet, the look before the cut does.
@@ -3582,14 +3664,30 @@ fn a_fault_repeat_turns_the_workload_code_its_timeout_and_a_dead_service_into_ca
             ends: vec![end("db", 6, 1, 30 * SECOND), end("api", 9, 1, 30 * SECOND)],
             workload: Some(0),
             exited: &["db", "api"],
+            failure: None,
         },
-        // `api` dies before it is healthy, so before the fault: the workload never starts.
+        // The same as the workload ends with 3: the look before the cut notes them too.
+        Ending {
+            rules: fault_rules(),
+            hang: None,
+            ends: vec![
+                end("db", 6, 1, 30 * SECOND),
+                end("api", 9, 1, 30 * SECOND),
+                end("load", 5, 3, 30 * SECOND),
+            ],
+            workload: Some(3),
+            exited: &["db", "api"],
+            failure: Some((Phase::Workload, "load", Cause::Exit(3))),
+        },
+        // `api` dies before it is healthy, so before the fault: the workload never starts, and
+        // the phase says the fault had no part in it.
         Ending {
             rules: replaced(fault_rules(), "api", healthy_late()),
             hang: None,
             ends: vec![end("api", 9, 1, SECOND / 2)],
             workload: None,
             exited: &["api"],
+            failure: Some((Phase::Ready, "api", Cause::Died)),
         },
     ];
     for Ending {
@@ -3598,6 +3696,7 @@ fn a_fault_repeat_turns_the_workload_code_its_timeout_and_a_dead_service_into_ca
         ends,
         workload,
         exited,
+        failure,
     } in cases
     {
         let case = Case::new(&under_fault("mode: down"));
@@ -3612,11 +3711,23 @@ fn a_fault_repeat_turns_the_workload_code_its_timeout_and_a_dead_service_into_ca
         let [first, second] = &fault.head[..] else {
             panic!("{:?}", fault.head)
         };
+        let dir = case.run_dir().join("fault-1-head");
         assert_eq!(first.workload, workload, "{hang:?} {ends:?}");
         assert_eq!(first.exited, exited, "{hang:?} {ends:?}");
-        assert_eq!((second.workload, second.exited.len()), (Some(0), 0));
+        let failure = failure.map(|(phase, service, cause)| Failure {
+            phase,
+            service: Some(service.into()),
+            repeat: Some(1),
+            cause,
+            logs: Some(dir.clone()),
+            probes: Vec::new(),
+        });
+        assert_eq!(first.failure, failure, "{hang:?} {ends:?}");
+        assert_eq!(
+            (second.workload, second.exited.len(), &second.failure),
+            (Some(0), 0, &None)
+        );
         assert_eq!(raw.head.len(), 3);
-        let dir = case.run_dir().join("fault-1-head");
         assert!(dir.join("metrics.json").is_file() && dir.join("db-1.log").is_file());
         let journal = fake.journal();
         if hang.is_some() {
@@ -3628,27 +3739,56 @@ fn a_fault_repeat_turns_the_workload_code_its_timeout_and_a_dead_service_into_ca
         assert_clean(&fake, &case.left());
     }
 
-    // A switch the port cannot set breaks the stand, before the workload of the repeat started.
-    let case = Case::new(&under_fault("mode: down"));
-    let fake = fake(fault_rules());
-    let sandbox = Hooked {
-        fail_fault: true,
-        ..Hooked::new(&fake)
-    };
-    let result = sandbox.run(&case, &case.versions(false));
-    assert!(
-        matches!(
-            &result,
-            Err(RunError::Stand {
-                phase: Phase::Ready,
-                fault: StandFault::Sandbox(SandboxError::Backend { .. }),
-            })
-        ),
-        "{result:?}"
+    // A switch the port cannot set breaks the stand: before the workload of the repeat started,
+    // and on `cache`, created with the workload, after it.
+    let after = AFTER_THE_WORKLOAD.replace(
+        "x-stand: { workload: load }",
+        "x-stand: { workload: load, repeat: 1, fault: { target: \"db:5432\", mode: down } }",
     );
-    let dir = case.run_dir().join("fault-1-head");
-    assert_eq!(logs_in(&dir), names(&["db-1", "api-1", "api-2"]));
-    assert_left(&fake, &case.left());
+    let after_rules = vec![
+        rule("db", stops(SECOND)),
+        rule("cache", stops(SECOND)),
+        rule("side", stops(SECOND)),
+        rule("load", exits(0, 5 * SECOND)),
+    ];
+    let cases = [
+        (
+            under_fault("mode: down"),
+            fault_rules(),
+            1,
+            Phase::Ready,
+            &["db-1", "api-1", "api-2"][..],
+        ),
+        (
+            after,
+            after_rules,
+            2,
+            Phase::Workload,
+            &["db-1", "cache-1", "load-1"][..],
+        ),
+    ];
+    for (recipe, rules, nth, phase, logs) in cases {
+        let case = Case::new(&recipe);
+        let fake = fake(rules);
+        let sandbox = Hooked {
+            fail_fault: Some(nth),
+            ..Hooked::new(&fake)
+        };
+        let result = sandbox.run(&case, &case.versions(false));
+        assert!(
+            matches!(
+                &result,
+                Err(RunError::Stand {
+                    phase: own,
+                    fault: StandFault::Sandbox(SandboxError::Backend { .. }),
+                }) if *own == phase
+            ),
+            "{result:?}"
+        );
+        let dir = case.run_dir().join("fault-1-head");
+        assert_eq!(logs_in(&dir), names(logs));
+        assert_left(&fake, &case.left());
+    }
 }
 
 /// `EXAMPLE` with the second pass and two files that should not change; the workload publishes a
@@ -3730,20 +3870,36 @@ fn the_second_pass_runs_the_workload_twice_on_one_state() {
             ["db-1", "api-1", "api-2", "load-1", "load-1"],
             "{side}"
         );
-        // `db` binds `out/`, each workload its own `out/out-<n>`; the host writes nothing of its
-        // own below the bind of a guest.
-        let probed = dir.join("out");
-        let outs: Vec<Utf8PathBuf> = chunk
+        // Each workload binds its own `out-<n>`, `db` both; the host writes its own files beside
+        // them.
+        let binds: Vec<(String, &str, &Utf8Path)> = chunk
             .iter()
-            .filter_map(|(launch, _)| out_of(launch).map(Utf8Path::to_owned))
+            .flat_map(|(launch, _)| writable(launch).map(move |bind| (vm(launch), bind.0, bind.1)))
             .collect();
+        let (one, two) = (dir.join("out-1"), dir.join("out-2"));
         assert_eq!(
-            outs,
-            [probed.clone(), probed.join("out-1"), probed.join("out-2")]
+            binds,
+            [
+                ("db-1".to_owned(), "/stand/out", one.as_path()),
+                ("db-1".to_owned(), "/stand/out-2", two.as_path()),
+                ("load-1".to_owned(), "/stand/out", one.as_path()),
+                ("load-1".to_owned(), "/stand/out", two.as_path()),
+            ],
+            "{side}"
         );
-        assert_eq!(names_in(&probed), ["out-1", "out-2"], "{side}");
+        let files = [
+            "api-1.log",
+            "api-2.log",
+            "db-1.log",
+            "load-1.log",
+            "load-1.pass-1.log",
+            "metrics.json",
+            "out-1",
+            "out-2",
+        ];
+        assert_eq!(names_in(&dir), files, "{side}");
         for (n, pass) in [(1, first), (2, second)] {
-            let out = probed.join(format!("out-{n}"));
+            let out = dir.join(format!("out-{n}"));
             assert_eq!(pass.out_dir, out);
             assert_eq!(ran(&pass.probes), ["orders"]);
             assert_eq!(pass.probes[0].out, out.join("probe.orders.jsonl"));
@@ -3766,7 +3922,7 @@ fn the_second_pass_runs_the_workload_twice_on_one_state() {
         let at = |matches: &dyn Fn(&Call) -> bool| index_of(&journal, matches);
         let cut = at(&|call| matches!(call, Call::Metrics(id) if id == first_load));
         let probe = at(
-            &|call| matches!(call, Call::Exec { stdout, .. } if *stdout == probed.join("out-1/probe.orders.jsonl")),
+            &|call| matches!(call, Call::Exec { stdout, .. } if *stdout == one.join("probe.orders.jsonl")),
         );
         let gone = at(&|call| matches!(call, Call::Destroy(id) if id == first_load));
         let again =
@@ -3783,9 +3939,24 @@ fn the_second_pass_runs_the_workload_twice_on_one_state() {
         for (launch, _) in chunk {
             assert_eq!(profile_mounts(launch), (None, false), "{side}");
         }
-        let logs = ["api-1", "api-2", "db-1", "load-1", "load-1.pass-1"];
-        assert_eq!(logs_in(&dir), names(&logs), "{side}");
-        assert!(dir.join("metrics.json").is_file());
+    }
+    // No VM of the run binds a folder that lies in the writable bind of another, where that guest
+    // could have swapped it for a link.
+    let made = created(&journal);
+    for (launch, _) in &made {
+        for mount in &launch.mounts {
+            let Mount::Bind { host, .. } = mount else {
+                continue;
+            };
+            for (other, _) in &made {
+                for (_, around) in writable(other) {
+                    let below = host
+                        .strip_prefix(around)
+                        .is_ok_and(|rest| !rest.as_str().is_empty());
+                    assert!(!below, "{host} of {} is in {around}", vm(launch));
+                }
+            }
+        }
     }
     assert_eq!(
         kept_from(&case, &journal),
@@ -3795,6 +3966,18 @@ fn the_second_pass_runs_the_workload_twice_on_one_state() {
         ]
     );
     assert_clean(&fake, &case.left());
+}
+
+/// The guest path and host folder of each writable bind of `launch`.
+fn writable(launch: &Launch) -> impl Iterator<Item = (&str, &Utf8Path)> {
+    launch.mounts.iter().filter_map(|mount| match mount {
+        Mount::Bind {
+            host,
+            guest,
+            read_only: false,
+        } => Some((guest.as_str(), host.as_path())),
+        _ => None,
+    })
 }
 
 #[test]
@@ -3867,7 +4050,7 @@ fn a_failed_second_pass_is_a_fact_at_twice_the_timeout() {
             repeat: None,
             cause,
             logs: Some(dir.clone()),
-            probes: vec![dir.join("out").join(out).join("probe.last.jsonl")],
+            probes: vec![dir.join(out).join("probe.last.jsonl")],
         };
         assert!(
             matches!(&pass.head, PassPair::Failed(failure) if *failure == expected),

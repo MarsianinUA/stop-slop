@@ -133,11 +133,15 @@ pub struct FaultOutcome {
 pub struct FaultRepeat {
     /// From 1.
     pub repeat: u32,
-    /// `None` when the workload did not end with a code: the repeat hit its timeout, or ended
-    /// before the workload started, at a readiness that never came.
+    /// `None` when the workload did not end with a code: the repeat hit its timeout, ended before
+    /// the workload started, or the workload was killed; `failure` tells them apart.
     pub workload: Option<i32>,
     /// Long-running services that exited during the repeat.
     pub exited: Vec<String>,
+    /// What ended the repeat short of the workload's exit 0, as in a failed measured repeat. Phase
+    /// `Ready`: before the fault went on, so it says nothing of the fault (a readiness that never
+    /// came); `Workload`: under the fault. No probe runs in a fault repeat, so `probes` is empty.
+    pub failure: Option<Failure>,
     /// At the cut; no profiler runs in a fault repeat.
     pub instances: Vec<InstanceOutput>,
 }

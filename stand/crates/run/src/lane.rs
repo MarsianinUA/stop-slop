@@ -362,14 +362,7 @@ fn build<S: Sandbox>(
             Stop::Fault(Phase::Setup, fault),
         )
     })?;
-    let failure = Failure {
-        phase: Phase::Setup,
-        service,
-        repeat: None,
-        cause,
-        logs: Some(dir.to_owned()),
-        probes: probes.iter().map(|probe| probe.out.clone()).collect(),
-    };
+    let failure = failure((service, cause), Phase::Setup, None, dir, &probes);
     Ok((side(probes, BTreeMap::new()), Err(failure)))
 }
 
@@ -393,7 +386,7 @@ fn start_setup<S: Sandbox>(
         version_snapshot(ctx, fleet, seeds)?;
         let frame = Frame {
             out,
-            probed: out,
+            second: None,
             tar: &version.tar,
             seeds,
             mode: None,
@@ -407,6 +400,8 @@ fn start_setup<S: Sandbox>(
             fleet.completed(ctx.sandbox, index, deadline, ctx.cancel)?;
         }
     }
+    // A database that ended with the last setup service would go into the snapshots crashed.
+    fleet.settled(ctx.sandbox)?;
     version_snapshot(ctx, fleet, seeds)
 }
 
@@ -541,6 +536,7 @@ fn faults<S: Sandbox>(
             repeat,
             workload: ends.workload,
             exited: ends.exited,
+            failure: repeated.failure,
             instances: repeated.output.instances,
         }
     };
@@ -612,7 +608,7 @@ fn run_repeat<S: Sandbox>(
     let deadline = ctx.sandbox.now() + timeout;
     let frame = Frame {
         out: &out,
-        probed: &out,
+        second: None,
         tar: &version.tar,
         seeds,
         mode,
@@ -687,7 +683,8 @@ fn up_to_exit<S: Sandbox>(
     let mut started = None;
     let ran = start_repeat(ctx, fleet, frame, fault, deadline, &mut started)
         .and_then(|()| fleet.finished(ctx.sandbox, deadline, ctx.cancel));
-    let phase = match started {
+    // The workload is a member once its `create` returned, also when the fault after it failed.
+    let phase = match fleet.workload() {
         Some(_) => Phase::Workload,
         None => Phase::Ready,
     };
@@ -742,6 +739,12 @@ fn workload_outcome(
     phase: Phase,
     dir: &Utf8Path,
 ) -> Result<(Instant, Option<Failing>), Stop> {
+    // A long-running service that ended with the workload ends the repeat it would have measured;
+    // after another exit of the workload, that exit is the cause.
+    let ran = match ran {
+        Ok((Some(0), at)) => fleet.settled(sandbox).map(|()| (Some(0), at)),
+        ran => ran,
+    };
     Ok(match ran {
         Ok((Some(0), at)) => (at, None),
         Ok((code, at)) => {
@@ -793,11 +796,9 @@ fn second_pass<S: Sandbox>(ctx: &mut Ctx<S>, side: Side, passed: Passed) -> Resu
     }
     let (stand, sandbox) = (ctx.stand, ctx.sandbox);
     let dir = ctx.run_dir.join(format!("pass2-{side}"));
-    // A probed service binds `probed`, the workload of each pass its own `out-<n>` in it. All
-    // before any VM: a guest may not see a folder the host makes later. The host writes its own
-    // files beside `probed`, never below it, where a guest could have left a link.
-    let probed = dir.join("out");
-    let outs = [probed.join("out-1"), probed.join("out-2")];
+    // One per pass: its workload binds it, a service with a probe both (`Frame.second`), so both
+    // are there before the first VM. The host writes its own files beside them.
+    let outs = [dir.join("out-1"), dir.join("out-2")];
     for out in &outs {
         fs::create_dir_all(out)
             .map_err(StandFault::io(out))
@@ -807,7 +808,7 @@ fn second_pass<S: Sandbox>(ctx: &mut Ctx<S>, side: Side, passed: Passed) -> Resu
     let deadline = sandbox.now() + stand.timeout.get() * 2;
     let frame = |out| Frame {
         out,
-        probed: &probed,
+        second: Some(&outs[1]),
         tar: &passed.version.tar,
         seeds: passed.seeds,
         mode: None,

@@ -257,6 +257,19 @@ impl Fleet {
         }
     }
 
+    /// Once a wait reached its goal: what ended by now, as `ended` notes it, halts the phase as in
+    /// `watch` when it is a long-running service not under a fault.
+    pub(crate) fn settled(&mut self, sandbox: &impl Sandbox) -> Result<(), Halt> {
+        self.ended(sandbox)?;
+        let mut members = self.members.iter();
+        let down = members
+            .position(|member| member.kind == ServiceKind::LongRunning && member.exit.is_some());
+        match down {
+            Some(index) if self.fault.is_none() => Err(Halt::Down(index)),
+            _ => Ok(()),
+        }
+    }
+
     /// Notes each member that ended by now, without waiting: a `wait` gives one exit, so a
     /// service that ended with the workload or just after it has none yet.
     pub(crate) fn ended(&mut self, sandbox: &impl Sandbox) -> Result<(), SandboxError> {
