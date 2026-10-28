@@ -4,7 +4,7 @@ use std::fs;
 use std::process::{Command, ExitStatus};
 
 use camino::{Utf8Path, Utf8PathBuf};
-use profile::{NodeEnv, PRELOAD, ProfileMode, node_env, read};
+use profile::{NodeEnv, PRELOAD, PathMap, ProfileMode, Samples, node_env, read};
 use serde_json::Value;
 use tempfile::TempDir;
 
@@ -87,6 +87,11 @@ impl Folders {
             .unwrap_or_else(|| panic!("no {suffix} file in {}", self.profile));
         serde_json::from_slice(&fs::read(self.profile.join(name)).unwrap()).unwrap()
     }
+
+    /// The scripts run on the host, outside the guest tree: none is local, the counts hold.
+    fn read(&self) -> Samples {
+        read(&self.profile, &PathMap::new("/w/app")).unwrap()
+    }
 }
 
 #[test]
@@ -148,7 +153,7 @@ fn chunks_written_before_a_hard_kill_stay() {
         folders.kinds(),
         ["0.cpuprofile", "1.cpuprofile", "start.json"]
     );
-    let samples = read(&folders.profile, &folders.profile).unwrap();
+    let samples = folders.read();
     assert_eq!((samples.processes, samples.lost_processes), (1, 0));
     assert!(samples.total_ms > 3000.0, "{}", samples.total_ms);
 }
@@ -178,10 +183,7 @@ fn a_pid_an_earlier_process_had_gets_files_of_its_own() {
             format!("{pid}.start.json"),
         ]
     );
-    assert_eq!(
-        read(&folders.profile, &folders.profile).unwrap().processes,
-        2
-    );
+    assert_eq!(folders.read().processes, 2);
 }
 
 #[test]
@@ -204,10 +206,7 @@ fn a_worker_thread_gets_files_of_its_own() {
             format!("{pid}.start.json"),
         ]
     );
-    assert_eq!(
-        read(&folders.profile, &folders.profile).unwrap().processes,
-        2
-    );
+    assert_eq!(folders.read().processes, 2);
 }
 
 #[test]

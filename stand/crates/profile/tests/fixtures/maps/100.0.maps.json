@@ -1,18 +1,18 @@
 {
-  "{url}/src/orders.ts": {
+  "file:///w/app/src/orders.ts": {
     "map": {
       "version": 3,
       "file": "orders.js",
       "sourceRoot": "",
       "sources": [
-        "{root}/src/orders.ts"
+        "/w/app/src/orders.ts"
       ],
       "names": [],
       "mappings": ";;;;;;;;;AAaA,sBAMC;AAED,wBAEC;AAED,kBAEC;AAzBD,SAAS,MAAM,CAAC,MAAc,EAAE,GAAW;IACzC,OAAO,CAAC,GAAG,CAAC,aAAa,GAAG,EAAE,CAAC,CAAC;AAClC,CAAC;AAED,MAAa,MAAM;IAEjB,IAAI;QACF,OAAO,EAAE,CAAC;IACZ,CAAC;CACF;AALD,wBAKC;AAHC;IADC,MAAM;kCAGN;AAGH,SAAgB,KAAK,CAAC,IAAW;IAC/B,IAAI,GAAG,GAAG,CAAC,CAAC;IACZ,KAAK,MAAM,GAAG,IAAI,IAAI,EAAE,CAAC;QACvB,GAAG,IAAI,GAAG,CAAC,KAAK,GAAG,GAAG,CAAC,GAAG,CAAC;IAC7B,CAAC;IACD,OAAO,GAAG,CAAC;AACb,CAAC;AAED,SAAgB,MAAM,CAAC,IAAW;IAChC,OAAO,SAAS,KAAK,CAAC,IAAI,CAAC,EAAE,CAAC;AAChC,CAAC;AAED,SAAgB,GAAG,CAAC,CAAS;IAC3B,OAAO,CAAC,GAAG,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,GAAG,CAAC,CAAC,GAAG,CAAC,CAAC,GAAG,GAAG,CAAC,CAAC,GAAG,CAAC,CAAC,CAAC;AAC7C,CAAC"
     },
-    "base": "{root}/src/orders.ts"
+    "base": "/w/app/src/orders.ts"
   },
-  "{url}/dist/orders.js": {
+  "file:///w/app/dist/orders.js": {
     "map": {
       "version": 3,
       "file": "orders.js",
@@ -23,9 +23,9 @@
       "names": [],
       "mappings": ";;;;;;;;;AAaA,sBAMC;AAED,wBAEC;AAED,kBAEC;AAzBD,SAAS,MAAM,CAAC,MAAc,EAAE,GAAW;IACzC,OAAO,CAAC,GAAG,CAAC,aAAa,GAAG,EAAE,CAAC,CAAC;AAClC,CAAC;AAED,MAAa,MAAM;IAEjB,IAAI;QACF,OAAO,EAAE,CAAC;IACZ,CAAC;CACF;AALD,wBAKC;AAHC;IADC,MAAM;kCAGN;AAGH,SAAgB,KAAK,CAAC,IAAW;IAC/B,IAAI,GAAG,GAAG,CAAC,CAAC;IACZ,KAAK,MAAM,GAAG,IAAI,IAAI,EAAE,CAAC;QACvB,GAAG,IAAI,GAAG,CAAC,KAAK,GAAG,GAAG,CAAC,GAAG,CAAC;IAC7B,CAAC;IACD,OAAO,GAAG,CAAC;AACb,CAAC;AAED,SAAgB,MAAM,CAAC,IAAW;IAChC,OAAO,SAAS,KAAK,CAAC,IAAI,CAAC,EAAE,CAAC;AAChC,CAAC;AAED,SAAgB,GAAG,CAAC,CAAS;IAC3B,OAAO,CAAC,GAAG,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,GAAG,CAAC,CAAC,GAAG,CAAC,CAAC,GAAG,GAAG,CAAC,CAAC,GAAG,CAAC,CAAC,CAAC;AAC7C,CAAC"
     },
-    "base": "{root}/dist/orders.js.map"
+    "base": "/w/app/dist/orders.js.map"
   },
-  "{url}/dist/esm.js": {
+  "file:///w/app/dist/esm.js": {
     "map": {
       "version": 3,
       "sources": [
@@ -34,6 +34,6 @@
       "names": [],
       "mappings": "AAAA"
     },
-    "base": "{root}/dist/esm.js"
+    "base": "/w/app/dist/esm.js"
   }
 }
