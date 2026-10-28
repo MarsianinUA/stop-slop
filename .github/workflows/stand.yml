@@ -1,0 +1,52 @@
+name: Stand
+on:
+  pull_request:
+    paths:
+      - stand/**
+      - shared/**
+      - skill/references/**
+      - .github/workflows/stand.yml
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: stand-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+env:
+  CARGO_TERM_COLOR: always
+jobs:
+  stand:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        working-directory: stand
+    steps:
+      - uses: actions/checkout@v7
+      # rust-cache takes the target folder relative to the workspace, and the checkout may be on
+      # another drive than C:, so the target goes to the root of the checkout's drive.
+      - name: Short paths on Windows, where aws-lc-sys hits MAX_PATH
+        id: paths
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          drive=$(pwd -W | cut -c1)
+          echo 'CARGO_HOME=C:\c' >> "$GITHUB_ENV"
+          echo "CARGO_TARGET_DIR=$drive:\\t" >> "$GITHUB_ENV"
+          echo "target=$(realpath --relative-to=. "/${drive,,}/t")" >> "$GITHUB_OUTPUT"
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: stand -> ${{ steps.paths.outputs.target || 'target' }}
+      - name: Node for the preload tests of profile, which start it
+        uses: actions/setup-node@v7
+        with:
+          node-version: 22
+      - run: cargo fmt --check
+      - run: cargo clippy --locked --workspace --all-targets -- -D warnings
+      - run: cargo test --locked --workspace

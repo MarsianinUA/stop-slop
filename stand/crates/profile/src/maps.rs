@@ -40,10 +40,7 @@ impl Scripts {
     pub(crate) fn get(&mut self, url: &str) -> &Script {
         if !self.known.contains_key(url) {
             let file = file_path(url);
-            let map = file.as_deref().and_then(|file| {
-                let entry = self.entries.remove(url)?;
-                Map::load(entry, file)
-            });
+            let map = self.entries.remove(url).and_then(Map::load);
             self.known.insert(url.to_owned(), Script { file, map });
         }
         &self.known[url]
@@ -52,14 +49,13 @@ impl Scripts {
 
 /// The value of a script in `<id>.<n>.maps.json`.
 #[derive(Deserialize)]
-#[serde(rename_all = "lowercase")]
-enum Entry {
-    /// The inline `data:` map of the script, without `sourcesContent`. Parsed only when the
-    /// script is resolved: a map that does not parse leaves its script unmapped instead of
-    /// failing the read.
-    Map(Box<RawValue>),
-    /// The `.map` file the script's `sourceMappingURL` names.
-    File(Utf8PathBuf),
+struct Entry {
+    /// The script's map without `sourcesContent`, inline or from the `.map` file it names. Parsed
+    /// only when the script is resolved: a map that does not parse leaves its script unmapped
+    /// instead of failing the read.
+    map: Box<RawValue>,
+    /// The path relative sources start from: the script for an inline map, else the `.map` file.
+    base: Utf8PathBuf,
 }
 
 pub(crate) struct Map {
@@ -69,21 +65,12 @@ pub(crate) struct Map {
 }
 
 impl Map {
-    /// `None` when the map does not parse or its file cannot be read. Relative sources of an
-    /// inline map start from the folder of `script`.
-    fn load(entry: Entry, script: &Utf8Path) -> Option<Map> {
-        match entry {
-            Entry::Map(raw) => Map::new(SourceMap::from_json_string(raw.get()).ok()?, script),
-            Entry::File(path) => {
-                let text = fs::read_to_string(&path).ok()?;
-                Map::new(SourceMap::from_json_string(&text).ok()?, &path)
-            }
-        }
-    }
-
-    fn new(map: SourceMap<'_>, from: &Utf8Path) -> Option<Map> {
-        let parts = map.into_parts();
-        let dir = from.parent()?;
+    /// `None` when the map does not parse.
+    fn load(entry: Entry) -> Option<Map> {
+        let parts = SourceMap::from_json_string(entry.map.get())
+            .ok()?
+            .into_parts();
+        let dir = entry.base.parent()?;
         let root = parts.source_root.as_deref().filter(|root| !root.is_empty());
         let sources = parts
             .sources
