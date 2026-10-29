@@ -471,7 +471,7 @@ max = 4
   - The stand's job, `stand.yml`, runs on changes in `stand/` and in `skill/references/`, which the stand builds in: `cargo fmt --check`, `cargo clippy --workspace --all-targets -- -D warnings` and `cargo test --workspace` in `stand/`, with Node 22 for the tests of the preload.
 - `cli` of the stand tests its commands on a fake sandbox, on all three OS.
 - The live tests run on real microsandbox VMs with `STOP_SLOP_STAND_LIVE=1`; without it they pass at once.
-  - In Linux CI, on KVM, the job `live` of `stand.yml` runs the contract set of the sandbox with the `stand-guest` of the commit, and only the small case of `cli`, on the pinned release: the runner's 4 CPUs give a stand 2 vCPUs. The whole case of `cli` asks 3 vCPUs, so it runs on Windows and macOS.
+  - In Linux CI, on KVM, the job `live` of `stand.yml` runs the contract set of the sandbox with the `stand-guest` of the commit, then both cases of `cli` on the pinned release. The whole case asks 3 vCPUs, so the job sets `host_share = 80`, and the runner's 4 CPUs give 3.
   - On Windows Claude runs the whole live set before each push of the stand; on macOS I do. On Windows they run from the test binary that `cargo test --no-run` builds, never under `cargo test` or `cargo run`: cargo keeps its children in a job without breakaway, and a VM from a snapshot cannot start there.
 - I measure speed by hand with `check --all` on a real repository, read-only.
 

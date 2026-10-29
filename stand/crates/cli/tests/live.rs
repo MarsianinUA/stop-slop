@@ -8,9 +8,10 @@
 //! is a child of this one.
 //!
 //! The budget counts the peak of a run, setup or a repeat, and gives a stand half the logical CPUs
-//! unless `stand.toml` says more (80% at most): the whole case asks 3 vCPUs, so 6 logical CPUs,
-//! and the small one 2, which a CI runner of 4 gives. The stand also keeps 20 GiB free on the disk
-//! of its folder: on Windows `TMP` moves the folder to another disk, on Linux a link at its path.
+//! unless `stand.toml` says more (80% at most): the whole case asks 3 vCPUs, so 6 logical CPUs, or
+//! 4 with `host_share = 80`, as CI sets it; the small one asks 2. The stand also keeps 20 GiB free
+//! on the disk of its folder: on Windows `TMP` moves the folder to another disk, on Linux a link at
+//! its path.
 //!
 //! The run's folder layout (`repeat-<n>-<side>/out/`, `kept.json`, `sessions/<key>/cache/`) is a
 //! law of the blueprint, so the cases read it.

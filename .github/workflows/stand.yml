@@ -96,7 +96,7 @@ jobs:
   # it is released; the cli set runs the pinned release.
   live:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 45
     defaults:
       run:
         working-directory: stand
@@ -143,12 +143,14 @@ jobs:
           nproc
           df -h / /mnt
       # The pinned stand-guest from the release, as a user gets it: without STOP_SLOP_STAND_GUEST
-      # the adapter downloads it and checks its sha256. The runner's 4 CPUs give a stand 2 vCPUs, so
-      # only the small case fits; the whole one asks 3 and runs on Windows and the Mac.
+      # the adapter downloads it and checks its sha256. The runner's 4 CPUs give a stand 2 vCPUs, and
+      # 3 with host_share = 80, which the whole case asks.
       - name: The stand command on microsandbox VMs
-        run: >-
+        run: |
+          config="${XDG_CONFIG_HOME:-$HOME/.config}/stop-slop-stand"
+          mkdir -p "$config"
+          echo 'host_share = 80' > "$config/stand.toml"
           env -u STOP_SLOP_STAND_GUEST cargo test --locked -p cli --test live -- --test-threads=1
-          --exact a_two_service_stand_passes_on_four_cpus_and_clean_leaves_nothing
       - name: Notes of the live run for the PR description
         if: always()
         run: cat /tmp/stop-slop-stand-live/notes.txt /tmp/stop-slop-stand-cli/notes.txt || true
