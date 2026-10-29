@@ -4,7 +4,7 @@
 
 use report::SetupFrom;
 use run::SetupCache;
-use sandbox::{Leftovers, Pulled, Sandbox};
+use sandbox::{Cached, Leftovers, Pulled, Sandbox};
 use source::Tree;
 use spec::Stand;
 use store::{CacheEntry, Session, SetupKey, Slot, Store};
@@ -32,7 +32,7 @@ impl Planned {
     }
 }
 
-/// `recipe` is the digest of the recipe the run reads.
+/// `recipe` is the digest of the recipe the run reads: the sealed copy with `--before`.
 pub(crate) fn key(stand: &Stand, tree: &Tree, pulled: &Pulled) -> SetupKey {
     SetupKey {
         tree: tree.to_string(),
@@ -45,6 +45,34 @@ pub(crate) fn key(stand: &Stand, tree: &Tree, pulled: &Pulled) -> SetupKey {
         guest: pulled.guest.clone(),
         tool: env!("CARGO_PKG_VERSION").to_owned(),
     }
+}
+
+/// What `pull` would give, when every image is in the home already: the key of `--dry-run`.
+pub(crate) fn known(cached: &Cached) -> Option<Pulled> {
+    let digests = cached
+        .digests
+        .iter()
+        .map(|(image, digest)| Some((image.clone(), digest.clone()?)))
+        .collect::<Option<Vec<_>>>()?;
+    Some(Pulled {
+        digests,
+        guest: cached.guest.clone(),
+    })
+}
+
+/// The run that built the entry of `key`, when `plan` would take it now; drops and writes
+/// nothing.
+pub(crate) fn would_hit(
+    session: &Session,
+    key: &SetupKey,
+    left: &Leftovers,
+) -> Result<Option<String>, StandError> {
+    let Some(entry) = session.cached(key)? else {
+        return Ok(None);
+    };
+    let whole = run::cached_ids(&entry.dir)?
+        .is_some_and(|ids| ids.iter().all(|id| left.snapshots.contains(id)));
+    Ok(whole.then_some(entry.built_by))
 }
 
 /// A hit needs `entry.json` and every snapshot it names among `left`; otherwise the snapshots
@@ -85,15 +113,18 @@ pub(crate) fn plan(
     })
 }
 
-pub(crate) fn setup_from(head: &Planned) -> SetupFrom {
+pub(crate) fn setup_from(head: &Planned, before: Option<&Planned>) -> SetupFrom {
+    let from = |planned: &Planned| planned.hit.then(|| planned.entry.built_by.clone());
     SetupFrom {
-        head: head.hit.then(|| head.entry.built_by.clone()),
-        before: None,
+        head: from(head),
+        before: before.and_then(from),
     }
 }
 
 /// After exit 0 or 1: each slot points at its version's entry when that setup passed whole;
-/// the entries no slot names lose their snapshots, then their folders.
+/// the entries no slot names lose their snapshots, then their folders. "Before" goes first: the
+/// entry the head slot held may serve "before" now, and the head slot let go of first would give
+/// it up with its snapshots.
 pub(crate) fn keep(
     session: &Session,
     plans: &[Planned],
@@ -101,7 +132,8 @@ pub(crate) fn keep(
     store: &Store,
 ) -> Result<(), StandError> {
     let mut gone = Vec::new();
-    for planned in plans {
+    let of = |slot: Slot| plans.iter().filter(move |planned| planned.slot == slot);
+    for planned in of(Slot::Before).chain(of(Slot::Head)) {
         if run::cached_ids(&planned.entry.dir)?.is_some() {
             gone.extend(session.cache(planned.slot, &planned.key, planned.entry.clone())?);
         }

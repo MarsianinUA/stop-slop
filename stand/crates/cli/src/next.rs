@@ -66,7 +66,15 @@ mod tests {
 
     /// The `Next` whose commands exist.
     fn every_next() -> Vec<Next> {
-        vec![Next::Snapshot]
+        vec![
+            Next::Snapshot,
+            Next::Reseal {
+                before: "session".into(),
+            },
+            Next::Reseal {
+                before: "origin/main".into(),
+            },
+        ]
     }
 
     #[test]

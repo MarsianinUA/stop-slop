@@ -15,6 +15,7 @@ camino.workspace = true
 clap.workspace = true
 ctrlc.workspace = true
 dirs.workspace = true
+humantime.workspace = true
 report = { path = "../report" }
 run = { path = "../run" }
 # The only crate that turns the adapter on (plan, row 85).
@@ -29,8 +30,6 @@ thiserror.workspace = true
 tracing-subscriber.workspace = true
 
 [dev-dependencies]
-# `usedAt` of `session.json`, moved back for the TTL.
-humantime.workspace = true
 sandbox = { path = "../sandbox", features = ["fake"] }
 # The command strings of `next` split as a shell splits them.
 shlex.workspace = true

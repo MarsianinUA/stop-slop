@@ -45,6 +45,14 @@ pub(crate) enum StandError {
     },
     #[error("another run holds the stand; waited {} s for it", .0.as_secs())]
     LockWait(Duration),
+    /// `before`: the intent as typed, for the command that reseals.
+    #[error(
+        "the recipe changed since its seal: {}; put it back, or seal it again with --reseal",
+        .files.join(", ")
+    )]
+    RecipeChanged { files: Vec<String>, before: String },
+    #[error("the before tree is the head tree: there is nothing to compare")]
+    NothingToCompare,
     #[error("cancelled")]
     Cancelled,
 }
@@ -72,9 +80,11 @@ impl StandError {
                 | SandboxError::Guest { .. }
                 | SandboxError::Backend { .. } => Exit::Broken,
             },
-            StandError::Config(_) | StandError::Budget(_) | StandError::LockWait(_) => {
-                Exit::Refused
-            }
+            StandError::Config(_)
+            | StandError::Budget(_)
+            | StandError::LockWait(_)
+            | StandError::RecipeChanged { .. }
+            | StandError::NothingToCompare => Exit::Refused,
             StandError::Store(_)
             | StandError::Host(_)
             | StandError::Report(_)
@@ -87,6 +97,9 @@ impl StandError {
     /// What helps next, as types; `next::render` turns them into commands.
     pub(crate) fn next(&self) -> Vec<Next> {
         match self {
+            StandError::RecipeChanged { before, .. } => vec![Next::Reseal {
+                before: before.clone(),
+            }],
             StandError::Spec(SpecError::Missing(_)) => vec![Next::Init],
             StandError::Source(SourceError::NoSnapshot) => vec![Next::Snapshot],
             // The rules of the stand file, the image of the prepare service among them, live in

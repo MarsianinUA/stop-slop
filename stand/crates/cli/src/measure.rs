@@ -1,6 +1,6 @@
-//! `run`: the call order of the plan («Команды `stop-slop-stand`», steps 1-8). Every step tags
-//! its error with its phase; whatever happens after the run folder exists, the cache slots, the
-//! kept run and the tar files are settled under the lock before it goes.
+//! `run` and `run --dry-run`: the call order of the plan («Команды `stop-slop-stand`», steps
+//! 1-8). Every step tags its error with its phase; whatever happens after the run folder exists,
+//! the cache slots, the kept run and the tar files are settled under the lock before it goes.
 
 use std::collections::BTreeSet;
 use std::fs::File;
@@ -11,14 +11,14 @@ use camino::{Utf8Path, Utf8PathBuf};
 use report::{Cause, Extra, Failure, Line, Next, Phase, Previous, Report, Topic};
 use run::{Cancel, Failed, RunError, Version, Versions};
 use sandbox::{ImageRef, Sandbox};
-use source::{Tree, Worktree};
-use spec::Stand;
+use source::{Before, Resolved, Tree, Worktree};
+use spec::{Policy, Stand};
 use store::{PoolKey, RunPaths, Session, Slot, Store};
 
 use crate::cache::{self, Planned};
 use crate::context::{self, Known};
 use crate::error::{At, Halt, StandError};
-use crate::{Env, Exit, Output, images, lock, next, policy, stand_file, sweep};
+use crate::{Compare, Env, Exit, Output, images, lock, next, policy, seal, stand_file, sweep};
 
 /// How a run ended, for the line or the summary.
 enum Ended {
@@ -42,6 +42,7 @@ enum Ended {
 struct Opened {
     worktree: Worktree,
     file: Utf8PathBuf,
+    policy: Policy,
     share: budget::Share,
     live: Stand,
 }
@@ -59,7 +60,12 @@ enum Done {
     Failed(Box<Failed>),
 }
 
-pub(crate) fn run(output: Output, sandbox: &impl Sandbox, env: &mut Env<'_>) -> Exit {
+pub(crate) fn run(
+    compare: Option<&Compare>,
+    output: Output,
+    sandbox: &impl Sandbox,
+    env: &mut Env<'_>,
+) -> Exit {
     let ended = match opened(env) {
         Err(halt) => Ended::Halted { halt, run: None },
         Ok(opened) => {
@@ -68,13 +74,36 @@ pub(crate) fn run(output: Output, sandbox: &impl Sandbox, env: &mut Env<'_>) -> 
                 Err(halt) => Ended::Halted { halt, run: None },
                 Ok(_lock) => {
                     let mut made = Made::default();
-                    let outcome = measure(opened, sandbox, env, &mut made);
+                    let outcome = measure(opened, compare, sandbox, env, &mut made);
                     settle(outcome, &made, sandbox, env.store, &mut *env.err)
                 }
             }
         }
     };
     print(ended, output, env)
+}
+
+pub(crate) fn dry(
+    before: Option<&Before>,
+    output: Output,
+    sandbox: &impl Sandbox,
+    env: &mut Env<'_>,
+) -> Exit {
+    let checked = opened(env).and_then(|opened| {
+        let span = run::span(&opened.live);
+        let _lock = lock::wait(env.store, span, env.cancel, &mut *env.err).at(Phase::Lock)?;
+        dry_checks(opened, before, sandbox, env)
+    });
+    let text = match checked {
+        Err(halt) => return print(Ended::Halted { halt, run: None }, output, env),
+        Ok(text) => text,
+    };
+    // A stdout that fails has nowhere left to report it; the exit code still tells.
+    let _ = match output {
+        Output::Json(layout) => next::print_line(env.out, &Line::default(), layout),
+        Output::Summary => write!(env.out, "{text}"),
+    };
+    Exit::Passed
 }
 
 fn opened(env: &Env<'_>) -> Result<Opened, Halt> {
@@ -85,14 +114,30 @@ fn opened(env: &Env<'_>) -> Result<Opened, Halt> {
     Ok(Opened {
         worktree,
         file,
+        policy,
         share,
         live,
     })
 }
 
+/// The first step under the lock: a missing snapshot, an unknown ref or a "before" equal to the
+/// head refuses before the seal, the sweep and the pull.
+fn trees(worktree: &Worktree, before: Option<&Before>) -> Result<(Tree, Option<Resolved>), Halt> {
+    let head = source::snapshot(worktree).at(Phase::Source)?;
+    let Some(before) = before else {
+        return Ok((head, None));
+    };
+    let resolved = source::before(worktree, before).at(Phase::Source)?;
+    if resolved.tree == head {
+        return Err(StandError::NothingToCompare).at(Phase::Source);
+    }
+    Ok((head, Some(resolved)))
+}
+
 /// Steps 3-8 under the lock, up to the written report.
 fn measure(
     opened: Opened,
+    compare: Option<&Compare>,
     sandbox: &impl Sandbox,
     env: &mut Env<'_>,
     made: &mut Made,
@@ -100,17 +145,34 @@ fn measure(
     let Opened {
         worktree,
         file,
+        policy,
         share,
-        live: stand,
+        live,
     } = opened;
     let store = env.store;
+    // One time for the session, the seal and the run's record: a seal later than the run that
+    // made it would count that run as measured before the seal.
     let now = SystemTime::now();
+    let (head, before) = trees(&worktree, compare.map(|compare| &compare.before))?;
+    checkpoint(env.cancel, Phase::Source)?;
+    // A run with `--before` reads the sealed copy, whose images are the live ones the session
+    // names: the seal lets a run through only when every file of the copy is the live one.
     let session = store
-        .session(&file, &worktree.root, &images(&stand), now)
+        .session(&file, &worktree.root, &images(&live), now)
         .at(Phase::Seal)?;
     let key = session.key().to_owned();
     made.session = Some(session);
     let session = made.session.as_ref().expect("just set");
+    let (stand, sealed) = match compare {
+        None => (live, None),
+        Some(compare) => {
+            let reseal = compare.reseal.as_ref();
+            let (stand, sealed) =
+                seal::check(session, &live, &compare.before, reseal, &policy, now)
+                    .at(Phase::Seal)?;
+            (stand, Some(sealed))
+        }
+    };
     checkpoint(env.cancel, Phase::Seal)?;
 
     sweep::leftovers(sandbox, store, now).at(Phase::Sweep)?;
@@ -120,14 +182,20 @@ fn measure(
     let pulled = sandbox.pull(&image_refs(&stand)).at(Phase::Pull)?;
     checkpoint(env.cancel, Phase::Pull)?;
 
-    let trees = store.trees().at(Phase::Source)?;
-    let head = source::snapshot(&worktree).at(Phase::Source)?;
-    write_tar(&worktree, &head, &trees.head).at(Phase::Source)?;
+    let tars = store.trees().at(Phase::Source)?;
+    write_tar(&worktree, &head, &tars.head).at(Phase::Source)?;
+    let changed = match &before {
+        None => None,
+        Some(resolved) => {
+            write_tar(&worktree, &resolved.tree, &tars.before).at(Phase::Source)?;
+            Some(source::changed(&worktree, &resolved.tree, &head).at(Phase::Source)?)
+        }
+    };
     checkpoint(env.cancel, Phase::Source)?;
 
     let pool_key = PoolKey {
         head_tree: head.to_string(),
-        before_tree: None,
+        before_tree: before.as_ref().map(|resolved| resolved.tree.to_string()),
         digest: stand.recipe.digest.clone(),
     };
     let run = session.new_run(now, &pool_key).at(Phase::Source)?;
@@ -138,15 +206,28 @@ fn measure(
     let head_plan =
         cache::plan(session, Slot::Head, head_key, &left, &run.id, sandbox).at(Phase::Setup)?;
     made.plans.push(head_plan.clone());
+    let before_plan = match &before {
+        None => None,
+        Some(resolved) => {
+            let key = cache::key(&stand, &resolved.tree, &pulled);
+            let planned = cache::plan(session, Slot::Before, key, &left, &run.id, sandbox)
+                .at(Phase::Setup)?;
+            made.plans.push(planned.clone());
+            Some(planned)
+        }
+    };
 
     let pool = pool(session, &pool_key).at(Phase::Report)?;
     let (extras, reused) = extras(&stand, pool.last().map(|(_, report)| report));
     let versions = Versions {
         head: Version {
-            tar: trees.head.clone(),
+            tar: tars.head.clone(),
             setup: head_plan.setup(),
         },
-        before: None,
+        before: before_plan.as_ref().map(|planned| Version {
+            tar: tars.before.clone(),
+            setup: planned.setup(),
+        }),
     };
     let raw = match run::run(&stand, sandbox, &versions, &extras, &run.dir, env.cancel) {
         Ok(raw) => raw,
@@ -175,12 +256,14 @@ fn measure(
         created_at: now,
         root: worktree.root.clone(),
         head_tree: head.to_string(),
+        before: before.as_ref().zip(changed),
         stand: &stand,
+        seal: sealed.as_ref().map(|sealed| (sealed, policy)),
         history: &history,
         acceptances: &acceptances,
         previous,
         pool: &pool_reports,
-        setup_from: cache::setup_from(&head_plan),
+        setup_from: cache::setup_from(&head_plan, before_plan.as_ref()),
         reused,
     });
     let report = report::make(&raw, &outputs, &context);
@@ -279,6 +362,85 @@ fn extras(stand: &Stand, last: Option<&Report>) -> (BTreeSet<Extra>, BTreeSet<Ex
         Extra::SecondPass => last.second_pass.is_some(),
     };
     asked.into_iter().partition(|extra| !carried(extra))
+}
+
+/// The steps of `run` up to the pull, with nothing pulled, sealed or built: SDK 0.7.8 pulls a
+/// missing image through a VM (plan T-11, orchestrator), so the images come from `cached`, the
+/// adapter's read of its local cache. The trees and the seal are checked as `run` checks them, so
+/// a refusal of `run` is a refusal here too. A setup can come from the cache only when every image
+/// is in the home: the key holds each digest.
+fn dry_checks(
+    opened: Opened,
+    before: Option<&Before>,
+    sandbox: &impl Sandbox,
+    env: &mut Env<'_>,
+) -> Result<String, Halt> {
+    let Opened {
+        worktree,
+        file,
+        policy,
+        share,
+        live,
+    } = opened;
+    let store = env.store;
+    let now = SystemTime::now();
+    let (head, before) = trees(&worktree, before)?;
+    checkpoint(env.cancel, Phase::Source)?;
+    let session = store
+        .session(&file, &worktree.root, &images(&live), now)
+        .at(Phase::Seal)?;
+    let (stand, sealed) = match &before {
+        None => (live, None),
+        Some(resolved) => {
+            seal::compare(&session, live, &resolved.intent, &policy).at(Phase::Seal)?
+        }
+    };
+    checkpoint(env.cancel, Phase::Seal)?;
+    sweep::leftovers(sandbox, store, now).at(Phase::Sweep)?;
+    checkpoint(env.cancel, Phase::Sweep)?;
+    let host = sweep::make_room(sandbox, store, session.key(), env.host).at(Phase::Budget)?;
+    let admitted = budget::check(demand(&stand), &host, share).at(Phase::Budget)?;
+    let cached = sandbox.cached(&image_refs(&stand)).at(Phase::Pull)?;
+    checkpoint(env.cancel, Phase::Pull)?;
+
+    let recipe = match &sealed {
+        Some(sealed) => format!(
+            "sealed copy of {}",
+            humantime::format_rfc3339_seconds(sealed.sealed_at)
+        ),
+        None => "live folder".to_owned(),
+    };
+    let mut text = format!(
+        "dry run: {} ({recipe}), recipe {}\nbudget: {} vCPUs and {} MiB fit the host\n",
+        slashed(&file),
+        stand.recipe.digest,
+        admitted.cpus,
+        admitted.memory >> 20,
+    );
+    for (image, digest) in &cached.digests {
+        match digest {
+            Some(digest) => text.push_str(&format!("image {image} cached {digest}\n")),
+            None => text.push_str(&format!("image {image} to download\n")),
+        }
+    }
+    let pulled = cache::known(&cached);
+    let left = sandbox.leftovers().at(Phase::Setup)?;
+    let mut sides = vec![("head", &head)];
+    sides.extend(before.as_ref().map(|resolved| ("before", &resolved.tree)));
+    for (side, tree) in sides {
+        let built_by = match &pulled {
+            Some(pulled) => {
+                let key = cache::key(&stand, tree, pulled);
+                cache::would_hit(&session, &key, &left).at(Phase::Setup)?
+            }
+            None => None,
+        };
+        match built_by {
+            Some(run) => text.push_str(&format!("setup {side} cached {run}\n")),
+            None => text.push_str(&format!("setup {side} built\n")),
+        }
+    }
+    Ok(text)
 }
 
 fn print(ended: Ended, output: Output, env: &mut Env<'_>) -> Exit {

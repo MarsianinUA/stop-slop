@@ -19,10 +19,11 @@ mod guide;
 mod lock;
 mod measure;
 mod next;
+mod seal;
 mod snapshot;
 mod sweep;
 
-pub use args::{Command, JsonLayout, Output, parse, refuse_args};
+pub use args::{Command, Compare, JsonLayout, Output, Reason, parse, refuse_args};
 
 use error::StandError;
 
@@ -57,7 +58,12 @@ impl From<Exit> for ExitCode {
 
 pub fn execute(command: Command, sandbox: &impl Sandbox, mut env: Env<'_>) -> Exit {
     let done = match command {
-        Command::Run { output } => return measure::run(output, sandbox, &mut env),
+        Command::Run { compare, output } => {
+            return measure::run(compare.as_ref(), output, sandbox, &mut env);
+        }
+        Command::DryRun { before, output } => {
+            return measure::dry(before.as_ref(), output, sandbox, &mut env);
+        }
         Command::Snapshot => snapshot::run(&mut env),
         Command::Clean(what) => clean::run(what, sandbox, &mut env),
     };

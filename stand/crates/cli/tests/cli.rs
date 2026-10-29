@@ -390,11 +390,14 @@ fn set(ids: &[SnapshotId]) -> BTreeSet<String> {
     ids.iter().map(ToString::to_string).collect()
 }
 
-/// The `Fake` of a case, with the calls it changes: a `create` of a batch with the service
-/// `fails_on` fails, one with `cancels_on` sets Ctrl+C first. Everything else goes to the `Fake`
-/// as it is.
+/// The `Fake` of a case, with the calls it changes: `pull` and `cached` give the digests of
+/// `digests` (a tag that moved), `cached` finds none of `evicted`, a `create` of a batch with the
+/// service `fails_on` fails, one with `cancels_on` sets Ctrl+C first. Everything else goes to the
+/// `Fake` as it is.
 struct Wrapped<'f> {
     fake: &'f Fake,
+    digests: &'f [(&'f str, &'f str)],
+    evicted: &'f [&'f str],
     fails_on: Option<&'f str>,
     cancels_on: Option<(&'f str, &'f Cancel)>,
 }
@@ -403,9 +406,19 @@ impl<'f> Wrapped<'f> {
     fn new(fake: &'f Fake) -> Wrapped<'f> {
         Wrapped {
             fake,
+            digests: &[],
+            evicted: &[],
             fails_on: None,
             cancels_on: None,
         }
+    }
+
+    fn digest(&self, image: &ImageRef) -> Option<String> {
+        let listed = self
+            .digests
+            .iter()
+            .find(|(name, _)| *name == image.as_str());
+        listed.map(|(_, digest)| (*digest).to_owned())
     }
 }
 
@@ -418,10 +431,24 @@ impl Sandbox for Wrapped<'_> {
         self.fake.now()
     }
     fn pull(&self, images: &[ImageRef]) -> Result<Pulled, SandboxError> {
-        self.fake.pull(images)
+        let mut pulled = self.fake.pull(images)?;
+        for (image, digest) in &mut pulled.digests {
+            if let Some(moved) = self.digest(image) {
+                *digest = moved;
+            }
+        }
+        Ok(pulled)
     }
     fn cached(&self, images: &[ImageRef]) -> Result<Cached, SandboxError> {
-        self.fake.cached(images)
+        let mut cached = self.fake.cached(images)?;
+        for (image, digest) in &mut cached.digests {
+            if self.evicted.contains(&image.as_str()) {
+                *digest = None;
+            } else if let Some(moved) = self.digest(image) {
+                *digest = Some(moved);
+            }
+        }
+        Ok(cached)
     }
     fn create(&self, batch: &[Launch]) -> Result<Vec<SandboxId>, SandboxError> {
         if self.fails_on.is_some_and(|service| holds(batch, service)) {
@@ -560,35 +587,61 @@ fn refusals_before_the_start_are_2_with_their_next_and_no_vm() {
             ..Scenario::default()
         })
     };
-    let cases: Vec<(World, Fake, &str, &str)> = vec![
+    let cases: Vec<(World, &[&str], Fake, &str, &str)> = vec![
         (
             World::with(""),
+            &[],
             fake(Vec::new()),
             "spec",
             "stop-slop-stand init",
         ),
         (
             World::with("services: {}\n"),
+            &[],
             fake(Vec::new()),
             "spec",
             "stop-slop-stand guide recipe",
         ),
         (
             World::with(&wide),
+            &[],
             fake(Vec::new()),
             "budget",
             "stop-slop-stand guide",
         ),
-        (World::new(), missing(), "pull", "stop-slop-stand guide"),
+        (
+            World::new(),
+            &["--before", "session"],
+            fake(Vec::new()),
+            "source",
+            "stop-slop-stand snapshot",
+        ),
+        (
+            World::new(),
+            &["--before", "no-such-ref"],
+            fake(Vec::new()),
+            "source",
+            "stop-slop-stand guide",
+        ),
+        (
+            World::new(),
+            &[],
+            missing(),
+            "pull",
+            "stop-slop-stand guide",
+        ),
     ];
-    for (world, fake, phase, next) in cases {
-        let ran = world.run(&fake, &["run", "--json"]);
-        assert_eq!(ran.exit, Exit::Refused, "{phase}: {}", ran.err);
+    for (world, extra, fake, phase, next) in cases {
+        let mut args = vec!["run"];
+        args.extend(extra);
+        args.push("--json");
+        let ran = world.run(&fake, &args);
+        assert_eq!(ran.exit, Exit::Refused, "{args:?}: {}", ran.err);
         let line = ran.line();
         assert_eq!(line["failure"]["phase"], phase, "{line}");
         assert!(line["run"].is_null(), "{line}");
-        assert_eq!(ran.next(), [next], "{phase}");
-        assert!(!any_create(&fake), "{phase}");
+        assert_eq!(ran.next(), [next], "{args:?}");
+        assert!(!any_create(&fake), "{args:?}");
     }
 }
 
@@ -1080,16 +1133,9 @@ fn clean_drops_snapshots_before_images_and_keeps_the_journal() {
     let world = World::new();
     let fake = fake(Vec::new());
     world.run(&fake, &["snapshot"]);
-    assert_eq!(world.run(&fake, &["run"]).exit, Exit::Passed);
-    // Only a seal writes a journal: `store` seals this session as `run --before` would.
-    let file = world.recipe().join("compose.yaml");
-    let session = world
-        .store
-        .session(&file, &world.cwd, &[], SystemTime::now())
-        .unwrap();
-    session
-        .seal(&world.recipe(), "sha256:recipe", SystemTime::now())
-        .unwrap();
+    world.repo.write("main.js", "console.log('v2')\n");
+    let sealed = world.run(&fake, &["run", "--before", "session"]);
+    assert_eq!(sealed.exit, Exit::Passed, "{}", sealed.err);
     assert!(!snapshots_left(&fake).is_empty());
     let ran = world.run(&fake, &["clean"]);
     assert_eq!(ran.exit, Exit::Passed, "{}", ran.err);
@@ -1119,9 +1165,23 @@ fn clean_drops_snapshots_before_images_and_keeps_the_journal() {
         "",
         "the snapshot ref goes"
     );
-    // `--all` leaves the lock and nothing else of the folder (`stand.toml` lies outside it here).
+    // The next seal shows the clean in its journal.
     world.run(&fake, &["snapshot"]);
-    assert_eq!(world.run(&fake, &["run"]).exit, Exit::Passed);
+    world.repo.write("main.js", "console.log('v3')\n");
+    let line = world
+        .run(&fake, &["run", "--before", "session", "--json"])
+        .line();
+    let verbs: Vec<&str> = line["seal"]["journal"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|entry| {
+            let mut keys = entry.as_object().unwrap().keys();
+            keys.find(|key| key.ends_with("At")).unwrap().as_str()
+        })
+        .collect();
+    assert_eq!(verbs, ["sealedAt", "cleanedAt", "sealedAt"], "{line}");
+    // `--all` leaves the lock and nothing else of the folder (`stand.toml` lies outside it here).
     let mark = fake.journal().len();
     assert_eq!(world.run(&fake, &["clean", "--all"]).exit, Exit::Passed);
     assert!(fake.journal().len() == mark, "no call of the adapter");
@@ -1135,4 +1195,348 @@ fn clean_drops_snapshots_before_images_and_keeps_the_journal() {
         world.repo.git(&["for-each-ref", "refs/stop-slop/stand"]),
         ""
     );
+}
+
+/// The folder of the entry a cache slot of a session names (`cache.<slot>.digest` of
+/// `session.json`, a law of the blueprint).
+fn slot_entry(session: &Utf8Path, slot: &str) -> Utf8PathBuf {
+    let state: Value =
+        serde_json::from_str(&fs::read_to_string(session.join("session.json")).unwrap()).unwrap();
+    let digest = state["cache"][slot]["digest"]
+        .as_str()
+        .unwrap_or_else(|| panic!("no {slot} slot: {state}"));
+    session.join("cache").join(digest)
+}
+
+/// The run that `measured-before-seal` of a line names.
+fn measured_before_seal(line: &Value) -> Option<&str> {
+    let flags = line["flags"].as_array()?;
+    let flag = flags
+        .iter()
+        .find(|flag| flag["kind"] == "measured-before-seal")?;
+    flag["run"].as_str()
+}
+
+#[test]
+fn before_session_right_after_the_snapshot_has_nothing_to_compare() {
+    let world = World::new();
+    let fake = fake(Vec::new());
+    world.run(&fake, &["snapshot"]);
+    let runs: [&[&str]; 2] = [
+        &["run", "--before", "session", "--json"],
+        &["run", "--before", "session", "--dry-run", "--json"],
+    ];
+    for args in runs {
+        let ran = world.run(&fake, args);
+        assert_eq!(ran.exit, Exit::Refused, "{args:?}: {}", ran.err);
+        assert_eq!(ran.line()["failure"]["phase"], "source", "{args:?}");
+        assert!(ran.err.contains("nothing to compare"), "{}", ran.err);
+        assert_eq!(ran.next(), ["stop-slop-stand guide"]);
+    }
+    // The trees come first: a run that cannot compare seals, sweeps and pulls nothing.
+    assert!(fake.journal().is_empty(), "{:?}", fake.journal());
+    assert!(
+        world
+            .sessions()
+            .iter()
+            .all(|session| !session.join("seal").exists())
+    );
+}
+
+#[test]
+fn the_first_run_before_seals_and_a_changed_file_refuses_until_a_reseal() {
+    let world = World::new();
+    let fake = fake(Vec::new());
+    world.run(&fake, &["snapshot"]);
+    world.repo.write("main.js", "console.log('v2')\n");
+    let first = world.run(&fake, &["run", "--before", "session", "--json"]);
+    assert_eq!(first.exit, Exit::Passed, "{}", first.err);
+    let journal = first.line()["seal"]["journal"].clone();
+    assert!(
+        journal.as_array().is_some_and(|entries| entries.len() == 1)
+            && journal[0]["sealedAt"].is_string(),
+        "{journal}"
+    );
+    // The run that sealed is not measured before its seal (orchestrator, T-13b): the next run is
+    // the second comparison, and no run of this head came before the seal.
+    let second = world
+        .run(&fake, &["run", "--before", "session", "--json"])
+        .line();
+    assert_eq!(second["comparisons"], 2, "{second}");
+    assert_eq!(measured_before_seal(&second), None, "{second}");
+    // An edit of the recipe folder refuses with the file and the command that reseals.
+    world.write_recipe("load.js", "// load, edited\n");
+    let changed = world.run(&fake, &["run", "--before", "session", "--json"]);
+    assert_eq!(changed.exit, Exit::Refused, "{}", changed.err);
+    let line = changed.line();
+    assert_eq!(line["failure"]["phase"], "seal");
+    let cause = line["failure"]["cause"].as_str().unwrap();
+    assert!(cause.contains("load.js"), "{line}");
+    assert!(changed.err.contains("load.js"), "{}", changed.err);
+    let reseal = "stop-slop-stand run --before session --reseal --reason \"<text>\"";
+    assert_eq!(line["next"], serde_json::json!([reseal]));
+    assert_eq!(changed.next(), [reseal]);
+    // Without --before the live recipe runs, with no seal in its line.
+    let plain = world.run(&fake, &["run", "--json"]);
+    assert_eq!(plain.exit, Exit::Passed, "{}", plain.err);
+    let plain = plain.line();
+    assert!(
+        plain["seal"].is_null() && plain["comparisons"].is_null(),
+        "{plain}"
+    );
+    let args = [
+        "run",
+        "--before",
+        "session",
+        "--reseal",
+        "--reason",
+        "a probe of orders",
+        "--json",
+    ];
+    let resealed = world.run(&fake, &args);
+    assert_eq!(resealed.exit, Exit::Passed, "{}", resealed.err);
+    assert_eq!(resealed.line()["comparisons"], 1, "the count starts again");
+    let next = world
+        .run(&fake, &["run", "--before", "session", "--json"])
+        .line();
+    let journal = next["seal"]["journal"].to_string();
+    assert!(
+        journal.contains("resealedAt") && journal.contains("a probe of orders"),
+        "{journal}"
+    );
+    assert_eq!(next["comparisons"], 2, "{next}");
+    // The last run of this head before the reseal is the plain one, not the run that resealed.
+    assert_eq!(measured_before_seal(&next), plain["run"].as_str(), "{next}");
+}
+
+#[test]
+fn dry_run_creates_nothing_pulls_nothing_never_seals_and_names_the_cache() {
+    let world = World::new();
+    let fake = fake(Vec::new());
+    world.run(&fake, &["snapshot"]);
+    world.repo.write("main.js", "console.log('v2')\n");
+    let ran = world.run(&fake, &["run", "--before", "session", "--dry-run"]);
+    assert_eq!(ran.exit, Exit::Passed, "{}", ran.err);
+    let first = ran.out.lines().next().unwrap();
+    assert!(
+        first.starts_with("dry run: ") && first.contains("compose.yaml (live folder), recipe "),
+        "{}",
+        ran.out
+    );
+    assert!(!first.contains('\\'), "{first}");
+    assert!(
+        ran.out.lines().nth(1).unwrap().starts_with("budget: "),
+        "{}",
+        ran.out
+    );
+    assert!(
+        ran.out
+            .contains("\nimage postgres:17 cached fake:postgres:17\n")
+            && ran.out.contains("\nimage node:22 cached fake:node:22\n"),
+        "{}",
+        ran.out
+    );
+    assert!(
+        ran.out
+            .ends_with("\nsetup head built\nsetup before built\n"),
+        "{}",
+        ran.out
+    );
+    let json = world.run(
+        &fake,
+        &["run", "--before", "session", "--dry-run", "--json"],
+    );
+    assert_eq!(json.exit, Exit::Passed, "{}", json.err);
+    let line = json.line();
+    assert!(
+        line["run"].is_null() && line["report"].is_null() && line["failure"].is_null(),
+        "{line}"
+    );
+    let made = |call: &Call| {
+        matches!(
+            call,
+            Call::Create { .. } | Call::Pull(_) | Call::DropSnapshot(_)
+        )
+    };
+    assert!(!fake.journal().iter().any(made), "{:?}", fake.journal());
+    assert!(
+        world.sessions().iter().all(|session| {
+            !session.join("seal").exists() && folders(&session.join("runs")).is_empty()
+        }),
+        "no seal and no run folder"
+    );
+    // After a run, the dry run reads the seal and names the run whose setups it would take.
+    let line = world
+        .run(&fake, &["run", "--before", "session", "--json"])
+        .line();
+    let run = line["run"].as_str().unwrap();
+    let mark = fake.journal().len();
+    let again = world.run(&fake, &["run", "--before", "session", "--dry-run"]);
+    assert!(
+        again.out.contains("compose.yaml (sealed copy of "),
+        "{}",
+        again.out
+    );
+    let both = format!("\nsetup head cached {run}\nsetup before cached {run}\n");
+    assert!(again.out.ends_with(&both), "{}", again.out);
+    assert!(!fake.journal()[mark..].iter().any(made), "it drops nothing");
+    // An image gone from the home would download, so no setup can come from the cache.
+    let evicted = Wrapped {
+        evicted: &["node:22"],
+        ..Wrapped::new(&fake)
+    };
+    let gone = world.run(&evicted, &["run", "--before", "session", "--dry-run"]);
+    assert!(
+        gone.out.contains("\nimage node:22 to download\n")
+            && gone
+                .out
+                .ends_with("\nsetup head built\nsetup before built\n"),
+        "{}",
+        gone.out
+    );
+    // The refusals of `run` are its refusals: an edit of the sealed recipe, a stand too big.
+    world.write_recipe("load.js", "// load, edited\n");
+    let changed = world.run(
+        &fake,
+        &["run", "--before", "session", "--dry-run", "--json"],
+    );
+    assert_eq!(changed.exit, Exit::Refused, "{}", changed.err);
+    assert_eq!(changed.line()["failure"]["phase"], "seal");
+    let live = world.run(&fake, &["run", "--dry-run"]);
+    assert_eq!(live.exit, Exit::Passed, "{}", live.err);
+    assert!(
+        live.out.contains("compose.yaml (live folder)")
+            && live.out.ends_with("\nsetup head built\n"),
+        "another recipe, another key: {}",
+        live.out
+    );
+    let small = |dir: &Utf8Path| {
+        let mut host = roomy(dir)?;
+        host.cpus = 2;
+        Ok(host)
+    };
+    let ran = world.run_on(
+        &fake,
+        &["run", "--dry-run", "--json"],
+        &small,
+        &Cancel::new(),
+    );
+    assert_eq!(ran.exit, Exit::Refused, "{}", ran.err);
+    assert_eq!(ran.line()["failure"]["phase"], "budget");
+    assert!(!fake.journal()[mark..].iter().any(made));
+}
+
+#[test]
+fn a_second_run_before_session_takes_the_before_setup_from_the_cache() {
+    let world = World::new();
+    let fake = fake(Vec::new());
+    world.run(&fake, &["snapshot"]);
+    world.repo.write("main.js", "console.log('v2')\n");
+    let first = world
+        .run(&fake, &["run", "--before", "session", "--json"])
+        .line();
+    let report = world.report(&first);
+    assert!(
+        report["before"]["setup"]["cached"].is_null()
+            && report["head"]["setup"]["cached"].is_null()
+    );
+    // No edit: both setups come from the entries of the first run.
+    let prepares = creates(&fake, "prepare");
+    let second = world
+        .run(&fake, &["run", "--before", "session", "--json"])
+        .line();
+    assert_eq!(creates(&fake, "prepare"), prepares, "no setup runs");
+    let report = world.report(&second);
+    assert_eq!(report["before"]["setup"]["cached"], first["run"]);
+    assert_eq!(report["head"]["setup"]["cached"], first["run"]);
+    // Another head tree: only the head sets up again.
+    world.repo.write("main.js", "console.log('v3')\n");
+    let prepares = creates(&fake, "prepare");
+    let third = world
+        .run(&fake, &["run", "--before", "session", "--json"])
+        .line();
+    assert_eq!(creates(&fake, "prepare") - prepares, 1);
+    let report = world.report(&third);
+    assert_eq!(report["before"]["setup"]["cached"], first["run"]);
+    assert!(report["head"]["setup"]["cached"].is_null());
+    // Another digest of an image misses for both versions.
+    let moved = Wrapped {
+        digests: &[("postgres:17", "sha256:moved")],
+        ..Wrapped::new(&fake)
+    };
+    let prepares = creates(&fake, "prepare");
+    let fourth = world
+        .run(&moved, &["run", "--before", "session", "--json"])
+        .line();
+    assert_eq!(creates(&fake, "prepare") - prepares, 2);
+    assert!(world.report(&fourth)["before"]["setup"]["cached"].is_null());
+    // A reseal puts another recipe digest in the key: a miss again.
+    world.write_recipe("load.js", "// load, edited\n");
+    let prepares = creates(&fake, "prepare");
+    let args = [
+        "run",
+        "--before",
+        "session",
+        "--reseal",
+        "--reason",
+        "edited load",
+        "--json",
+    ];
+    let fifth = world.run(&moved, &args);
+    assert_eq!(fifth.exit, Exit::Passed, "{}", fifth.err);
+    assert_eq!(creates(&fake, "prepare") - prepares, 2);
+}
+
+#[test]
+fn the_slots_follow_the_last_run_and_a_head_entry_serves_the_next_before() {
+    let world = World::new();
+    let fake = fake(Vec::new());
+    world.run(&fake, &["snapshot"]);
+    // Without --before the head's entry fills the head slot; its tree is the snapshot's.
+    let alone = world.run(&fake, &["run", "--json"]).line();
+    world.repo.write("main.js", "console.log('v2')\n");
+    let prepares = creates(&fake, "prepare");
+    let compared = world
+        .run(&fake, &["run", "--before", "session", "--json"])
+        .line();
+    // "Before" hits the entry the head built a run ago; only the new head sets up.
+    assert_eq!(creates(&fake, "prepare") - prepares, 1);
+    assert_eq!(
+        world.report(&compared)["before"]["setup"]["cached"],
+        alone["run"]
+    );
+    let session = world.sessions().remove(0);
+    let head_entry = slot_entry(&session, "head");
+    let head_ids = run::cached_ids(&head_entry).unwrap().unwrap();
+    // A run without --before changes only the head slot: the entry it replaces goes, snapshots
+    // and folder, and "before" still hits after it.
+    world.repo.write("main.js", "console.log('v3')\n");
+    let plain = world.run(&fake, &["run", "--json"]).line();
+    assert!(!head_entry.exists());
+    assert!(set(&head_ids).is_disjoint(&set(&snapshots_left(&fake))));
+    let prepares = creates(&fake, "prepare");
+    let next = world
+        .run(&fake, &["run", "--before", "session", "--json"])
+        .line();
+    assert_eq!(creates(&fake, "prepare"), prepares, "both from the cache");
+    let report = world.report(&next);
+    assert_eq!(report["before"]["setup"]["cached"], alone["run"]);
+    assert_eq!(report["head"]["setup"]["cached"], plain["run"]);
+    // An entry with a snapshot gone from the home is a miss: only "before" sets up again.
+    let before_ids = run::cached_ids(&slot_entry(&session, "before"))
+        .unwrap()
+        .unwrap();
+    fake.drop_snapshot(&before_ids[0]).unwrap();
+    let dry = world.run(&fake, &["run", "--before", "session", "--dry-run"]);
+    let plain_run = plain["run"].as_str().unwrap();
+    let said = format!("\nsetup head cached {plain_run}\nsetup before built\n");
+    assert!(dry.out.ends_with(&said), "{}", dry.out);
+    let prepares = creates(&fake, "prepare");
+    let missed = world
+        .run(&fake, &["run", "--before", "session", "--json"])
+        .line();
+    assert_eq!(creates(&fake, "prepare") - prepares, 1);
+    let report = world.report(&missed);
+    assert!(report["before"]["setup"]["cached"].is_null());
+    assert_eq!(report["head"]["setup"]["cached"], plain["run"]);
 }

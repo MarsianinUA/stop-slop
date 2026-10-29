@@ -5,9 +5,13 @@ use std::collections::BTreeSet;
 use std::time::SystemTime;
 
 use camino::Utf8PathBuf;
-use report::{Bound, Context, Declared, Extra, PastRun, PostHoc, Previous, Report, SetupFrom};
-use spec::{Change, Stand};
-use store::{Acceptance, RunRecord};
+use report::{
+    BeforeInfo, Bound, Context, Declared, Extra, Intent, Journal, PastRun, PostHoc, Previous,
+    Report, SealInfo, SetupFrom,
+};
+use source::{Before, Resolved};
+use spec::{Change, Policy, Stand};
+use store::{Acceptance, JournalEntry, RunRecord, Sealed};
 
 /// Everything the context is made of, gathered by `measure`.
 pub(crate) struct Known<'r> {
@@ -15,7 +19,10 @@ pub(crate) struct Known<'r> {
     pub created_at: SystemTime,
     pub root: Utf8PathBuf,
     pub head_tree: String,
+    /// With `--before`: what it resolved to and the paths the head changed against it.
+    pub before: Option<(&'r Resolved, Vec<Utf8PathBuf>)>,
     pub stand: &'r Stand,
+    pub seal: Option<(&'r Sealed, Policy)>,
     pub history: &'r [RunRecord],
     pub acceptances: &'r [Acceptance],
     pub previous: Previous<'r>,
@@ -30,9 +37,16 @@ pub(crate) fn of(known: Known<'_>) -> Context<'_> {
         created_at: known.created_at,
         root: known.root,
         head_tree: known.head_tree,
-        changed: None,
-        before: None,
-        seal: None,
+        changed: known
+            .before
+            .as_ref()
+            .map(|(_, changed)| changed.iter().map(ToString::to_string).collect()),
+        before: known.before.as_ref().map(|(resolved, _)| before(resolved)),
+        seal: known.seal.map(|(sealed, policy)| SealInfo {
+            sealed_at: sealed.sealed_at,
+            max_tolerance: policy.max_tolerance.get(),
+            journal: sealed.journal.iter().map(journal).collect(),
+        }),
         // The earlier runs only: `new_run` already wrote this one.
         history: known
             .history
@@ -78,6 +92,34 @@ pub(crate) fn of(known: Known<'_>) -> Context<'_> {
         pool: known.pool,
         setup_from: known.setup_from,
         reused: known.reused,
+    }
+}
+
+fn before(resolved: &Resolved) -> BeforeInfo {
+    BeforeInfo {
+        intent: match &resolved.intent {
+            Before::Session => Intent::Session,
+            Before::Ref(name) => Intent::Ref(name.clone()),
+        },
+        treeish: resolved.treeish.to_string(),
+        tree: resolved.tree.to_string(),
+        taken_at: resolved.taken_at,
+    }
+}
+
+fn journal(entry: &JournalEntry) -> Journal {
+    match entry.clone() {
+        JournalEntry::Sealed { sealed_at, digest } => Journal::Sealed { sealed_at, digest },
+        JournalEntry::Resealed {
+            resealed_at,
+            digest,
+            reason,
+        } => Journal::Resealed {
+            resealed_at,
+            digest,
+            reason,
+        },
+        JournalEntry::Cleaned { cleaned_at } => Journal::Cleaned { cleaned_at },
     }
 }
 
