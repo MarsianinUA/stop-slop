@@ -26,7 +26,7 @@ pub use context::{
 };
 pub use flags::{DeadReason, Flag};
 pub use next::{Next, Topic};
-pub use outputs::{Outputs, read_outputs};
+pub use outputs::{BadResult, Outputs, RESULT_LIMIT, check_result, read_outputs};
 pub use raw::{
     BeforeOutcome, Cause, CoverageOutcome, Extra, Failure, FaultOutcome, FaultRepeat,
     InstanceOutput, Pass, PassPair, Phase, ProbeRan, ProbeRule, ProfileOutcome, Raw, RepeatOutput,
@@ -145,6 +145,8 @@ pub enum ReportError {
         path: camino::Utf8PathBuf,
         found: u64,
     },
+    #[error(transparent)]
+    BadResult(#[from] BadResult),
 }
 
 impl ReportError {

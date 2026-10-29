@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use budget::{HostError, Refusal};
 use camino::Utf8PathBuf;
-use report::{Intent, Next, Phase, ReportError, Topic};
+use report::{BadResult, Intent, Next, Phase, ReportError, Topic};
 use run::{InspectError, StandFault};
 use sandbox::SandboxError;
 use source::SourceError;
@@ -32,11 +32,16 @@ pub(crate) enum StandError {
     Host(#[from] HostError),
     #[error("the stand does not fit the host: {0}")]
     Budget(#[from] Refusal),
+    /// Never `ReportError::BadResult`: `From` turns that into `BadResult`.
     #[error(transparent)]
-    Report(#[from] ReportError),
-    /// A stand fault inside `run`, and the errors of `kept_ids` and `cached_ids`.
+    Report(ReportError),
+    /// A stand fault inside `run`, and the errors of `kept_ids` and `cached_ids`; never
+    /// `StandFault::BadResult`, as in `Report`.
     #[error(transparent)]
-    Run(#[from] StandFault),
+    Run(StandFault),
+    /// A result the guest left in `/stand/out` that `report` or the setup cache refuses.
+    #[error(transparent)]
+    BadResult(BadResult),
     /// `cli` also refuses a run id other than the kept run's as `NotKept`.
     #[error(transparent)]
     Inspect(#[from] InspectError),
@@ -118,7 +123,8 @@ impl StandError {
             | StandError::NotInReport { .. }
             | StandError::Change(_)
             | StandError::UnknownBound
-            | StandError::TooWide { .. } => Exit::Refused,
+            | StandError::TooWide { .. }
+            | StandError::BadResult(_) => Exit::Refused,
             StandError::Store(_)
             | StandError::Host(_)
             | StandError::Report(_)
@@ -138,9 +144,9 @@ impl StandError {
             StandError::Source(SourceError::NoSnapshot) => vec![Next::Snapshot],
             // The rules of the stand file, the image of the prepare service among them, live in
             // the topic `recipe` (plan, row 87).
-            StandError::Spec(SpecError::Invalid { .. }) | StandError::StandFileExists(_) => {
-                vec![Next::Guide(Some(Topic::Recipe))]
-            }
+            StandError::Spec(SpecError::Invalid { .. })
+            | StandError::StandFileExists(_)
+            | StandError::BadResult(_) => vec![Next::Guide(Some(Topic::Recipe))],
             // The topic says which run, side and service `inspect` takes, and how its copy starts.
             StandError::Inspect(InspectError::NotKept(_) | InspectError::NotStarted { .. }) => {
                 vec![Next::Guide(Some(Topic::Inspect))]
@@ -167,6 +173,24 @@ impl StandError {
             | StandError::Io { .. }
             | StandError::LockWait(_)
             | StandError::NothingToCompare => vec![Next::Guide(None)],
+        }
+    }
+}
+
+impl From<ReportError> for StandError {
+    fn from(error: ReportError) -> StandError {
+        match error {
+            ReportError::BadResult(bad) => StandError::BadResult(bad),
+            error => StandError::Report(error),
+        }
+    }
+}
+
+impl From<StandFault> for StandError {
+    fn from(fault: StandFault) -> StandError {
+        match fault {
+            StandFault::BadResult(bad) => StandError::BadResult(bad),
+            fault => StandError::Run(fault),
         }
     }
 }

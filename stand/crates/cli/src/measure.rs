@@ -270,7 +270,7 @@ fn measure(
     let raw = match run::run(&stand, sandbox, &versions, &extras, &run.dir, env.cancel) {
         Ok(raw) => raw,
         Err(RunError::App(failed)) => return Ok(Done::Failed(failed)),
-        Err(RunError::Stand { phase, fault }) => return Err(StandError::Run(fault)).at(phase),
+        Err(RunError::Stand { phase, fault }) => return Err(fault).at(phase),
         Err(RunError::Cancelled { phase }) => return Err(StandError::Cancelled).at(phase),
     };
 

@@ -105,9 +105,9 @@ fn read(entry: &Utf8Path) -> Result<Option<EntryFile>, StandFault> {
 
 /// The whole of `/stand/out` of setup: `.err` and `.status` lie beside each probe output, and a
 /// service with a probe may write there too. Only folders and plain files are copied; anything
-/// else is skipped and never followed, as a link would read the host, unless it is a top-level
-/// `*.jsonl`, which the report refuses: refused here too, on a build and on a hit alike. A name
-/// that is not UTF-8 is skipped as well, as the report skips it (batch review 6).
+/// else is skipped and never followed, as a link would read the host. A top-level `*.jsonl` is a
+/// result the report reads: one it refuses (`report::check_result`) is refused here too, on a
+/// build and on a hit alike. A name that is not UTF-8 is skipped, as the report skips it.
 fn copy_dir(from: &Utf8Path, to: &Utf8Path) -> Result<(), StandFault> {
     copy_tree(from, to, true)
 }
@@ -120,17 +120,15 @@ fn copy_tree(from: &Utf8Path, to: &Utf8Path, top: bool) -> Result<(), StandFault
             continue;
         };
         let (source, target) = (from.join(&name), to.join(&name));
+        if top && name.ends_with(".jsonl") {
+            let metadata = fs::symlink_metadata(&source).map_err(StandFault::io(&source))?;
+            report::check_result(&source, &metadata).map_err(StandFault::BadResult)?;
+        }
         let kind = entry.file_type().map_err(StandFault::io(&source))?;
         if kind.is_dir() {
             copy_tree(&source, &target, false)?;
         } else if kind.is_file() {
             fs::copy(&source, &target).map_err(StandFault::io(&target))?;
-        } else if top && name.ends_with(".jsonl") {
-            return Err(StandFault::bad(
-                &source,
-                "not a plain file: the stand reads the results in /stand/out only as plain \
-                 files, never through a link",
-            ));
         }
     }
     Ok(())

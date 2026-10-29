@@ -8,13 +8,13 @@ use std::time::{Duration, SystemTime};
 use camino::{Utf8Path, Utf8PathBuf};
 use profile::{Called, Coverage, ModuleTime, Sampled, Samples};
 use report::{
-    At, BeforeInfo, BeforeOutcome, Behaviour, Bound, CategoryChange, Cause, Context,
+    At, BadResult, BeforeInfo, BeforeOutcome, Behaviour, Bound, CategoryChange, Cause, Context,
     CoverageOutcome, DeadReason, Declared, Diff, Direction, ExpectJson, Extra, Failure, FaultJson,
     FaultOutcome, FaultRepeat, Flag, Grade, InstanceOutput, Intent, Journal, Line, Measure, Need,
     Next, Pass, PassFile, PassPair, PassState, PastRun, Phase, PostHoc, Previous, ProbeRan,
-    ProbeRule, ProfileOutcome, Raw, RepeatOutput, Report, ReportError, Role, SealInfo,
-    SecondPassOutcome, Setup, SetupFrom, SetupSide, Side, Src, Topic, Unit, Verdict, load, make,
-    read_outputs,
+    ProbeRule, ProfileOutcome, RESULT_LIMIT, Raw, RepeatOutput, Report, ReportError, Role,
+    SealInfo, SecondPassOutcome, Setup, SetupFrom, SetupSide, Side, Src, Topic, Unit, Verdict,
+    load, make, read_outputs,
 };
 use sandbox::{ExecOutcome, Metrics, PortStats, Stopped, Unexposed};
 use serde_json::{Value, json};
@@ -1537,9 +1537,35 @@ fn a_folder_named_jsonl_in_out_is_no_input() {
 
     let error = read_outputs(&raw, &[]).expect_err("a folder is no result file");
     assert!(
-        matches!(&error, ReportError::Bad { path, .. } if *path == odd),
+        matches!(&error, ReportError::BadResult(BadResult::NotPlain(path)) if *path == odd),
         "{error}"
     );
+}
+
+/// A result over `RESULT_LIMIT` is refused by its size before it is read; one of the limit reads
+/// (batch review 6).
+#[test]
+fn a_result_over_the_limit_is_refused_before_it_is_read() {
+    let folder = Folder::new();
+    let head = with_files(&folder, "head", &[&[("out.jsonl", "{}\n")]]);
+    let big = head[0].out_dir.join("big.jsonl");
+    let file = fs::File::create(&big).expect("a result file");
+    file.set_len(RESULT_LIMIT).expect("a result of the limit");
+    let raw = raw(&folder, head, None);
+    assert!(read_outputs(&raw, &[]).is_ok());
+
+    file.set_len(RESULT_LIMIT + 1)
+        .expect("a result over the limit");
+    let error = read_outputs(&raw, &[]).expect_err("a result over the limit");
+    assert!(
+        matches!(
+            &error,
+            ReportError::BadResult(BadResult::TooLarge { path, size })
+                if *path == big && *size == RESULT_LIMIT + 1
+        ),
+        "{error}"
+    );
+    assert!(error.to_string().contains("64 MiB"), "{error}");
 }
 
 /// No JSON could name it; the setup cache skips it too (batch review 6).
@@ -1593,7 +1619,7 @@ fn a_link_in_out_is_never_followed() {
     std::os::unix::fs::symlink(&secret, &link).expect("a link");
     let error = read_outputs(&raw, &[]).expect_err("a link is no result file");
     assert!(
-        matches!(&error, ReportError::Bad { path, .. } if *path == link),
+        matches!(&error, ReportError::BadResult(BadResult::NotPlain(path)) if *path == link),
         "{error}"
     );
 }
@@ -3013,7 +3039,10 @@ fn a_second_pass_file_reads_only_through_plain_folders() {
     });
     let refused = read_outputs(&raw, &[]);
     assert!(
-        matches!(refused, Err(ReportError::Bad { .. })),
+        matches!(
+            refused,
+            Err(ReportError::BadResult(BadResult::NotPlainFolder(_)))
+        ),
         "{refused:?}"
     );
 

@@ -146,6 +146,9 @@ pub enum StandFault {
         #[source]
         source: io::Error,
     },
+    /// In the setup outputs a cache entry takes; the recipe's fault, not the stand's.
+    #[error(transparent)]
+    BadResult(report::BadResult),
 }
 
 impl StandFault {

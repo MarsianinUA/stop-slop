@@ -771,18 +771,6 @@ fn a_broken_backend_is_3_and_ctrl_c_is_130() {
     assert_eq!(ran.line()["failure"]["phase"], "setup");
     assert!(ran.line()["run"].is_string());
     assert_eq!(ran.next(), ["stop-slop-stand guide"]);
-    // A result that is not a plain file: `report` refuses to read it, and the run is broken.
-    let odd = fake(vec![rule(
-        "load",
-        Script {
-            writes: vec![("/stand/out/odd.jsonl/inner.jsonl".into(), b"{}\n".to_vec())],
-            ..exits(0, 10 * SECOND)
-        },
-    )]);
-    let ran = World::new().run(&odd, &["run", "--json"]);
-    assert_eq!(ran.exit, Exit::Broken, "{}", ran.err);
-    assert_eq!(ran.line()["failure"]["phase"], "report");
-    assert!(ran.err.contains("odd.jsonl"), "{}", ran.err);
     let cancel = Cancel::new();
     let base = fake(Vec::new());
     let hooked = Wrapped {
@@ -800,6 +788,48 @@ fn a_broken_backend_is_3_and_ctrl_c_is_130() {
     let run = ran.line()["run"].as_str().unwrap().to_owned();
     assert!(world.run_dir(&run).is_dir());
     assert!(!world.tar("head").exists());
+}
+
+/// The guest wrote a result the stand will not read: the recipe's fault, not the stand's, whether
+/// the setup cache or the report meets it (batch review 6).
+#[test]
+fn a_result_that_is_not_a_plain_file_or_over_the_limit_is_2_with_the_recipe() {
+    let refused = |ran: &Ran, phase: &str, file: &str| {
+        assert_eq!(ran.exit, Exit::Refused, "{}", ran.err);
+        let line = ran.line();
+        assert_eq!(line["failure"]["phase"], phase, "{line}");
+        assert!(line["run"].is_string(), "{line}");
+        assert!(ran.err.contains(file), "{}", ran.err);
+        assert_eq!(ran.next(), ["stop-slop-stand guide recipe"]);
+    };
+    // The report meets a folder the workload left.
+    let writes = vec![("/stand/out/odd.jsonl/inner.jsonl".into(), b"{}\n".to_vec())];
+    let load = Script {
+        writes,
+        ..exits(0, 10 * SECOND)
+    };
+    let ran = World::new().run(&fake(vec![rule("load", load)]), &["run", "--json"]);
+    refused(&ran, "report", "odd.jsonl");
+
+    // The setup cache meets an `after-setup` output over the limit, before any repeat: `prepare`
+    // waits for `db`, so `db` runs in setup with its probe.
+    let npm = r#"    command: ["npm", "ci", "--cache", "/w/.npm"]"#;
+    let waits = format!("{npm}\n    depends_on: {{ db: {{ condition: service_healthy }} }}");
+    let probe = "  probes:\n    schema: { in: db, at: after-setup, run: [psql] }\n";
+    let probed = RECIPE.replace(npm, &waits).replace("  probes:\n", probe);
+    let base = fake(Vec::new());
+    let grow = |stdout: &Utf8Path| {
+        let file = fs::OpenOptions::new().write(true).open(stdout).unwrap();
+        file.set_len(report::RESULT_LIMIT + 1).unwrap();
+    };
+    let large = Wrapped {
+        after_exec: Some(&grow),
+        ..Wrapped::new(&base)
+    };
+    let ran = World::with(&probed).run(&large, &["run", "--json"]);
+    refused(&ran, "setup", "probe.schema.jsonl");
+    assert!(ran.err.contains("64 MiB"), "{}", ran.err);
+    assert_eq!(creates(&base, "load"), 0);
 }
 
 #[test]

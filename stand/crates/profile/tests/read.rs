@@ -179,6 +179,35 @@ fn a_process_with_a_start_mark_and_no_chunk_is_lost() {
     assert_eq!(totals(&samples), (1.0, 0.0, 0.0, 2, 1));
 }
 
+/// The setup cache and the report skip such a name too (batch review 6).
+#[test]
+fn a_name_that_is_not_utf8_is_skipped() {
+    let temp = tempfile::tempdir().unwrap();
+    let dir = Utf8Path::from_path(temp.path()).unwrap();
+    for entry in fixture("lost").read_dir_utf8().unwrap() {
+        let entry = entry.unwrap();
+        fs::copy(entry.path(), dir.join(entry.file_name())).unwrap();
+    }
+    #[cfg(unix)]
+    let odd = {
+        use std::os::unix::ffi::OsStrExt;
+        std::ffi::OsStr::from_bytes(b"\xff.0.cpuprofile").to_owned()
+    };
+    #[cfg(windows)]
+    let odd = {
+        use std::os::windows::ffi::OsStringExt;
+        let mut wide = vec![0xD800];
+        wide.extend(".0.cpuprofile".encode_utf16());
+        std::ffi::OsString::from_wide(&wide)
+    };
+    // APFS refuses such a name: macOS has nothing to skip.
+    if fs::write(dir.as_std_path().join(odd), "not a profile").is_err() {
+        return;
+    }
+    let samples = read(dir, &PathMap::new("/w/app")).unwrap();
+    assert_eq!(totals(&samples), totals(&read_guest("lost")));
+}
+
 #[test]
 fn no_chunk_is_no_profile_and_broken_json_names_its_file() {
     let temp = tempfile::tempdir().unwrap();

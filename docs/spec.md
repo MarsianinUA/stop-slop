@@ -519,7 +519,7 @@ Exit codes of `run`:
 
 - `0`: the head passed every repeat. A failed "before", diffs, grades, `needs`, flags and failed probes are facts, not failures.
 - `1`: the head failed: a setup service or the workload exited with another code than 0, a timeout, a long-running service that died, a healthcheck that never passed. No report is written. `next` names an `inspect` of each snapshot the failure kept, or `guide recipe`.
-- `2`: the stand refused its input and measured nothing: no stand file, a stand file or a `stand.toml` it refuses, a recipe changed since its seal, the budget, no snapshot for `session`, an unknown ref, no merge-base, a "before" tree equal to the head's, an image the registry does not know, a run outside a git work tree, a bad flag, or waiting too long for another run.
+- `2`: the stand refused its input and measured nothing: no stand file, a stand file or a `stand.toml` it refuses, a recipe changed since its seal, the budget, no snapshot for `session`, an unknown ref, no merge-base, a "before" tree equal to the head's, an image the registry does not know, a result in `/stand/out` that is not a plain file or is over 64 MiB, a run outside a git work tree, a bad flag, or waiting too long for another run.
 - `3`: the stand itself broke: microsandbox, the registry, the download or the sha256 of `stand-guest`, git, the disk, reading the host or the report.
 - `130`: Ctrl+C.
 
@@ -546,7 +546,7 @@ On 2 and 3 stderr says why and ends with a `next: <command>` line for each comma
 - `x-stand.probes.<name>: {in, at, run, key, ignore}`: a command that runs in the first replica of a long-running service, at `after-setup`, `after-workload` or `on-failure`, under 30 seconds, as the image's user, with no network beyond its own VM. Its stdout is compared as `probe.<name>.jsonl`. `guide probes` has the keys and examples.
 - `x-stand.expect`: `cost`, a list of `{measure, change, reason}`, and `unchanged`, a list of `{file, reason}`, which needs `second_pass: true`. `change` is `none`, `+X%`, `-X%`, `down` or `unknown`, without quotes, X a whole percent from 5.
 - `x-stand.fault: {target: <service>:<port>, mode: down}` or `{target, mode: slow, delay}` adds 2 repeats per version outside the stats, where that target refuses or delays its connections. `x-stand.second_pass: true` adds one repeat per version that runs the workload twice on one state. Their results are facts; a failure there does not change the exit code.
-- Every repeat starts from the state after setup. The workload writes `*.jsonl` into `/stand/out`, which is fresh for each repeat; with `--before` each file is compared with the same file of "before", record by record.
+- Every repeat starts from the state after setup. The workload writes `*.jsonl` into `/stand/out`, which is fresh for each repeat; with `--before` each file is compared with the same file of "before", record by record. Each `*.jsonl` there, a probe's output too, is a plain file of at most 64 MiB: a link, a FIFO, a folder or a bigger file of that name is exit 2.
 
 The stand runs `id`, `tar` and `du` inside the guests, so an image without them, such as a distroless one, cannot run in it.
 

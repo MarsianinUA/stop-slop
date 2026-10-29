@@ -94,15 +94,19 @@ pub fn read(dir: &Utf8Path, paths: &PathMap) -> Result<Samples, ProfileError> {
 }
 
 /// The chunks `<id>.<n>.<suffix>` (`cpuprofile` or `coverage.json`) and the maps of each
-/// process. Skips other names, such as `preload.cjs` or a `.tmp` that a kill left.
+/// process. Skips other names, such as `preload.cjs`, a `.tmp` that a kill left, or a name that is
+/// not UTF-8, which the preload never writes.
 pub(crate) fn list(
     dir: &Utf8Path,
     suffix: &str,
 ) -> Result<BTreeMap<String, Process>, ProfileError> {
     let mut processes: BTreeMap<String, Process> = BTreeMap::new();
-    for entry in dir.read_dir_utf8().map_err(ProfileError::io(dir))? {
+    for entry in fs::read_dir(dir).map_err(ProfileError::io(dir))? {
         let entry = entry.map_err(ProfileError::io(dir))?;
-        let Some((id, rest)) = entry.file_name().split_once('.') else {
+        let Ok(name) = entry.file_name().into_string() else {
+            continue;
+        };
+        let Some((id, rest)) = name.split_once('.') else {
             continue;
         };
         if rest == "start.json" {
@@ -120,7 +124,7 @@ pub(crate) fn list(
             _ if kind == suffix => &mut processes.entry(id.to_owned()).or_default().chunks,
             _ => continue,
         };
-        files.insert(n, entry.into_path());
+        files.insert(n, dir.join(&name));
     }
     Ok(processes)
 }

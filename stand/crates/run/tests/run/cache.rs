@@ -3,7 +3,7 @@
 use std::fs;
 
 use camino::Utf8Path;
-use report::{BeforeOutcome, Phase};
+use report::{BadResult, BeforeOutcome, Phase, RESULT_LIMIT};
 use run::{RunError, SetupCache, Side, StandFault, Version, Versions};
 use sandbox::{Call, ExecOutcome, Mount, SandboxId, Script, Seed, SnapshotId};
 
@@ -112,8 +112,8 @@ fn a_build_writes_out_and_entry_json_after_the_whole_setup_and_nothing_else() {
 
 /// A link a service leaves in `/stand/out` is never followed: a copy would read what it points at
 /// on the host. One with another name, or below the top, stays out of an entry and out of a hit,
-/// as the report never reads it; a top-level `*.jsonl` one, which the report refuses, is a stand
-/// fault in a build and on a hit alike.
+/// as the report never reads it; a top-level `*.jsonl` one, which the report refuses, is a
+/// `BadResult` in a build and on a hit alike.
 #[cfg(unix)]
 #[test]
 fn a_link_in_the_setup_outputs_is_skipped_unless_it_is_named_as_a_result() {
@@ -124,7 +124,7 @@ fn a_link_in_the_setup_outputs_is_skipped_unless_it_is_named_as_a_result() {
             result,
             Err(RunError::Stand {
                 phase: Phase::Setup,
-                fault: StandFault::Io { path, .. },
+                fault: StandFault::BadResult(BadResult::NotPlain(path)),
             }) if *path == link
         )
     };
@@ -185,6 +185,69 @@ fn a_link_in_the_setup_outputs_is_skipped_unless_it_is_named_as_a_result() {
     };
     let result = second.run(&fake, &versions);
     assert!(refused(&result, &link), "{result:?}");
+    assert_eq!(fake.journal().len(), built);
+    assert_clean(&fake, &first.left());
+}
+
+/// A folder named as a result, or a result over `RESULT_LIMIT`, at the top of the setup outputs: the
+/// report would refuse it, so a build refuses it and so does a hit, before any VM (batch review 6).
+#[test]
+fn a_folder_or_a_file_over_the_limit_named_as_a_result_in_the_setup_outputs_is_refused() {
+    let refused = |result: &Result<_, RunError>, bad: &dyn Fn(&BadResult) -> bool| {
+        matches!(
+            result,
+            Err(RunError::Stand {
+                phase: Phase::Setup,
+                fault: StandFault::BadResult(found),
+            }) if bad(found)
+        )
+    };
+    let folder = Case::new(EXAMPLE);
+    let odd = folder.run_dir().join("setup-head/out/odd.jsonl");
+    fs::create_dir_all(&odd).unwrap();
+    let fake = fake(example_rules());
+    let result = folder.run(&fake, &folder.versions(false));
+    let named = |bad: &BadResult| matches!(bad, BadResult::NotPlain(path) if *path == odd);
+    assert!(refused(&result, &named), "{result:?}");
+    assert_eq!(run::cached_ids(&folder.entry(Side::Head)).unwrap(), None);
+    assert_clean(&fake, &[]);
+
+    let large = Case::new(EXAMPLE);
+    let out = large.run_dir().join("setup-head/out");
+    fs::create_dir_all(&out).unwrap();
+    let big = out.join("big.jsonl");
+    fs::File::create(&big)
+        .unwrap()
+        .set_len(RESULT_LIMIT + 1)
+        .unwrap();
+    let fake = crate::fake(example_rules());
+    let result = large.run(&fake, &large.versions(false));
+    let over = |bad: &BadResult| match bad {
+        BadResult::TooLarge { path, size } => *path == big && *size == RESULT_LIMIT + 1,
+        _ => false,
+    };
+    assert!(refused(&result, &over), "{result:?}");
+    assert_eq!(run::cached_ids(&large.entry(Side::Head)).unwrap(), None);
+    assert_clean(&fake, &[]);
+
+    // A hit on an entry that holds one: nothing starts.
+    let first = Case::new(EXAMPLE);
+    let fake = crate::fake(example_rules());
+    first.run(&fake, &first.versions(false)).unwrap();
+    let built = fake.journal().len();
+    let big = first.entry(Side::Head).join("out/big.jsonl");
+    fs::File::create(&big)
+        .unwrap()
+        .set_len(RESULT_LIMIT + 1)
+        .unwrap();
+    let second = Case::new(EXAMPLE);
+    let versions = Versions {
+        head: hit(&second, &first, Side::Head),
+        before: None,
+    };
+    let result = second.run(&fake, &versions);
+    let over = |bad: &BadResult| matches!(bad, BadResult::TooLarge { path, .. } if *path == big);
+    assert!(refused(&result, &over), "{result:?}");
     assert_eq!(fake.journal().len(), built);
     assert_clean(&fake, &first.left());
 }
