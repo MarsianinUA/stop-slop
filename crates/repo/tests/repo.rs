@@ -567,6 +567,68 @@ fn at_rev_of_a_name_that_is_not_a_commit_is_unknown_rev() {
 }
 
 #[test]
+fn has_tree_takes_only_the_full_oid_of_a_tree_of_the_repo() {
+    let t = TempRepo::new();
+    t.write("a.ts", "a\n").commit("init");
+    let (tree, commit) = (
+        t.git(&["rev-parse", "HEAD^{tree}"]),
+        t.git(&["rev-parse", "HEAD"]),
+    );
+    let repo = open(&t);
+
+    assert!(repo.has_tree(&tree).unwrap());
+    let foreign = "0123456789abcdef0123456789abcdef01234567";
+    for other in [
+        commit.as_str(),
+        &tree[..7],
+        foreign,
+        "HEAD",
+        "no such",
+        "-x",
+        "",
+    ] {
+        assert!(!repo.has_tree(other).unwrap(), "{other}");
+    }
+}
+
+#[test]
+fn changed_since_compares_each_file_on_disk_with_its_blob_in_the_tree() {
+    let t = TempRepo::new();
+    t.write("src/same.ts", "same\n")
+        .write("src/edited.ts", "old\n")
+        .write("src/gone.ts", "gone\n")
+        .write("src/crlf.ts", "a\n")
+        .commit("init");
+    // As the stand takes the work tree: an untracked file goes in, the index stays.
+    t.write("src/untracked.ts", "new\n");
+    t.git(&["add", "-A"]);
+    let tree = t.git(&["write-tree"]);
+    t.git(&["reset", "-q"]);
+
+    t.write("src/edited.ts", "new\n")
+        .write("src/added.ts", "added\n");
+    fs::remove_file(t.path().join("src/gone.ts")).unwrap();
+    // `git add` would store this file as it is in the tree.
+    t.git(&["config", "core.autocrlf", "true"]);
+    t.write("src/crlf.ts", "a\r\n");
+
+    let asked = paths(&[
+        "src/same.ts",
+        "src/edited.ts",
+        "src/gone.ts",
+        "src/untracked.ts",
+        "src/added.ts",
+        "src/crlf.ts",
+        "src/never.ts",
+    ]);
+    let changed = open(&t).changed_since(&tree, &asked).unwrap();
+    let expected: BTreeSet<Utf8PathBuf> = paths(&["src/added.ts", "src/edited.ts", "src/gone.ts"])
+        .into_iter()
+        .collect();
+    assert_eq!(changed, expected);
+}
+
+#[test]
 fn fetch_pr_takes_the_head_and_the_base_from_origin() {
     let t = TempRepo::new();
     t.write("a.ts", "a\n").commit("main");
