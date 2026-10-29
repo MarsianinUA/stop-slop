@@ -49,9 +49,23 @@ pub struct Store {
 }
 
 impl Store {
+    /// The root is resolved: microsandbox refuses a bind whose host path goes through a link (a
+    /// stand folder moved to another disk behind one, `/tmp` on macOS), and the run folders a VM
+    /// binds lie under the root. A `config` in the root follows it, so `clean --all` keeps it.
     pub fn open(paths: StorePaths) -> Result<Store, StoreError> {
-        fs::create_dir_all(&paths.root).map_err(StoreError::io(&paths.root))?;
-        Ok(Store { paths })
+        let StorePaths { root, config } = paths;
+        fs::create_dir_all(&root).map_err(StoreError::io(&root))?;
+        let resolved = resolve(&root)?;
+        let config = match config.strip_prefix(&root) {
+            Ok(rest) => resolved.join(rest),
+            Err(_) => config,
+        };
+        Ok(Store {
+            paths: StorePaths {
+                root: resolved,
+                config,
+            },
+        })
     }
 
     /// `None` while another process holds the OS lock on `<root>/lock`.
@@ -245,6 +259,16 @@ impl StoreError {
             path: path.clone(),
             source,
         }
+    }
+}
+
+/// Not on Windows: there `canonicalize` gives a `\\?\` path, which the stand would print, and the
+/// SDK checks the links of a bind only on Unix.
+fn resolve(root: &Utf8Path) -> Result<Utf8PathBuf, StoreError> {
+    if cfg!(unix) {
+        root.canonicalize_utf8().map_err(StoreError::io(root))
+    } else {
+        Ok(root.to_owned())
     }
 }
 

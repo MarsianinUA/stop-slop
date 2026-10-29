@@ -142,11 +142,13 @@ impl World {
             .write("package.json", "{}\n")
             .commit("app");
         let cwd = Utf8Path::from_path(repo.path()).unwrap().to_owned();
-        let paths = StorePaths {
+        let store = Store::open(StorePaths {
             root: root.join("stand"),
             config: root.join("stand.toml"),
-        };
-        let store = Store::open(paths.clone()).unwrap();
+        })
+        .unwrap();
+        // Resolved, as the paths the stand prints are.
+        let paths = store.paths().clone();
         let world = World {
             dir,
             repo,
