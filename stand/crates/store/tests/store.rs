@@ -35,8 +35,9 @@ fn home() -> Home {
 }
 
 impl Home {
+    /// Resolved, as `open` makes it: the temp folder of macOS lies behind the link `/var`.
     fn root(&self) -> Utf8PathBuf {
-        self.dir.join("home")
+        self.store.paths().root.clone()
     }
 
     /// `<dir>/<worktree>/stand/compose.yaml` with a harness file and an empty folder.
@@ -589,6 +590,35 @@ fn clean_all_keeps_a_config_in_the_root() {
     store.clean(Clean::All).unwrap();
     assert_eq!(names_in(&root), BTreeSet::from(["stand.toml".to_owned()]));
     assert_eq!(store.config().unwrap().host_share, Some(60));
+}
+
+#[cfg(unix)]
+#[test]
+fn a_root_behind_a_link_is_resolved_and_clean_all_keeps_its_config() {
+    let temp = tempfile::tempdir().unwrap();
+    let dir = Utf8Path::from_path(temp.path())
+        .unwrap()
+        .canonicalize_utf8()
+        .unwrap();
+    fs::create_dir(dir.join("disk")).unwrap();
+    std::os::unix::fs::symlink(dir.join("disk"), dir.join("link")).unwrap();
+    let root = dir.join("link").join("stop-slop-stand");
+    let store = Store::open(StorePaths {
+        root: root.clone(),
+        config: root.join("stand.toml"),
+    })
+    .unwrap();
+    let resolved = dir.join("disk").join("stop-slop-stand");
+    assert_eq!(store.paths().root, resolved);
+    assert_eq!(store.paths().config, resolved.join("stand.toml"));
+    assert_eq!(store.sandbox_home(), resolved.join("msb"));
+    fs::write(root.join("stand.toml"), "host_share = 60\n").unwrap();
+    store.trees().unwrap();
+    store.clean(Clean::All).unwrap();
+    assert_eq!(
+        names_in(&resolved),
+        BTreeSet::from(["stand.toml".to_owned()])
+    );
 }
 
 #[test]

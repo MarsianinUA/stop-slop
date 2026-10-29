@@ -35,6 +35,52 @@ fn a_run_passes_with_its_report_and_leaves_no_tar_and_no_lock() {
     assert!(fake.leftovers().unwrap().sandboxes.is_empty());
 }
 
+/// microsandbox refuses, on Unix, a bind whose host path goes through a link: a stand folder moved
+/// to another disk behind one, as the live job of CI does with `/mnt`.
+#[cfg(unix)]
+#[test]
+fn a_stand_folder_behind_a_link_binds_no_path_through_it() {
+    use sandbox::{Call, Mount};
+    use store::{Store, StorePaths};
+
+    let mut world = World::new();
+    let base = Utf8Path::from_path(world.dir.path())
+        .unwrap()
+        .canonicalize_utf8()
+        .unwrap();
+    fs::create_dir(base.join("disk")).unwrap();
+    std::os::unix::fs::symlink(base.join("disk"), base.join("link")).unwrap();
+    world.store = Store::open(StorePaths {
+        root: base.join("link").join("stand"),
+        config: world.paths.config.clone(),
+    })
+    .unwrap();
+    world.paths = world.store.paths().clone();
+    let fake = fake(Vec::new());
+    let ran = world.run(&fake, &["run"]);
+    assert_eq!(ran.exit, Exit::Passed, "{}", ran.err);
+    let binds: Vec<_> = fake
+        .journal()
+        .into_iter()
+        .flat_map(|call| match call {
+            Call::Create { batch, .. } => batch,
+            _ => Vec::new(),
+        })
+        .flat_map(|launch| launch.mounts)
+        .filter_map(|mount| match mount {
+            Mount::Bind { host, .. } => Some(host),
+            _ => None,
+        })
+        .collect();
+    assert!(!binds.is_empty());
+    for host in &binds {
+        let link = host
+            .ancestors()
+            .find(|dir| dir.symlink_metadata().is_ok_and(|meta| meta.is_symlink()));
+        assert_eq!(link, None, "{host}");
+    }
+}
+
 #[test]
 fn the_json_line_is_one_line_on_success_failure_and_refusal_and_pretty_indents_it() {
     let world = World::new();
