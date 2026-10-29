@@ -1,3 +1,4 @@
+use std::collections::BTreeSet;
 use std::fmt;
 use std::fs;
 use std::io;
@@ -210,6 +211,54 @@ impl Repo {
         Ok(out.map(oid))
     }
 
+    /// Whether `tree` is the full oid of a tree in this repository.
+    pub fn has_tree(&self, tree: &str) -> Result<bool, RepoError> {
+        // A name or an option is not asked: only hex can be a full oid.
+        if tree.is_empty() || !tree.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+            return Ok(false);
+        }
+        // `^{tree}` reads the object, so the oid of no object fails; a commit or an abbreviated
+        // oid resolves to another text than `tree`.
+        let spec = format!("{tree}^{{tree}}");
+        let out = git::run_found(&self.root, &["rev-parse", "--verify", "--quiet", &spec])?;
+        Ok(out.is_some_and(|out| text(out) == tree))
+    }
+
+    /// Of `paths`, the files on disk that are not their blob in `tree`; missing on one side
+    /// counts. Blob against blob, not `git diff <tree>`, which takes an untracked file that went
+    /// into `tree` for deleted. `hash-object` cleans a file as `git add` does, so a line ending
+    /// that `core.autocrlf` turns back is no change.
+    pub fn changed_since(
+        &self,
+        tree: &str,
+        paths: &[Utf8PathBuf],
+    ) -> Result<BTreeSet<Utf8PathBuf>, RepoError> {
+        // Both commands read a path per line, and `hash-object` unquotes one that starts with
+        // `"`: such a path cannot be asked, and counts as changed.
+        let (asked, odd): (Vec<&Utf8PathBuf>, Vec<&Utf8PathBuf>) = paths
+            .iter()
+            .partition(|path| !path.as_str().contains('\n') && !path.as_str().starts_with('"'));
+        let stored = blobs(&self.root, tree, &asked)?;
+        let exists: Vec<bool> = asked
+            .iter()
+            .map(|path| self.root.join(path).is_file())
+            .collect();
+        let on_disk: Vec<&Utf8PathBuf> = asked
+            .iter()
+            .zip(&exists)
+            .filter_map(|(path, &exists)| exists.then_some(*path))
+            .collect();
+        let mut hashes = hash_files(&self.root, &on_disk)?.into_iter();
+        let mut changed: BTreeSet<Utf8PathBuf> = odd.into_iter().cloned().collect();
+        for ((path, stored), exists) in asked.into_iter().zip(stored).zip(exists) {
+            let now = if exists { hashes.next() } else { None };
+            if now != stored {
+                changed.insert(path.clone());
+            }
+        }
+        Ok(changed)
+    }
+
     /// A fetched head other than `head` is `PrMoved`: a push came between `gh` and the fetch.
     pub fn fetch_pr(&self, number: u32, base: &str, head: &str) -> Result<(), RepoError> {
         let pr = format!("refs/stop-slop/pr-{number}");
@@ -260,6 +309,52 @@ fn for_each_branch<T>(
         branches.push(parse(tip, parts.next().unwrap_or(""))?);
     }
     Ok(branches)
+}
+
+/// The oid of the blob at each of `paths` in `tree`; `None` where `tree` has none there, also
+/// for a folder.
+fn blobs(
+    root: &Path,
+    tree: &str,
+    paths: &[&Utf8PathBuf],
+) -> Result<Vec<Option<String>>, RepoError> {
+    if paths.is_empty() {
+        return Ok(Vec::new());
+    }
+    let requests: String = paths
+        .iter()
+        .map(|path| format!("{tree}:{path}\n"))
+        .collect();
+    let out = git::run_with_input(root, &["cat-file", "--batch-check"], requests.as_bytes())?;
+    // An answer per request, in order: `<oid> <type> <size>` or `<request> missing`.
+    let answers: Vec<&[u8]> = out.split(|&byte| byte == b'\n').take(paths.len()).collect();
+    if answers.len() != paths.len() {
+        return Err(git::unexpected("cat-file --batch-check"));
+    }
+    let blob = |answer: &[u8]| {
+        let answer = str::from_utf8(answer).ok()?;
+        if answer.ends_with(" missing") {
+            return None;
+        }
+        let mut fields = answer.split(' ');
+        let (oid, kind) = (fields.next()?, fields.next()?);
+        (kind == "blob").then(|| oid.to_owned())
+    };
+    Ok(answers.into_iter().map(blob).collect())
+}
+
+/// The blob oids `git add` would store for `paths`, in order.
+fn hash_files(root: &Path, paths: &[&Utf8PathBuf]) -> Result<Vec<String>, RepoError> {
+    if paths.is_empty() {
+        return Ok(Vec::new());
+    }
+    let input: String = paths.iter().map(|path| format!("{path}\n")).collect();
+    let out = git::run_with_input(root, &["hash-object", "--stdin-paths"], input.as_bytes())?;
+    let oids: Vec<String> = git::split(&out, b'\n').map(str::to_owned).collect();
+    if oids.len() != paths.len() {
+        return Err(git::unexpected("hash-object --stdin-paths"));
+    }
+    Ok(oids)
 }
 
 fn commit(root: &Path, rev: &str) -> Result<Oid, RepoError> {

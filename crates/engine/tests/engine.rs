@@ -1157,6 +1157,46 @@ fn an_edit_that_changes_nothing_is_no_fix() {
 }
 
 #[test]
+fn functions_gives_each_function_with_a_body_and_where_v8_may_start_it() {
+    let text = "export function total(xs: number[]) {\n  return xs.map((x) => x * 2);\n}\n\
+                const label = () => \"a\";\n\
+                class Report {\n  build() {\n    function inner() {}\n    return inner;\n  }\n}\n\
+                const e = \"é😀\", f = () => 1;\n\
+                run(function () {});\n\
+                declare function gone(): void;\n";
+
+    let spans = Engine::functions(&source("src/a.ts", text));
+    let seen: Vec<String> = spans
+        .iter()
+        .map(|span| {
+            let (start, end) = (&span.start, &span.end);
+            let name = span.name.as_deref().unwrap_or("-");
+            format!(
+                "{name} {}:{}-{}:{}",
+                start.line, start.column, end.line, end.column
+            )
+        })
+        .collect();
+    assert_eq!(
+        seen,
+        [
+            // From `export`, where coverage starts it.
+            "total 1:1-3:2",
+            // An anonymous callback takes the name of the function around it.
+            "total 2:17-2:29",
+            "label 4:15-4:24",
+            // From the name of the method.
+            "build 6:3-9:4",
+            "inner 7:5-7:24",
+            // Columns count characters: `é` is 2 bytes, the emoji 4 bytes and 2 UTF-16 units.
+            "f 11:21-11:28",
+            "- 12:5-12:19",
+        ]
+    );
+    assert!(Engine::functions(&source("src/b.ts", "function (")).is_empty());
+}
+
+#[test]
 fn a_report_span_past_the_text_or_inside_a_char_is_cut_to_fit() {
     let engine = engine(&["bad-spans"]);
     let text = "const s = \"é\";";

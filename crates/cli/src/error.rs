@@ -27,6 +27,10 @@ pub(crate) enum CliError {
     UnknownFingerprint(String),
     #[error("hook input: {0}")]
     HookInput(String),
+    /// The `report.json` of `hot`: unreadable, of another `schemaVersion`, or of a head tree this
+    /// repository does not have.
+    #[error("{}: {message}", .path.display())]
+    Report { path: PathBuf, message: String },
 }
 
 impl CliError {
@@ -52,7 +56,8 @@ impl CliError {
             | CliError::State(StateError::Parse { .. })
             | CliError::Config { .. }
             | CliError::UnknownFingerprint(_)
-            | CliError::HookInput(_) => Exit::Refused,
+            | CliError::HookInput(_)
+            | CliError::Report { .. } => Exit::Refused,
             CliError::State(StateError::Io { .. }) => Exit::Broken,
         }
     }
@@ -79,6 +84,7 @@ impl CliError {
             CliError::UnknownFingerprint(_) => "fingerprint",
             // The hook takes its input on stdin instead of flags.
             CliError::HookInput(_) => "args",
+            CliError::Report { .. } => "report",
         }
     }
 
@@ -107,7 +113,8 @@ impl CliError {
             | CliError::Project(_)
             | CliError::Config { .. }
             | CliError::State(_)
-            | CliError::HookInput(_) => Vec::new(),
+            | CliError::HookInput(_)
+            | CliError::Report { .. } => Vec::new(),
         }
     }
 }

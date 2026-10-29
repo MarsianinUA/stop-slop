@@ -19,6 +19,8 @@ pub(crate) struct Checked {
     pub(crate) pr: Option<PullRequest>,
     pub(crate) base: Option<Base>,
     pub(crate) files: Vec<Utf8PathBuf>,
+    /// The changed lines of each file of `files`; empty without a base.
+    pub(crate) changed: BTreeMap<Utf8PathBuf, Vec<LineRange>>,
     pub(crate) skipped: Vec<Skipped>,
     pub(crate) findings: Vec<Finding>,
     pub(crate) fixed: Vec<FixCount>,
@@ -107,11 +109,16 @@ pub(crate) fn scan(repo: &Repo, engine: &Engine, mut args: CheckArgs) -> Result<
         }
     }
     let files = sources.iter().map(|source| source.path.clone()).collect();
+    let changed = sources
+        .iter()
+        .filter_map(|source| Some((source.path.clone(), source.changed.clone()?)))
+        .collect();
     let report = engine.run(sources, &joined, Mode::Check);
     Ok(Checked {
         pr,
         base: scope.base,
         files,
+        changed,
         skipped: scope.skipped,
         findings: report.findings,
         fixed,

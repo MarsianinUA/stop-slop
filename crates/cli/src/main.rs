@@ -2,6 +2,7 @@ mod args;
 mod check;
 mod error;
 mod hook;
+mod hot;
 mod ignore;
 mod list;
 mod output;
@@ -45,6 +46,7 @@ fn run(command: Command) -> Exit {
         } => ignore::run(fingerprint, reason, base),
         Command::Enable => toggle::enable(),
         Command::Disable => toggle::disable(),
+        Command::Hot(args) => hot::run(args),
         Command::Rules { json, pretty } => list::run(json, JsonLayout::new(pretty)),
     };
     result.unwrap_or_else(|error| {
@@ -62,6 +64,7 @@ fn run(command: Command) -> Exit {
 fn wants_json(command: &Command) -> bool {
     match command {
         Command::Check(args) => args.json,
+        Command::Hot(args) => args.json,
         Command::Rules { json, .. } => *json,
         Command::Hook | Command::Ignore { .. } | Command::Enable | Command::Disable => false,
     }
@@ -78,7 +81,7 @@ fn refuse_args(error: &clap::Error) -> Exit {
     let mut args = env::args_os().skip(1);
     let prints_json = args
         .next()
-        .is_some_and(|command| command == "check" || command == "rules");
+        .is_some_and(|command| matches!(command.to_str(), Some("check" | "hot" | "rules")));
     if prints_json && args.any(|arg| arg == "--json") {
         // The error runs to the first empty line: a missing flag has a line of its own after
         // `the following required arguments were not provided:`. Usage and tips for a person

@@ -29,6 +29,8 @@ pub(crate) enum Command {
     Enable,
     /// Turns the hook off in this repository; exceptions and config stay.
     Disable,
+    /// Lists the hot functions of the branch from a report of `stop-slop-stand run`.
+    Hot(HotArgs),
     /// Lists the rules.
     Rules {
         /// Prints JSON with the message, the agent hint and whether the rule is active here.
@@ -60,6 +62,21 @@ pub(crate) struct CheckArgs {
     /// Applies the fixes of the rules that have one, then checks the files again.
     #[arg(long)]
     pub(crate) fix: bool,
+    /// Prints JSON for an agent.
+    #[arg(long)]
+    pub(crate) json: bool,
+    /// Indents the JSON by 2 spaces, for a person to read.
+    #[arg(long, requires = "json")]
+    pub(crate) pretty: bool,
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct HotArgs {
+    /// The `report.json` of the run.
+    pub(crate) report: PathBuf,
+    /// The base branch or commit; searched when not given.
+    #[arg(long)]
+    pub(crate) base: Option<String>,
     /// Prints JSON for an agent.
     #[arg(long)]
     pub(crate) json: bool,
