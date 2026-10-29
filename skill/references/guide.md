@@ -19,9 +19,9 @@
   - `verdict` is `improved` or `regressed` when a measure where less is better moved beyond its noise, `changed` when a measure with no better side (connections, bytes) moved, `within-noise`, or `no-baseline` when there is nothing to compare with.
 - `expect` of a measure has `change`, `reason`, `grade`, `postHoc`, `stale` and `acceptances`.
   - `expect` is `null` unless "before" passed. `change` is the cost `x-stand.expect.cost` declared, or the bound of an acceptance that replaced it; a measure without an entry is `none`, with `reason` `null`.
-  - `grade` is `met` when the shift stays within `change`; `exceeded` when it goes further the declared way; `surprise` when it goes the other way, shows under `none`, or does not show under `down`; `unmeasurable` when the noise is wider than `change` (5% for `none` and `down`), so a shift within it would not show. `grade` is `null` for `unknown`.
+  - `grade` is `met` when the shift stays within `change`; `exceeded` when it goes further the declared way; `surprise` when it goes the other way, shows under `none`, or does not show under `down`; `unmeasurable` when the noise is wider than `change` allows (5% for `none` and `down`): a shift of that size would not show. `grade` is `null` for `unknown`.
   - `postHoc` is `true` when an `accept` of this head replaced the declared cost. `stale` is `true` when the measure has acceptances, but only of another head: none of them holds now. `acceptances` counts them all.
-  - A measure is in the line when its grade is not `met` (but an `unmeasurable` one without an entry), when `change` is `unknown`, or with `postHoc` or `stale`. Without `--before` it is there when `previous` moved. A `surprise` or an `exceeded` gets an `accept` command in `next` when its bound fits `maxTolerance`; an `unmeasurable` entry gets `guide expect`.
+  - A measure is in the line when its grade is not `met`, when `change` is `unknown`, or with `postHoc` or `stale`; an `unmeasurable` one without an entry stays quiet. Without `--before` it is there when `previous` moved. A `surprise` or an `exceeded` gets an `accept` command in `next` when its bound fits `maxTolerance`; an `unmeasurable` entry gets `guide expect`.
 - A need has `measure` and `reason`.
   - `needs` lists the measures with `change` `unknown`: a person judges their cost.
 - A behaviour file has `file`, `src`, `noiseKnown`, `diffs`, `sample` and `path`.
@@ -31,7 +31,7 @@
 - A diff has `record` or `key`, `path`, `before` and `head`.
   - `record` numbers the records of the file from 1; a probe with `key` names the record by its key instead. `path` is the JSON Pointer of the field; a record on one side only has `path` `""` and `null` on the other side.
 - `fault` has `target`, `mode`, `changed`, `unknown` and `from`.
-  - `fault` is `null` without `x-stand.fault`. Two repeats per version run with `target` down or slowed, and the report compares what they ended with, not their times: `workload` (its exit or why it had none), `<service> state` (`running` or `exited`), `<target> attempts` (connections: `0`, `1`, `2-3`, `4-10` or `>10`) and `<target> responses` (the HTTP classes it answered with).
+  - `fault` is `null` without `x-stand.fault`. Two repeats per version run with `target` down or slowed, and the report compares what they ended with, not their times: `workload` (its exit or why it had none), `<service> state` (`running` or `exited`), `<target> attempts` (connections: `0`, `1`, `2-3`, `4-10` or `>10`) and `<target> responses` (the HTTP classes of its answers, `none` without one).
   - `unknown` lists the categories nothing compares on: the repeats of "before" disagreed, or a repeat ended before the fault went on. A rerun runs the fault repeats again then.
   - `from` is the run whose repeats made the result when this run took it from an earlier run of the same trees and recipe, instead of repeating them; `null` when this run made it.
 - A category change has `category`, `before` and `head`.
