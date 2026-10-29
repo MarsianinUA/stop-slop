@@ -1969,3 +1969,244 @@ fn ignore_with_a_base_checks_the_files_from_it() {
         .collect();
     assert_eq!(files, ["src/old.constants.ts"]);
 }
+
+const REPORT: &str = include_str!("../../../shared/fixtures/report.json");
+
+/// `main` has `src/util/money.ts` with `formatMoney` where the fixture's report starts it, at
+/// 3:28. `feat` adds `src/orders/orders.service.ts`: `total` on lines 1-3, and `buildReport` with
+/// an `any` on lines 40-42, around the fixture's 40:21.
+fn hot_repo() -> TempRepo {
+    let t = TempRepo::new();
+    t.write(
+        "src/util/money.ts",
+        "\n\nexport const formatMoney = (cents: number): string => `${cents / 100}`;\n",
+    )
+    .commit("main");
+    let service = format!(
+        "export function total(prices: number[]): number {{\n  return prices.length;\n}}\n{}\
+         export function buildReport(rows: any[]): number {{\n  return rows.length;\n}}\n",
+        "\n".repeat(36)
+    );
+    t.branch("feat")
+        .write("src/orders/orders.service.ts", &service)
+        .commit("feat");
+    t
+}
+
+/// The fixture with the head tree of `t`, changed by `edit`, in a folder of its own.
+fn report_of(t: &TempRepo, edit: impl FnOnce(&mut Value)) -> (tempfile::TempDir, PathBuf) {
+    let mut report: Value = serde_json::from_str(REPORT).expect("the fixture is JSON");
+    report["head"]["tree"] = json!(t.git(&["rev-parse", "HEAD^{tree}"]));
+    edit(&mut report);
+    let dir = tempfile::tempdir().expect("create a temp folder");
+    let path = dir.path().join("report.json");
+    fs::write(&path, report.to_string()).expect("write the report");
+    (dir, path)
+}
+
+fn hot(t: &TempRepo, report: &Path, args: &[&str]) -> Output {
+    let report = report.to_str().expect("a UTF-8 temp path");
+    let mut all = vec!["hot", report, "--base", "main"];
+    all.extend(args);
+    run(t.path(), &all)
+}
+
+fn line_of(finding: &Value) -> u64 {
+    finding["line"].as_u64().expect("line")
+}
+
+#[test]
+fn hot_lists_the_hot_functions_of_the_branch_with_the_findings_inside() {
+    let t = hot_repo();
+    let (_dir, report) = report_of(&t, |_| {});
+    let out = hot(&t, &report, &["--json"]);
+    assert_eq!(code(&out), 1, "{}", stderr(&out));
+    let found = json(&out);
+
+    assert_eq!(
+        found["base"],
+        json!({"ref": "main", "sha": sha7(&t, "main"), "reason": "flag"})
+    );
+    // `formatMoney` is hot too, but its file is not of the branch.
+    let [row] = found["hot"].as_array().expect("hot").as_slice() else {
+        panic!("one hot function: {found}");
+    };
+    let inside = row["findings"].as_array().expect("findings");
+    assert!(
+        inside
+            .iter()
+            .any(|finding| finding["rule"] == "no-any" && finding["line"] == 40),
+        "{row}"
+    );
+    // In the form of `check`, and only those on the lines of the function.
+    let checked = check(t.path(), &["check", "--base", "main", "--json"], 1);
+    let on_its_lines: Vec<Value> = findings(&checked)
+        .iter()
+        .filter(|finding| (40..=42).contains(&line_of(finding)))
+        .cloned()
+        .collect();
+    assert_eq!(*inside, on_its_lines);
+
+    let mut row = row.clone();
+    row["findings"] = json!([]);
+    assert_eq!(
+        row,
+        json!({
+            "service": "api",
+            "file": "src/orders/orders.service.ts",
+            "function": "buildReport",
+            "line": 40,
+            "endLine": 42,
+            "selfMs": 812.0,
+            "totalMs": 2100.0,
+            "entries": 1200,
+            "stale": false,
+            "findings": [],
+        })
+    );
+    assert_eq!(
+        found["unexercised"],
+        json!([{
+            "file": "src/orders/orders.service.ts",
+            "function": "total",
+            "line": 1,
+            "endLine": 3,
+            "stale": false,
+        }])
+    );
+    assert_eq!(found["coverage"], "collected");
+
+    let out = hot(&t, &report, &[]);
+    assert_eq!(code(&out), 1, "{}", stderr(&out));
+    let text = stdout(&out);
+    let lines: Vec<&str> = text.lines().collect();
+    let [base, row, unexercised] = lines.as_slice() else {
+        panic!("three lines: {text}");
+    };
+    assert_eq!(*base, format!("base main {} (flag)", sha7(&t, "main")));
+    assert!(
+        row.starts_with("812ms src/orders/orders.service.ts:40 buildReport (")
+            && row.ends_with(", 1200 entries)"),
+        "{text}"
+    );
+    assert_eq!(
+        *unexercised,
+        "unexercised src/orders/orders.service.ts:1 total"
+    );
+}
+
+#[test]
+fn hot_without_coverage_names_no_function_unexercised_and_exits_with_1() {
+    let t = hot_repo();
+    let (_dir, bare) = report_of(&t, |report| {
+        report["coverage"] = Value::Null;
+        report["flags"] = json!([{"kind": "unprofiled"}]);
+    });
+    let out = hot(&t, &bare, &["--json"]);
+    assert_eq!(code(&out), 1, "{}", stderr(&out));
+    let found = json(&out);
+    assert_eq!(found["unexercised"], Value::Null);
+    assert_eq!(found["coverage"], "not-collected");
+    assert_eq!(found["hot"][0]["entries"], Value::Null);
+    let text = stdout(&hot(&t, &bare, &[]));
+    assert!(text.ends_with("\ncoverage: not collected\n"), "{text}");
+    assert!(!text.contains("unexercised"), "{text}");
+
+    // Without a hot function either, the missing coverage alone gives 1.
+    let (_dir, unknown) = report_of(&t, |report| {
+        report["hot"] = json!([]);
+        report["coverage"] = Value::Null;
+        report["flags"] = json!([
+            {"kind": "coverage-unknown", "stage": null, "service": "api"}
+        ]);
+    });
+    let out = hot(&t, &unknown, &["--json"]);
+    assert_eq!(code(&out), 1, "{}", stderr(&out));
+    assert_eq!(
+        json(&out),
+        json!({
+            "base": {"ref": "main", "sha": sha7(&t, "main"), "reason": "flag"},
+            "hot": [],
+            "unexercised": null,
+            "coverage": "unknown",
+        })
+    );
+    let out = hot(&t, &unknown, &[]);
+    assert_eq!(code(&out), 1, "{}", stderr(&out));
+    assert_eq!(
+        stdout(&out),
+        format!(
+            "base main {} (flag)\ncoverage: unknown: api left no coverage\n",
+            sha7(&t, "main")
+        )
+    );
+}
+
+#[test]
+fn hot_marks_a_function_of_a_file_edited_since_the_run_stale() {
+    let t = hot_repo();
+    let (_dir, report) = report_of(&t, |_| {});
+    let path = t.path().join("src/orders/orders.service.ts");
+    let text = fs::read_to_string(&path).expect("read the service");
+    fs::write(&path, format!("{text}\n")).expect("edit the service");
+
+    let found = json(&hot(&t, &report, &["--json"]));
+    assert_eq!(found["hot"][0]["stale"], true, "{found}");
+    assert_eq!(found["unexercised"][0]["stale"], true, "{found}");
+    let text = stdout(&hot(&t, &report, &[]));
+    assert!(
+        text.lines()
+            .nth(1)
+            .is_some_and(|line| line.ends_with(" stale")),
+        "{text}"
+    );
+}
+
+#[test]
+fn hot_of_a_branch_without_files_finds_nothing() {
+    let t = hot_repo();
+    t.git(&["checkout", "-q", "-b", "empty", "main"]);
+    let (_dir, report) = report_of(&t, |_| {});
+    let out = hot(&t, &report, &["--json"]);
+    assert_eq!(code(&out), 0, "{}", stderr(&out));
+    assert_eq!(
+        json(&out),
+        json!({
+            "base": {"ref": "main", "sha": sha7(&t, "main"), "reason": "flag"},
+            "hot": [],
+            "unexercised": [],
+            "coverage": "collected",
+        })
+    );
+
+    let (_dir, bare) = report_of(&t, |report| report["coverage"] = Value::Null);
+    let out = hot(&t, &bare, &[]);
+    assert_eq!(code(&out), 0, "{}", stderr(&out));
+    assert_eq!(
+        stdout(&out),
+        format!("base main {} (flag)\n", sha7(&t, "main"))
+    );
+}
+
+#[test]
+fn hot_refuses_a_report_it_cannot_read_with_the_phase_report() {
+    let t = hot_repo();
+    let dir = tempfile::tempdir().expect("create a temp folder");
+    let broken = dir.path().join("broken.json");
+    fs::write(&broken, "{\"schemaVersion\": 1,").expect("write the report");
+    let missing = dir.path().join("missing.json");
+    let (_newer_dir, newer) = report_of(&t, |report| report["schemaVersion"] = json!(2));
+    let (_foreign_dir, foreign) = report_of(&t, |report| {
+        report["head"]["tree"] = json!("0123456789abcdef0123456789abcdef01234567");
+    });
+    for (report, cause) in [
+        (&broken, "EOF while parsing"),
+        (&missing, "missing.json"),
+        (&newer, "schemaVersion 2 is not 1"),
+        (&foreign, "is not a tree of this repository"),
+    ] {
+        assert_failure(&hot(&t, report, &["--json"]), 2, "report", cause, &[]);
+    }
+    let out = run(t.path(), &["hot", "--json"]);
+    assert_failure(&out, 2, "args", "not provided: <REPORT>", &[]);
+}

@@ -177,6 +177,7 @@ Each finding gets `inHunk`, which says whether the branch changed its first line
 | `stop-slop enable` | Turns the hook on in this repository. |
 | `stop-slop disable` | Turns the hook off; exceptions and settings stay. |
 | `stop-slop rules [--json [--pretty]]` | Lists the rules. `--pretty` works as in `check`. |
+| `stop-slop hot <report.json> [--base <ref>] [--json [--pretty]]` | Reads the `report.json` of a [stand](#the-stand) run of this repository and checks the branch as `check` does. Lists the hot functions of the branch with the findings on their lines, and the changed functions that never ran. `--base` and `--pretty` work as in `check`. See [JSON output of `hot`](#json-output-of-hot). |
 
 Flags of `check`:
 
@@ -194,12 +195,12 @@ Flags of `check`:
 Exit codes:
 
 - `0`: nothing found;
-- `1`: `check` found something, of any kind;
-- `2`: the program refused its input: a bad flag, a bad `config.toml` or `ignore.json`, an unknown base or revision, a path of `--files` that does not exist, is a folder or lies outside the repository, a `package.json` or `tsconfig.json` that does not parse, a fingerprint `ignore` does not find, a run outside a git repository, `--pr` without `gh` or for a pull request `gh` does not find, or a pull request that moved while `--pr` fetched it;
+- `1`: `check` found something, of any kind; `hot` listed a function, or found no coverage in a report while the branch has files;
+- `2`: the program refused its input: a bad flag, a bad `config.toml` or `ignore.json`, an unknown base or revision, a path of `--files` that does not exist, is a folder or lies outside the repository, a `package.json` or `tsconfig.json` that does not parse, a fingerprint `ignore` does not find, a run outside a git repository, `--pr` without `gh` or for a pull request `gh` does not find, a pull request that moved while `--pr` fetched it, or a `report.json` of `hot` that does not read, has another `schemaVersion` or a head tree this repository does not have;
 - `3`: the program itself broke: git failed in a way the program does not expect or did not start, or reading or writing a file failed;
 - `130`: Ctrl+C stopped it.
 
-On 2 and 3, stderr says why and ends with a `next: <command>` line for each command that helps, such as `next: stop-slop check --base <ref> --json` when there is no base. With `--json`, `check` and `rules` print a [failure line](#json-output-of-check) instead of their JSON.
+On 2 and 3, stderr says why and ends with a `next: <command>` line for each command that helps, such as `next: stop-slop check --base <ref> --json` when there is no base. With `--json`, `check`, `hot` and `rules` print a [failure line](#json-output-of-check) instead of their JSON.
 
 The hook is the exception. It exits with 2 on errors found and on any failure, because the agent reads a hook's stderr only on 2.
 
@@ -252,15 +253,54 @@ The program prints it on one line, because indents cost an agent tokens. `--pret
 
 `skill/SKILL.md` lists the top-level fields and the fields of `pr`, `base` and a finding. A test holds that list to this output both ways, so a field added or dropped on one side fails it.
 
-On exit 2 and 3, `check --json` prints one line instead, even with `--pretty`, and so does `rules --json`:
+On exit 2 and 3, `check --json` prints one line instead, even with `--pretty`, and so do `hot --json` and `rules --json`:
 
 ```json
 {"failure": {"phase": "base", "cause": "base `dev` is not a commit"}, "next": ["stop-slop check --base <ref> --json"]}
 ```
 
-- `phase` names the step that failed: `args` (the flags), `repo` (git, the disk, the repository and `--rev`), `base`, `pr` (`gh` and a pull request that moved, under `--pr`), `files` (a path of `--files`), `project` (`package.json` and `tsconfig.json`), `config` (a rule, option or group that `config.toml` names), `state` (the marker, `ignore.json` and a `config.toml` that does not parse) or `fingerprint`.
+- `phase` names the step that failed: `args` (the flags), `repo` (git, the disk, the repository and `--rev`), `base`, `pr` (`gh` and a pull request that moved, under `--pr`), `files` (a path of `--files`), `project` (`package.json` and `tsconfig.json`), `config` (a rule, option or group that `config.toml` names), `state` (the marker, `ignore.json` and a `config.toml` that does not parse), `fingerprint` or `report` (the `report.json` of `hot`).
 - `cause` is the error of stderr on one line.
 - `next` holds the commands of the `next:` lines and is empty when no command helps.
+
+### JSON output of `hot`
+
+```json
+{
+  "base": { "ref": "main", "sha": "76bde5d", "reason": "ancestor" },
+  "hot": [
+    {
+      "service": "api", "file": "src/orders/orders.service.ts", "function": "summarize",
+      "line": 40, "endLine": 58, "selfMs": 812.0, "totalMs": 2100.0, "entries": 10, "stale": false,
+      "findings": [{ "rule": "no-lookup-in-loop", "kind": "candidate", "line": 47, "...": "..." }]
+    }
+  ],
+  "unexercised": [
+    { "file": "src/orders/orders.service.ts", "function": "formatRefund", "line": 12, "endLine": 20, "stale": false }
+  ],
+  "coverage": "collected"
+}
+```
+
+`hot` takes the files of the branch from the disk and needs the report's head tree in this repository; the `root` of the report does not matter. The stand need not be installed.
+
+- `base` is as in `check`.
+- `hot` lists the hot functions of the report in files of the branch, the hottest first, one per service that ran it. A function is the one around the place where V8 starts it.
+  - `function` is its name. An anonymous function takes the name of the function around it, as a fingerprint does; at the top level it is `null`.
+  - `line` and `endLine` are its lines on disk now; `selfMs` and `totalMs` come from the report.
+  - `entries` counts how often the coverage repeat entered it, each resumption after an `await` too; `null` without coverage.
+  - `findings` are the findings of `check` on its lines, in the form of `check`.
+- `unexercised` lists the functions on changed lines of the branch that the coverage repeat never entered, outside test files: the stand runs the app, not its tests.
+- `stale` is true when the file on disk differs from the report's head tree: its lines may have moved since, so run the stand again.
+- `coverage` is `collected`, `not-collected` when no service had `x-stand.profile`, or `unknown` when the report has a `coverage-unknown` flag. Without coverage `unexercised` is `null`, since no function can be said to have never run, and a branch with files exits with 1.
+
+Without `--json`, `hot` prints the `base` line of `check` and a line per function, ` stale` at the end where it applies. Without coverage and with files in the branch, the last line is `coverage: not collected`, or `coverage: unknown: ` and the reason.
+
+```text
+base main 76bde5d (ancestor)
+812ms src/orders/orders.service.ts:40 summarize (1 finding, 10 entries)
+unexercised src/orders/orders.service.ts:12 formatRefund
+```
 
 ### JSON output of `rules`
 
@@ -566,7 +606,7 @@ Measures are named `<subject>.<metric>`: `stand.wall`, `stand.hot-owned`, `stand
 
 One line on every exit code, with only the exceptions: `run`, `report`, `seal`, `attempts`, `comparisons`, `measures`, `behaviour`, `fault`, `secondPass`, `flags`, `needs`, `failure`, `quiet`, `unmeasurable` and `next`. `quiet` counts what passed; the numbers stay in `report.json`. Runs of the same head tree, "before" tree and recipe pool their samples, and `attempts` counts them. `next` holds commands ready to paste, such as the `accept` of a `surprise`; every failure and refusal has one, Ctrl+C none. A ref of `--before` that a shell would read otherwise comes in single quotes, which a POSIX shell and PowerShell both take as typed. `--pretty` indents it by 2 spaces. `guide line` describes every field and flag; a test holds the topic and the line to each other.
 
-`report.json` (`schemaVersion` 1) lies in the run folder and is written only for a passed run. It follows the JSON of `check`: camelCase keys, kebab-case values, paths from the root with `/`, full oids. It is for people and tools; the agent reads the line.
+`report.json` (`schemaVersion` 1) lies in the run folder and is written only for a passed run. It follows the JSON of `check`: camelCase keys, kebab-case values, paths from the root with `/`, full oids. It is for people and tools; the agent reads the line, and `stop-slop hot` reads the report for the hot functions of the branch.
 
 ### The setup cache
 
@@ -617,7 +657,7 @@ stop-slop/
   shared/           crates that take nothing from the workspace, so a second workspace can use them too
     gitcmd/         runs git: a cleaned environment, LC_ALL=C, another try when the index is busy
     testkit/        tests only: a temporary git repository
-    fixtures/       report.json as the stand writes it, held to the code by a test of report
+    fixtures/       report.json as the stand writes it, held to the code by a test of report and read by the tests of hot
   stand/            the stand, a second workspace with its own Cargo.toml and Cargo.lock
     crates/
       cli/          the command stop-slop-stand: flags, the call order of a run, the seal, the cache slots, the sweep, guide and init
