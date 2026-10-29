@@ -2,11 +2,16 @@
 
 `stop-slop-stand run --json` prints one line on every exit code. It holds only the exceptions: what passed is counted in `quiet`, and every number stays in `report.json` for `stop-slop hot` and people.
 
-- The line has `run`, `report`, `measures`, `behaviour`, `flags`, `failure`, `quiet`, `unmeasurable` and `next`.
+- The line has `run`, `report`, `seal`, `attempts`, `comparisons`, `measures`, `behaviour`, `flags`, `failure`, `quiet`, `unmeasurable` and `next`.
   - `run` is the id of the run for `inspect`, `null` when the run never started. `report` is the path of `report.json`, `null` when the run failed.
+  - `attempts` counts the runs whose samples this one pools, itself included. `comparisons` counts the passed runs with `--before` since the last seal, this one included. Both come with a report; `comparisons` is `null` without `--before`.
   - `behaviour` is `null` without `--before` or when "before" failed.
   - `quiet` counts the measures and files with no exception. `unmeasurable` counts the measures without an `expect` entry whose shift the noise could hide; they stay quiet.
   - `next` holds the commands to run next, ready to paste. A failure and a refusal always have one.
+- `seal` has `sealedAt`, `maxTolerance` and `journal`.
+  - The first `run --before` of a session seals the recipe, and the comparisons run on that copy. `sealedAt` is the time of the last seal or reseal, `maxTolerance` is `max_tolerance` of `stand.toml`. `seal` is `null` without `--before` or without a report.
+- A journal entry has `sealedAt` and `digest`, `resealedAt`, `digest` and `reason`, or `cleanedAt`.
+  - `journal` lists every seal, reseal and `clean` of the session, oldest first, and outlives `clean`.
 - A measure has `name`, `unit`, `src` and `median`, then `before` and `previous`.
   - `name` is `<subject>.<metric>`: the subject is `stand`, a service, a port `<service>:<port>` or a volume `volume:<name>`. `unit` is `ms`, `bytes`, `count` or `share`. `src` is `stand`: the stand measured it, the harness cannot.
   - `median` is of the samples of every run of the same trees and recipe: running again adds samples instead of starting over.
@@ -42,3 +47,6 @@
   - `probe-failed` (`probe`, `side`, `repeat`, `code`): the probe exited with `code`, or hit its deadline when `code` is `null`; `repeat` is `null` after setup. An `on-failure` probe gives none: its output is in `failure.probes`.
   - `head-only-noise` (`file`, `path`): the field holds on "before" and changes between repeats of the head; it stays in the diff as a change.
   - `killed-at-stop` (`service`, `side`, `repeat`): the service ignored its stop signal for `stop_grace_period` and was killed.
+  - `before-after-session` (`takenAt`, `startedAt`): "before" was taken after the session began, so it may hold part of the change. Take the `snapshot` before the first edit.
+  - `measured-before-seal` (`run`): that run measured this head before the recipe was sealed, so the declared cost came after its numbers.
+  - `wide-tolerance` (`maxTolerance`): `max_tolerance` in `stand.toml` is above 25%, so `accept` takes wide bounds.

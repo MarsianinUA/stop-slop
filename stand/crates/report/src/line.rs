@@ -32,6 +32,9 @@ impl Report {
         Line {
             run: Some(self.run.clone()),
             report: Some(dir.join(REPORT)),
+            seal: self.seal.clone(),
+            attempts: self.attempts,
+            comparisons: self.comparisons,
             measures,
             behaviour: files,
             flags: self.flags.clone(),
@@ -65,15 +68,10 @@ impl Line {
             found
         });
         Line {
-            run: None,
-            report: None,
-            measures: Vec::new(),
-            behaviour: None,
             flags: flags.unwrap_or_default(),
             failure: Some(failure),
-            quiet: 0,
-            unmeasurable: 0,
             next,
+            ..Line::default()
         }
     }
 }

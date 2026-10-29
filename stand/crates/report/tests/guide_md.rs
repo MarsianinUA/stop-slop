@@ -4,8 +4,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use report::{
-    At, Cause, Compared, DeadReason, Diff, Failure, Flag, Line, LineFile, LineMeasure, Phase, Src,
-    Unit, Verdict, VersusPrevious,
+    At, Cause, Compared, DeadReason, Diff, Failure, Flag, JournalJson, Line, LineFile, LineMeasure,
+    Phase, SealJson, Src, Unit, Verdict, VersusPrevious,
 };
 use serde_json::{Value, json};
 
@@ -162,6 +162,12 @@ fn every_flag() -> Vec<Flag> {
             side: text(),
             repeat: 1,
         },
+        Flag::BeforeAfterSession {
+            taken_at: text(),
+            started_at: text(),
+        },
+        Flag::MeasuredBeforeSeal { run: text() },
+        Flag::WideTolerance { max_tolerance: 40 },
     ];
     for flag in &flags {
         match flag {
@@ -184,7 +190,10 @@ fn every_flag() -> Vec<Flag> {
             | Flag::DeadProbe { .. }
             | Flag::ProbeFailed { .. }
             | Flag::HeadOnlyNoise { .. }
-            | Flag::KilledAtStop { .. } => {}
+            | Flag::KilledAtStop { .. }
+            | Flag::BeforeAfterSession { .. }
+            | Flag::MeasuredBeforeSeal { .. }
+            | Flag::WideTolerance { .. } => {}
         }
     }
     flags
@@ -206,6 +215,29 @@ fn the_topic_line_names_every_field_of_the_line() {
     fields.insert("next".to_owned());
     assert_eq!(fields, owned(listed("- The line has")));
     assert_eq!(keys(&line["failure"]), owned(listed("- `failure` has")));
+
+    let time = || "2026-10-22T09:40:00Z".to_owned();
+    let seal = SealJson {
+        sealed_at: time(),
+        max_tolerance: 25,
+        journal: vec![
+            JournalJson::Sealed {
+                sealed_at: time(),
+                digest: String::new(),
+            },
+            JournalJson::Resealed {
+                resealed_at: time(),
+                digest: String::new(),
+                reason: String::new(),
+            },
+            JournalJson::Cleaned { cleaned_at: time() },
+        ],
+    };
+    let seal = serde_json::to_value(seal).unwrap();
+    assert_eq!(keys(&seal), owned(listed("- `seal` has")));
+    let entries = seal["journal"].as_array().expect("a journal").iter();
+    let journal = entries.flat_map(keys).collect::<BTreeSet<_>>();
+    assert_eq!(journal, owned(listed("- A journal entry has")));
 
     let measure = LineMeasure {
         name: "stand.wall".to_owned(),

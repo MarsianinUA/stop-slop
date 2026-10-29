@@ -5,10 +5,19 @@
   "recipe": {
     "digest": "9f2c41aa6b0e4d3c8a7f5e1d2c4b6a8f0e9d7c5b3a1f2e4d6c8b0a9f7e5d3c1b"
   },
+  "seal": {
+    "sealedAt": "2026-10-22T09:40:00Z",
+    "maxTolerance": 25,
+    "journal": [
+      { "sealedAt": "2026-10-22T09:40:00Z", "digest": "9f2c41aa6b0e4d3c8a7f5e1d2c4b6a8f0e9d7c5b3a1f2e4d6c8b0a9f7e5d3c1b" }
+    ]
+  },
   "createdAt": "2026-10-22T10:00:00Z",
   "repeat": 3,
   "setupTimeout": "10m",
   "timeout": "5m",
+  "attempts": 1,
+  "comparisons": 2,
   "harness": ["/harness"],
   "head": {
     "tree": "4b825dc642cb6eb9a060e54bf8d69288fbee4904",

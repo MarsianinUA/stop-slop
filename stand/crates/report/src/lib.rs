@@ -19,7 +19,7 @@ mod schema;
 mod stats;
 mod summary;
 
-pub use context::{BeforeInfo, Context, Intent, SetupFrom};
+pub use context::{BeforeInfo, Context, Intent, Journal, PastRun, SealInfo, SetupFrom};
 pub use flags::{DeadReason, Flag};
 pub use next::{Next, Topic};
 pub use outputs::{Outputs, read_outputs};
@@ -30,8 +30,8 @@ pub use raw::{
 };
 pub use schema::{
     At, BeforeJson, Behaviour, CalledJson, Compared, CoverageJson, Diff, Direction, Head, Hot,
-    HotVersus, IntentJson, Line, LineFile, LineMeasure, Measure, RecipeJson, Report, SetupJson,
-    Src, Unit, Verdict, VersusBefore, VersusPrevious,
+    HotVersus, IntentJson, JournalJson, Line, LineFile, LineMeasure, Measure, RecipeJson, Report,
+    SealJson, SetupJson, Src, Unit, Verdict, VersusBefore, VersusPrevious,
 };
 pub use summary::Summary;
 
@@ -78,10 +78,13 @@ pub fn make(raw: &Raw, outputs: &Outputs, context: &Context<'_>) -> Report {
         recipe: RecipeJson {
             digest: raw.digest.clone(),
         },
+        seal: context.sealed().map(schema::seal_json),
         created_at: schema::time(context.created_at),
         repeat: raw.repeat,
         setup_timeout: schema::duration(raw.setup_timeout),
         timeout: schema::duration(raw.timeout),
+        attempts: u32::try_from(context.pool.len() + 1).unwrap_or(u32::MAX),
+        comparisons: context.comparisons(),
         harness: raw.harness.clone(),
         head: Head {
             tree: context.head_tree.clone(),
@@ -206,6 +209,22 @@ impl Report {
 }
 
 impl Context<'_> {
+    /// The seal of a run with `--before`: a plain run is free exploration (plan, row 65).
+    fn sealed(&self) -> Option<&SealInfo> {
+        self.before.as_ref().and(self.seal.as_ref())
+    }
+
+    /// This run and the passed runs with `--before` from the last seal on: a failed run compared
+    /// nothing, and a reseal starts the count again.
+    fn comparisons(&self) -> Option<u32> {
+        self.before.as_ref()?;
+        let since = self.sealed().map(|seal| seal.sealed_at);
+        let earlier = self.history.iter().filter(|run| {
+            run.compared && run.passed && since.is_none_or(|since| run.created_at >= since)
+        });
+        Some(u32::try_from(earlier.count() + 1).unwrap_or(u32::MAX))
+    }
+
     fn origin(&self, side: Side) -> &str {
         let cached = match side {
             Side::Head => self.setup_from.head.as_deref(),

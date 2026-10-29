@@ -9,7 +9,7 @@ use serde_json::Value;
 
 use crate::flags::Flag;
 use crate::raw::Failure;
-use crate::schema::{IntentJson, Line, LineFile, LineMeasure, Report, slashed};
+use crate::schema::{IntentJson, Line, LineFile, LineMeasure, Report, SealJson, slashed};
 
 /// The hot functions the summary prints; the report has all of them.
 const TOP: usize = 10;
@@ -64,6 +64,11 @@ impl Report {
         if let Some(previous) = &self.previous_run {
             lines.push(format!("previousRun {previous}"));
         }
+        lines.extend(seal_text(
+            self.seal.as_ref(),
+            self.attempts,
+            self.comparisons,
+        ));
         lines.extend(line.measures.iter().map(measure_text));
         lines.extend(line.behaviour.iter().flatten().map(file_text));
         lines.extend(self.flags.iter().map(flag_text));
@@ -99,6 +104,11 @@ impl Line {
         if let Some(run) = &self.run {
             lines.push(format!("run {run}"));
         }
+        lines.extend(seal_text(
+            self.seal.as_ref(),
+            self.attempts,
+            self.comparisons,
+        ));
         lines.extend(self.measures.iter().map(measure_text));
         for file in self.behaviour.iter().flatten() {
             lines.push(format!("{}  {}", file_text(file), slashed(&file.path)));
@@ -135,6 +145,27 @@ fn headlines(flags: &[Flag]) -> Vec<String> {
         _ => None,
     });
     head.collect()
+}
+
+/// A failed line has no report, so no attempts to print.
+fn seal_text(seal: Option<&SealJson>, attempts: u32, comparisons: Option<u32>) -> Vec<String> {
+    let mut lines = Vec::new();
+    if let Some(seal) = seal {
+        lines.push(format!(
+            "seal {}  maxTolerance {}",
+            seal.sealed_at, seal.max_tolerance
+        ));
+        let journal = seal.journal.iter();
+        lines.extend(journal.map(|entry| format!("journal{}", pairs(entry, &[]))));
+    }
+    if attempts > 0 {
+        let mut text = format!("attempts {attempts}");
+        if let Some(comparisons) = comparisons {
+            text.push_str(&format!("  comparisons {comparisons}"));
+        }
+        lines.push(text);
+    }
+    lines
 }
 
 fn failure_text(failure: &Failure) -> Vec<String> {
@@ -184,14 +215,24 @@ fn measure_text(measure: &LineMeasure) -> String {
 
 /// `<kind>`, then each fact of the flag as `<key> <value>`.
 fn flag_text(flag: &Flag) -> String {
-    let Ok(Value::Object(fields)) = serde_json::to_value(flag) else {
+    let kind = serde_json::to_value(flag).ok();
+    let kind = kind.as_ref().and_then(|flag| flag.get("kind"));
+    let mut text = kind.map(plain).unwrap_or_default();
+    text.push_str(&pairs(flag, &["kind"]));
+    text
+}
+
+/// ` <key> <value>` for each field of an object but `skip`.
+fn pairs(value: &impl Serialize, skip: &[&str]) -> String {
+    let Ok(Value::Object(fields)) = serde_json::to_value(value) else {
         return String::new();
     };
-    let mut text = fields.get("kind").map(plain).unwrap_or_default();
-    for (key, value) in fields.iter().filter(|(key, _)| *key != "kind") {
-        text.push_str(&format!(" {key} {}", plain(value)));
-    }
-    text
+    let shown = fields
+        .iter()
+        .filter(|(key, _)| !skip.contains(&key.as_str()));
+    shown
+        .map(|(key, value)| format!(" {key} {}", plain(value)))
+        .collect()
 }
 
 fn number(value: Option<f64>) -> String {

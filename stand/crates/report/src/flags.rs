@@ -11,6 +11,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::outputs::Outputs;
 use crate::raw::{Phase, ProfileOutcome, Raw, RepeatOutput, SetupSide};
+use crate::schema::time;
 use crate::stats::{self, Sample};
 use crate::{Before, Context, Previous, Side, hot, sides};
 
@@ -29,6 +30,10 @@ const NETWORK_LIMIT: u64 = 256;
 
 /// Fewer pooled samples of a version than this make the verdicts coarse.
 const LOW_REPEATS: usize = 3;
+
+/// The default `max_tolerance` of `stand.toml` (Config): a wider one lets `accept` take bounds
+/// that hide what the declared cost was for.
+const MAX_TOLERANCE: u16 = 25;
 
 /// The extensions `profile` counts in `unmapped_ms`.
 const TYPESCRIPT: [&str; 4] = ["ts", "tsx", "mts", "cts"];
@@ -118,6 +123,19 @@ pub enum Flag {
         side: String,
         repeat: u32,
     },
+    /// "Before" was taken after the session began, the earliest of its first run and the seal.
+    BeforeAfterSession {
+        taken_at: String,
+        started_at: String,
+    },
+    /// The last passed run of this head tree before the seal: the cost was declared after its
+    /// numbers.
+    MeasuredBeforeSeal {
+        run: String,
+    },
+    WideTolerance {
+        max_tolerance: u16,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -151,6 +169,9 @@ impl Flag {
             Flag::ProbeFailed { .. } => 17,
             Flag::HeadOnlyNoise { .. } => 18,
             Flag::KilledAtStop { .. } => 19,
+            Flag::BeforeAfterSession { .. } => 20,
+            Flag::MeasuredBeforeSeal { .. } => 21,
+            Flag::WideTolerance { .. } => 22,
         }
     }
 }
@@ -392,13 +413,51 @@ fn stops(sides: &Sides<'_>, flags: &mut Vec<Flag>) {
 }
 
 pub(crate) fn of_context(raw: &Raw, context: &Context<'_>) -> Vec<Flag> {
-    match context.previous {
+    let mut flags = match context.previous {
         Previous::None => Vec::new(),
         Previous::Unreadable => vec![Flag::PreviousUnreadable],
         Previous::Read(previous) if previous.recipe.digest != raw.digest => {
             vec![Flag::RecipeChanged]
         }
         Previous::Read(_) => Vec::new(),
+    };
+    if context.before.is_some() {
+        seal(context, &mut flags);
+    }
+    flags
+}
+
+/// The facts of a comparison (plan, row 65): none of them blocks it.
+fn seal(context: &Context<'_>, flags: &mut Vec<Flag>) {
+    let seal = context.seal.as_ref();
+    let earlier = context.history.iter().map(|run| run.created_at);
+    let started = earlier
+        .chain([context.created_at])
+        .chain(seal.map(|seal| seal.sealed_at))
+        .min();
+    if let (Some(before), Some(started)) = (&context.before, started)
+        && before.taken_at > started
+    {
+        flags.push(Flag::BeforeAfterSession {
+            taken_at: time(before.taken_at),
+            started_at: time(started),
+        });
+    }
+    let Some(seal) = seal else {
+        return;
+    };
+    let measured = context.history.iter().rev().find(|run| {
+        run.passed && run.head_tree == context.head_tree && run.created_at < seal.sealed_at
+    });
+    if let Some(measured) = measured {
+        flags.push(Flag::MeasuredBeforeSeal {
+            run: measured.run.clone(),
+        });
+    }
+    if seal.max_tolerance > MAX_TOLERANCE {
+        flags.push(Flag::WideTolerance {
+            max_tolerance: seal.max_tolerance,
+        });
     }
 }
 

@@ -10,7 +10,7 @@ use camino::{Utf8Path, Utf8PathBuf};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::context::{BeforeInfo, Intent, SetupFrom};
+use crate::context::{BeforeInfo, Intent, Journal, SealInfo, SetupFrom};
 use crate::flags::Flag;
 use crate::next::Next;
 use crate::outputs::{RECORDS, Records};
@@ -32,10 +32,16 @@ pub struct Report {
     pub run: String,
     pub root: String,
     pub recipe: RecipeJson,
+    /// `None` without `--before`.
+    pub seal: Option<SealJson>,
     pub created_at: String,
     pub repeat: u32,
     pub setup_timeout: String,
     pub timeout: String,
+    /// The runs whose samples pool, this one included (plan, row 68).
+    pub attempts: u32,
+    /// The passed runs with `--before` since the seal, this one included; `None` without `--before`.
+    pub comparisons: Option<u32>,
     pub harness: Vec<String>,
     pub head: Head,
     pub before: Option<BeforeJson>,
@@ -55,6 +61,32 @@ pub struct Report {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RecipeJson {
     pub digest: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SealJson {
+    pub sealed_at: String,
+    pub max_tolerance: u16,
+    pub journal: Vec<JournalJson>,
+}
+
+/// One `<verb>At` per entry, as the session's journal writes it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged, rename_all_fields = "camelCase")]
+pub enum JournalJson {
+    Sealed {
+        sealed_at: String,
+        digest: String,
+    },
+    Resealed {
+        resealed_at: String,
+        digest: String,
+        reason: String,
+    },
+    Cleaned {
+        cleaned_at: String,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -241,13 +273,18 @@ pub enum At {
 }
 
 /// The quiet `--json` line (plan, row 76): `Report::line` or `Line::failed`. `cli` prints it with
-/// `next` as command strings, and sets `run` of a failed run that has its folder.
-#[derive(Debug, Clone, Serialize)]
+/// `next` as command strings, and sets `run` of a failed run that has its folder. The default is
+/// the empty line of `--dry-run --json`.
+#[derive(Debug, Clone, Default, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Line {
     pub run: Option<String>,
     #[serde(serialize_with = "slash::option")]
     pub report: Option<Utf8PathBuf>,
+    /// As in the report; `None` and 0 without one.
+    pub seal: Option<SealJson>,
+    pub attempts: u32,
+    pub comparisons: Option<u32>,
     /// Only the exceptions.
     pub measures: Vec<LineMeasure>,
     /// Only the files with a diff or a flag that names them; `None` as in the report.
@@ -368,6 +405,32 @@ pub(crate) fn before_json(
         setup: SetupJson {
             cached: setup_from.before.clone(),
         },
+    }
+}
+
+pub(crate) fn seal_json(seal: &SealInfo) -> SealJson {
+    let journal = seal.journal.iter().map(|entry| match entry {
+        Journal::Sealed { sealed_at, digest } => JournalJson::Sealed {
+            sealed_at: time(*sealed_at),
+            digest: digest.clone(),
+        },
+        Journal::Resealed {
+            resealed_at,
+            digest,
+            reason,
+        } => JournalJson::Resealed {
+            resealed_at: time(*resealed_at),
+            digest: digest.clone(),
+            reason: reason.clone(),
+        },
+        Journal::Cleaned { cleaned_at } => JournalJson::Cleaned {
+            cleaned_at: time(*cleaned_at),
+        },
+    });
+    SealJson {
+        sealed_at: time(seal.sealed_at),
+        max_tolerance: seal.max_tolerance,
+        journal: journal.collect(),
     }
 }
 
