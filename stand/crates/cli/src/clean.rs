@@ -29,7 +29,7 @@ pub(crate) fn run(
     )?;
     match what {
         Clean::Sessions => {
-            sweep::clear(sandbox, &[])?;
+            sweep::clear(sandbox, &sandbox.leftovers()?)?;
             sandbox.prune_images(&[])?;
         }
         // Without the adapter: a microsandbox home that no longer opens is wiped too, and this

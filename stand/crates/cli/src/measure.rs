@@ -7,6 +7,7 @@ use std::fs::File;
 use std::io::Write;
 use std::time::SystemTime;
 
+use budget::Resource;
 use camino::{Utf8Path, Utf8PathBuf};
 use report::{Cause, Extra, Failure, Line, Next, Phase, Previous, Report, Topic};
 use run::{Cancel, Failed, RunError, Version, Versions};
@@ -91,11 +92,11 @@ pub(crate) fn dry(
 
 /// Steps 1 and 2: what is read before the lock, then the lock.
 fn locked(env: &mut Env<'_>) -> Result<(RunLock, Opened), Halt> {
-    let opened = Opened::read(env)?;
-    Ok((opened.lock(env)?, opened))
+    Opened::read(env)?.locked(env)
 }
 
-/// Steps 4 and 5, for `run` and `--dry-run` alike: the sweep, room on the disk, the budget.
+/// Steps 4 and 5 of `run`: the sweep, then the budget, and room on the disk only when the disk is
+/// all it refuses: a run that does not fit the CPUs or the memory keeps what it would drop.
 fn admit(
     stand: &Stand,
     share: budget::Share,
@@ -106,8 +107,56 @@ fn admit(
 ) -> Result<budget::Admission, Halt> {
     sweep::leftovers(sandbox, env.store, now).at(Phase::Sweep)?;
     checkpoint(env.cancel, Phase::Sweep)?;
-    let host = sweep::make_room(sandbox, env.store, session.key(), env.host).at(Phase::Budget)?;
-    budget::check(demand(stand), &host, share).at(Phase::Budget)
+    let demand = demand(stand);
+    let host = (env.host)(&env.store.paths().root).at(Phase::Budget)?;
+    match budget::check(demand, &host, share) {
+        Err(refusal) if refusal.resource == Resource::Disk => {
+            let host = sweep::make_room(sandbox, env.store, session.key(), env.host, host)
+                .at(Phase::Budget)?;
+            budget::check(demand, &host, share).at(Phase::Budget)
+        }
+        checked => checked.at(Phase::Budget),
+    }
+}
+
+/// `admit` for `--dry-run`, which drops nothing: what the sweep and a low disk would take, then
+/// the budget. A disk that only those drops can free passes, with lines that say what a run drops
+/// first; whether that makes room enough only the run sees.
+fn dry_admit(
+    stand: &Stand,
+    share: budget::Share,
+    session: &Session,
+    sandbox: &impl Sandbox,
+    env: &Env<'_>,
+    now: SystemTime,
+) -> Result<(budget::Admission, Vec<String>), Halt> {
+    let mut lines = sweep::would_sweep(sandbox, env.store, now).at(Phase::Sweep)?;
+    checkpoint(env.cancel, Phase::Sweep)?;
+    let demand = demand(stand);
+    let host = (env.host)(&env.store.paths().root).at(Phase::Budget)?;
+    let refusal = match budget::check(demand, &host, share) {
+        Ok(admitted) => return Ok((admitted, lines)),
+        Err(refusal) => refusal,
+    };
+    let room = match refusal.resource {
+        Resource::Disk => {
+            sweep::would_make_room(env.store, session.key(), now).at(Phase::Budget)?
+        }
+        Resource::Cpu | Resource::Memory => Vec::new(),
+    };
+    if room.is_empty() {
+        return Err(StandError::Budget(refusal)).at(Phase::Budget);
+    }
+    lines.push(format!(
+        "{refusal}: a run drops in turn until there is room"
+    ));
+    lines.extend(room);
+    // `check` takes the disk last: the CPUs and the memory fit.
+    let admitted = budget::Admission {
+        cpus: demand.cpus,
+        memory: demand.memory,
+    };
+    Ok((admitted, lines))
 }
 
 /// The first step under the lock: a missing snapshot, an unknown ref or a "before" equal to the
@@ -132,33 +181,28 @@ fn measure(
     env: &mut Env<'_>,
     made: &mut Made,
 ) -> Result<Done, Halt> {
-    let Opened {
-        worktree,
-        file,
-        policy,
-        share,
-        live,
-    } = opened;
     let store = env.store;
     // One time for the session, the seal and the run's record: a seal later than the run that
     // made it would count that run as measured before the seal.
     let now = SystemTime::now();
-    let (head, before) = trees(&worktree, compare.map(|compare| &compare.before))?;
+    let (head, before) = trees(&opened.worktree, compare.map(|compare| &compare.before))?;
     checkpoint(env.cancel, Phase::Source)?;
     // A run with `--before` reads the sealed copy, whose images are the live ones the session
     // names: the seal lets a run through only when every file of the copy is the live one.
-    let session = store
-        .session(&file, &worktree.root, &images(&live), now)
-        .at(Phase::Seal)?;
+    let session = opened.open_session(store, now).at(Phase::Seal)?;
     let session = &*made.session.insert(session);
+    let Opened {
+        worktree,
+        policy,
+        share,
+        live,
+        ..
+    } = opened;
+    let reseal = compare.and_then(|compare| compare.reseal.as_ref());
     let (stand, sealed) = match compare {
         None => (live, None),
         Some(compare) => {
-            let reseal = compare.reseal.as_ref();
-            let (stand, sealed) =
-                seal::check(session, &live, &compare.before, reseal, &policy, now)
-                    .at(Phase::Seal)?;
-            (stand, Some(sealed))
+            seal::compare(session, live, &compare.before, reseal, &policy).at(Phase::Seal)?
         }
     };
     checkpoint(env.cancel, Phase::Seal)?;
@@ -166,6 +210,14 @@ fn measure(
     admit(&stand, share, session, sandbox, env, now)?;
     let pulled = sandbox.pull(&image_refs(&stand)).at(Phase::Pull)?;
     checkpoint(env.cancel, Phase::Pull)?;
+    let (stand, sealed) = match (compare, sealed) {
+        (Some(_), None) => {
+            let (stand, sealed) =
+                seal::seal(session, &stand, reseal, &policy, now).at(Phase::Seal)?;
+            (stand, Some(sealed))
+        }
+        (_, sealed) => (stand, sealed),
+    };
 
     let tars = store.trees().at(Phase::Source)?;
     write_tar(&worktree, &head, &tars.head).at(Phase::Source)?;
@@ -273,17 +325,19 @@ fn settle(
         run,
         plans,
     } = made;
+    // Each step on its own, the first error kept: a cache that fails to settle costs neither the
+    // kept run nor the tar files.
     let mut settled = Ok(());
     if let (Some(session), Some(run)) = (&session, &run) {
-        settled = match &outcome {
+        let cache = match &outcome {
             Ok(_) => cache::keep(session, &plans, sandbox, store),
             Err(_) => cache::discard(&plans, sandbox, store),
-        }
-        .and_then(|()| keep_run(session, run, sandbox));
+        };
+        let kept = keep_run(session, run, sandbox);
+        settled = cache.and(kept);
     }
-    let settled = settled
-        .and_then(|()| Ok(store.clear_trees()?))
-        .at(Phase::Report);
+    let trees = store.clear_trees().map_err(StandError::from);
+    let settled = settled.and(trees).at(Phase::Report);
     match (outcome, settled, run) {
         (Err(halt), settled, run) => {
             if let Err(also) = settled {
@@ -294,10 +348,16 @@ fn settle(
                 run: run.map(|run| run.id),
             }
         }
-        (Ok(_), Err(halt), run) => Ended::Halted {
-            halt,
-            run: run.map(|run| run.id),
-        },
+        (Ok(done), Err(halt), run) => {
+            // The halt is the outcome now; the failure of the head still shows.
+            if let Done::Failed(failed) = &done {
+                let _ = writeln!(err, "the head failed: {}", one_line(&failed.failure));
+            }
+            Ended::Halted {
+                halt,
+                run: run.map(|run| run.id),
+            }
+        }
         (Ok(done), Ok(()), run) => {
             let run = run.expect("a run that ended has its folder");
             match done {
@@ -350,47 +410,39 @@ fn extras(stand: &Stand, last: Option<&Report>) -> (BTreeSet<Extra>, BTreeSet<Ex
     let Some(last) = last else {
         return (asked, BTreeSet::new());
     };
-    let carried = |extra: &Extra| match extra {
-        Extra::Coverage => last.coverage.is_some(),
-        Extra::Fault => last.fault.as_ref().is_some_and(|fault| !fault.unknown()),
-        Extra::SecondPass => last.second_pass.is_some(),
-    };
-    asked.into_iter().partition(|extra| !carried(extra))
+    asked.into_iter().partition(|extra| !last.carries(*extra))
 }
 
-/// The steps of `run` up to the pull, with nothing pulled, sealed or built: SDK 0.7.8 pulls a
-/// missing image through a VM (plan T-11, orchestrator), so the images come from `cached`, the
-/// adapter's read of its local cache. The trees and the seal are checked as `run` checks them, so
-/// a refusal of `run` is a refusal here too. A setup can come from the cache only when every image
-/// is in the home: the key holds each digest.
+/// The steps of `run` up to the pull, with nothing pulled, sealed, built or dropped: SDK 0.7.8
+/// pulls a missing image through a VM (plan T-11, orchestrator), so the images come from `cached`,
+/// the adapter's read of its local cache. The trees and the seal are checked as `run` checks them,
+/// so a refusal of `run` is a refusal here too. A setup can come from the cache only when every
+/// image is in the home: the key holds each digest.
 fn dry_checks(
     opened: Opened,
     before: Option<&Before>,
     sandbox: &impl Sandbox,
     env: &mut Env<'_>,
 ) -> Result<String, Halt> {
+    let now = SystemTime::now();
+    let (head, before) = trees(&opened.worktree, before)?;
+    checkpoint(env.cancel, Phase::Source)?;
+    let session = opened.open_session(env.store, now).at(Phase::Seal)?;
     let Opened {
-        worktree,
         file,
         policy,
         share,
         live,
+        ..
     } = opened;
-    let store = env.store;
-    let now = SystemTime::now();
-    let (head, before) = trees(&worktree, before)?;
-    checkpoint(env.cancel, Phase::Source)?;
-    let session = store
-        .session(&file, &worktree.root, &images(&live), now)
-        .at(Phase::Seal)?;
     let (stand, sealed) = match &before {
         None => (live, None),
         Some(resolved) => {
-            seal::compare(&session, live, &resolved.intent, &policy).at(Phase::Seal)?
+            seal::compare(&session, live, &resolved.intent, None, &policy).at(Phase::Seal)?
         }
     };
     checkpoint(env.cancel, Phase::Seal)?;
-    let admitted = admit(&stand, share, &session, sandbox, env, now)?;
+    let (admitted, dropped) = dry_admit(&stand, share, &session, sandbox, env, now)?;
     let cached = sandbox.cached(&image_refs(&stand)).at(Phase::Pull)?;
     checkpoint(env.cancel, Phase::Pull)?;
 
@@ -402,12 +454,18 @@ fn dry_checks(
         None => "live folder".to_owned(),
     };
     let mut text = format!(
-        "dry run: {} ({recipe}), recipe {}\nbudget: {} vCPUs and {} MiB fit the host\n",
+        "dry run: {} ({recipe}), recipe {}\n",
         slashed(&file),
         stand.recipe.digest,
+    );
+    for line in dropped {
+        text.push_str(&format!("{line}\n"));
+    }
+    text.push_str(&format!(
+        "budget: {} vCPUs and {} MiB fit the host\n",
         admitted.cpus,
         admitted.memory >> 20,
-    );
+    ));
     for (image, digest) in &cached.digests {
         match digest {
             Some(digest) => text.push_str(&format!("image {image} cached {digest}\n")),
@@ -463,7 +521,7 @@ fn print(ended: Ended, output: Output, env: &mut Env<'_>) -> Exit {
             Exit::AppFailed
         }
         Ended::Halted { halt, run } => {
-            let exit = refused(&halt.error, env);
+            let exit = refused(&halt.error, env.err);
             if let Output::Json(layout) = output {
                 let cause = match exit {
                     Exit::Cancelled => Cause::Cancelled,

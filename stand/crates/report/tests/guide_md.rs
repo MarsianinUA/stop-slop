@@ -6,7 +6,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use report::{
     At, CategoryChange, Cause, Compared, DeadReason, Diff, ExpectJson, Failure, Flag, Grade,
     JournalJson, Line, LineFault, LineFile, LineMeasure, LinePass, Need, PassState, Phase,
-    SealJson, Src, Unit, Verdict, VersusPrevious,
+    SealJson, Side, Src, Unit, Verdict, VersusPrevious,
 };
 use serde_json::{Value, json};
 
@@ -150,7 +150,7 @@ fn every_flag() -> Vec<Flag> {
         },
         Flag::ProbeFailed {
             probe: text(),
-            side: text(),
+            side: Side::Head,
             repeat: None,
             code: None,
         },
@@ -160,16 +160,16 @@ fn every_flag() -> Vec<Flag> {
         },
         Flag::KilledAtStop {
             service: text(),
-            side: text(),
+            side: Side::Head,
             repeat: 1,
         },
         Flag::SecondPassFailed {
-            side: text(),
+            side: Side::Head,
             stage: Phase::Workload,
         },
         Flag::ConnectionsGrow {
             target: text(),
-            side: text(),
+            side: Side::Head,
             first: 1,
             second: 2,
         },

@@ -189,6 +189,49 @@ fn a_link_in_the_setup_outputs_is_skipped_unless_it_is_named_as_a_result() {
     assert_clean(&fake, &first.left());
 }
 
+/// The report skips a name that is not UTF-8, which no JSON could name; the entry does too, in a
+/// build and on a hit (batch review 6).
+#[test]
+fn a_name_that_is_not_utf8_in_the_setup_outputs_is_skipped() {
+    let first = Case::new(EXAMPLE);
+    let out = first.run_dir().join("setup-head/out");
+    fs::create_dir_all(&out).unwrap();
+    // APFS refuses such a name: macOS has nothing to skip.
+    if fs::write(out.as_std_path().join(odd_name()), b"{}\n").is_err() {
+        return;
+    }
+    let fake = fake(example_rules());
+    first.run(&fake, &first.versions(false)).unwrap();
+    let entry_out = first.entry(Side::Head).join("out");
+    let copied = ["probe.schema.jsonl", "probe.schema.jsonl.err"];
+    assert_eq!(names_in(&entry_out), copied);
+    fs::write(entry_out.as_std_path().join(odd_name()), b"{}\n").unwrap();
+    let second = Case::new(EXAMPLE);
+    let versions = Versions {
+        head: hit(&second, &first, Side::Head),
+        before: None,
+    };
+    second.run(&fake, &versions).unwrap();
+    assert_eq!(names_in(&second.run_dir().join("setup-head/out")), copied);
+}
+
+/// `odd-<a byte or a code unit no UTF-8 holds>.jsonl`.
+fn odd_name() -> std::ffi::OsString {
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStrExt;
+        std::ffi::OsStr::from_bytes(b"odd-\xff.jsonl").to_owned()
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::ffi::OsStringExt;
+        let mut wide: Vec<u16> = "odd-".encode_utf16().collect();
+        wide.push(0xD800);
+        wide.extend(".jsonl".encode_utf16());
+        std::ffi::OsString::from_wide(&wide)
+    }
+}
+
 #[test]
 fn a_hit_starts_no_setup_vm_and_holds_after_the_run_folder_that_built_it_is_gone() {
     // `db` binds the harness too, and `schema` exits 2: a hit gives that outcome back.

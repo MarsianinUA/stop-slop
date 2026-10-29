@@ -364,9 +364,14 @@ impl<'a> Attempts<'a> {
         own_before: Option<&'a [f64]>,
         context: &'a Context<'_>,
     ) -> Attempts<'a> {
+        // The pool's "before" joins only a "before" that passed here too: a failed one compared
+        // nothing, so its noise and its count are no fact of this run (batch review 6).
+        let before = own_before.map_or_else(Vec::new, |own| {
+            attempts(name, Side::Before, setup, Some(own), context)
+        });
         Attempts {
             head: attempts(name, Side::Head, setup, Some(own_head), context),
-            before: attempts(name, Side::Before, setup, own_before, context),
+            before,
         }
     }
 

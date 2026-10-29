@@ -26,7 +26,6 @@ pub enum Command {
         before: Option<Before>,
         output: Output,
     },
-    Snapshot,
     Inspect {
         run: String,
         side: Side,
@@ -39,11 +38,17 @@ pub enum Command {
         allow: String,
         reason: Reason,
     },
-    Guide {
-        topic: Option<Topic>,
-    },
-    Init,
     Clean(store::Clean),
+    Local(Local),
+}
+
+/// The commands that read and write only the work tree and stdout. `main` runs them before it
+/// opens the stand folder and starts the adapter, so they work where those fail, and `guide` is
+/// the `next` of such a failure (batch review 6).
+pub enum Local {
+    Snapshot,
+    Guide { topic: Option<Topic> },
+    Init,
 }
 
 /// `run --before <..>`; `--reseal` exists only here and needs `--reason`.
@@ -196,7 +201,7 @@ impl Sub {
     fn into_command(self) -> Command {
         match self {
             Sub::Run(args) => args.into_command(),
-            Sub::Snapshot => Command::Snapshot,
+            Sub::Snapshot => Command::Local(Local::Snapshot),
             Sub::Inspect {
                 run,
                 side,
@@ -217,8 +222,8 @@ impl Sub {
                 allow,
                 reason,
             },
-            Sub::Guide { topic } => Command::Guide { topic },
-            Sub::Init => Command::Init,
+            Sub::Guide { topic } => Command::Local(Local::Guide { topic }),
+            Sub::Init => Command::Local(Local::Init),
             Sub::Clean { all } => Command::Clean(if all {
                 store::Clean::All
             } else {

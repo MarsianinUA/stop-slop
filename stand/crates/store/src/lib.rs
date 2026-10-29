@@ -209,10 +209,12 @@ pub enum Clean {
     All,
 }
 
-/// `OtherThan` keeps the kept run, or the cache, of the session with this key (`Session::key()`).
+/// `OtherThan` keeps the kept run, or the cache, of the session with this key (`Session::key()`);
+/// `Only` takes just that session's.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum KeptScope {
     OtherThan(String),
+    Only(String),
     All,
 }
 
@@ -220,6 +222,7 @@ impl KeptScope {
     fn covers(&self, key: &str) -> bool {
         match self {
             KeptScope::OtherThan(own) => own != key,
+            KeptScope::Only(own) => own == key,
             KeptScope::All => true,
         }
     }

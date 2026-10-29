@@ -3,7 +3,7 @@
 
 use std::io::{self, Write};
 
-use report::{Line, Next};
+use report::{Intent, Line, Next};
 use serde::Serialize;
 
 use crate::{JsonLayout, guide};
@@ -20,11 +20,30 @@ pub fn render(next: &Next) -> String {
             format!("stop-slop-stand accept {measure} --allow {bound} --reason \"<text>\"")
         }
         Next::Reseal { before } => {
+            let before = match before {
+                Intent::Session => "session".to_owned(),
+                Intent::Ref(name) => ref_word(name),
+            };
             format!("stop-slop-stand run --before {before} --reseal --reason \"<text>\"")
         }
         Next::Inspect { run, service } => {
             format!("stop-slop-stand inspect {run} head {service} -- <argv>")
         }
+    }
+}
+
+/// The ref as typed, as a POSIX shell and PowerShell both read it back (batch review 6): `main^`,
+/// `@{u}` or `a&b` run as printed only in single quotes, which neither reads into. Their escapes of
+/// a `'` differ, so a ref with one prints as a placeholder. The other words of the commands are
+/// names the stand checked: services, measures, run ids.
+fn ref_word(name: &str) -> String {
+    let plain = |c: char| c.is_ascii_alphanumeric() || "._/:-".contains(c);
+    if !name.is_empty() && name.chars().all(plain) {
+        name.to_owned()
+    } else if name.contains('\'') {
+        "\"<ref>\"".to_owned()
+    } else {
+        format!("'{name}'")
     }
 }
 
@@ -72,10 +91,10 @@ mod tests {
             Next::Init,
             Next::Guide(None),
             Next::Reseal {
-                before: "session".into(),
+                before: Intent::Session,
             },
             Next::Reseal {
-                before: "origin/main".into(),
+                before: Intent::Ref("origin/main".into()),
             },
             Next::Inspect {
                 run: "20261029-120000".into(),
@@ -117,6 +136,38 @@ mod tests {
             assert_eq!(args[0], "stop-slop-stand");
             let parsed = crate::parse(args.iter().map(OsString::from));
             assert!(parsed.is_ok(), "{command}: {:?}", parsed.err());
+        }
+    }
+
+    #[test]
+    fn a_ref_reads_back_as_typed() {
+        let refs = [
+            ("origin/main", "origin/main"),
+            ("HEAD~2", "HEAD~2"),
+            ("main^{commit}", "main^{commit}"),
+            ("@{u}", "@{u}"),
+            ("a&b;c", "a&b;c"),
+            ("it's", "<ref>"),
+        ];
+        for (typed, read) in refs {
+            let next = Next::Reseal {
+                before: Intent::Ref(typed.into()),
+            };
+            let command = render(&next);
+            let args = shlex::split(&command).unwrap_or_else(|| panic!("{command} splits"));
+            let parsed = crate::parse(args.iter().map(OsString::from));
+            let Ok(crate::Command::Run {
+                compare: Some(compare),
+                ..
+            }) = parsed
+            else {
+                panic!("{command}: a run that reseals");
+            };
+            assert_eq!(
+                compare.before,
+                source::Before::Ref(read.into()),
+                "{command}"
+            );
         }
     }
 

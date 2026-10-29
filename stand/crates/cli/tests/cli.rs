@@ -416,9 +416,9 @@ fn set(ids: &[SnapshotId]) -> BTreeSet<String> {
 
 /// The `Fake` of a case, with the calls it changes: `pull` and `cached` give the digests of
 /// `digests` (a tag that moved), `cached` finds none of `evicted`, a `create` of a batch with the
-/// service `fails_on` fails, one with `cancels_on` sets Ctrl+C first, and `after_exec` gets the
-/// `stdout` of each `exec` once it is written, as the guest's `argv` could change it. Everything
-/// else goes to the `Fake` as it is.
+/// service `fails_on` fails, one with `cancels_on` sets Ctrl+C first, `after_exec` gets the
+/// `stdout` of each `exec` once it is written, as the guest's `argv` could change it, and a
+/// `drop_snapshot` of one of `undroppable` fails. Everything else goes to the `Fake` as it is.
 struct Wrapped<'f> {
     fake: &'f Fake,
     digests: &'f [(&'f str, &'f str)],
@@ -426,6 +426,7 @@ struct Wrapped<'f> {
     fails_on: Option<&'f str>,
     cancels_on: Option<(&'f str, &'f Cancel)>,
     after_exec: Option<&'f dyn Fn(&Utf8Path)>,
+    undroppable: &'f [SnapshotId],
 }
 
 impl<'f> Wrapped<'f> {
@@ -437,6 +438,7 @@ impl<'f> Wrapped<'f> {
             fails_on: None,
             cancels_on: None,
             after_exec: None,
+            undroppable: &[],
         }
     }
 
@@ -539,6 +541,11 @@ impl Sandbox for Wrapped<'_> {
         self.fake.destroy(id)
     }
     fn drop_snapshot(&self, snapshot: &SnapshotId) -> Result<(), SandboxError> {
+        if self.undroppable.contains(snapshot) {
+            return Err(SandboxError::Backend {
+                message: "the snapshot store went away".into(),
+            });
+        }
         self.fake.drop_snapshot(snapshot)
     }
     fn leftovers(&self) -> Result<Leftovers, SandboxError> {
@@ -853,6 +860,14 @@ fn the_start_sweeps_leftovers_but_keeps_kept_and_cached_snapshots_and_the_ttl_fo
     let stray_snapshot = fake.snapshot(&stray[0]).unwrap();
     fs::create_dir_all(world.paths.root.join("trees")).unwrap();
     fs::write(world.tar("head"), b"partial").unwrap();
+    // A dry run counts them and drops nothing (orchestrator, review of T-14).
+    let mark = fake.journal().len();
+    let dry = world.run(&fake, &["run", "--dry-run"]);
+    let said = "\nwould destroy 1 VM that earlier runs left\n\
+                would drop 1 snapshot that no kept run or cache entry names\n";
+    assert!(dry.out.contains(said), "{}", dry.out);
+    let swept = |call: &Call| matches!(call, Call::Destroy(_) | Call::DropSnapshot(_));
+    assert!(!fake.journal()[mark..].iter().any(swept));
     let mark = fake.journal().len();
     assert_eq!(world.run(&fake, &["run"]).exit, Exit::Passed);
     let swept = before_first_create(&fake, mark);
@@ -877,6 +892,10 @@ fn the_start_sweeps_leftovers_but_keeps_kept_and_cached_snapshots_and_the_ttl_fo
     // another session of the same stand folder sweeps it.
     age_sessions(&world, Duration::from_secs(4 * 24 * 3600));
     let other = world.worktree("other");
+    let dry = world.run_at(&other, &fake, &["run", "--dry-run"], &roomy, &Cancel::new());
+    let said = "\nwould forget the runs and cache of 1 expired session\n";
+    assert!(dry.out.contains(said), "{}", dry.out);
+    assert!(session.exists(), "the dry run forgets nothing");
     let ran = world.run_at(&other, &fake, &["run"], &roomy, &Cancel::new());
     assert_eq!(ran.exit, Exit::Passed, "{}", ran.err);
     let now = set(&snapshots_left(&fake));
@@ -938,6 +957,55 @@ fn a_low_disk_drops_the_cache_and_kept_run_of_others_then_its_own_cache_then_its
         .unwrap();
     let (own_kept, own_cached) = (set(&kept_of(&own)), set(&cached_of(&own)));
     assert!(!own_kept.is_empty() && !own_cached.is_empty());
+    // A dry run on a low disk drops nothing and says what a run would drop, in turn; the kept run
+    // still serves `inspect` after it (orchestrator, review of T-14).
+    let low = |dir: &Utf8Path| {
+        let mut host = roomy(dir)?;
+        host.free_disk = 10 * GIB;
+        Ok(host)
+    };
+    let kept_run = |session: &Utf8Path| {
+        let state = read_json(&session.join("session.json"));
+        state["kept"].as_str().unwrap().to_owned()
+    };
+    let (own_run, their_run) = (kept_run(&own), kept_run(&theirs[0]));
+    let dry_mark = fake.journal().len();
+    let dry = world.run_on(&fake, &["run", "--dry-run"], &low, &Cancel::new());
+    assert_eq!(dry.exit, Exit::Passed, "{}", dry.err);
+    let said = [
+        "disk: 10.0 GiB free on the volume of the stand's folder, under the 20.0 GiB it keeps \
+         free for snapshots: a run drops in turn until there is room"
+            .to_owned(),
+        format!("would drop 1 cache entry and 1 kept run ({their_run}) of other sessions"),
+        "would drop 1 cache entry of this session".to_owned(),
+        format!("would drop 1 kept run ({own_run}) of this session"),
+    ];
+    let lines: Vec<&str> = dry.out.lines().skip(1).take(4).collect();
+    assert_eq!(lines, said, "{}", dry.out);
+    let touched = |call: &Call| {
+        matches!(
+            call,
+            Call::DropSnapshot(_) | Call::Destroy(_) | Call::Create { .. } | Call::Pull(_)
+        )
+    };
+    assert!(!fake.journal()[dry_mark..].iter().any(touched));
+    assert_eq!(set(&kept_of(&own)), own_kept);
+    assert_eq!(set(&cached_of(&own)), own_cached);
+    assert!(own_kept.is_subset(&set(&snapshots_left(&fake))));
+    let looked = world.run(&fake, &["inspect", &own_run, "head", "db", "--", "true"]);
+    assert_eq!(looked.exit, Exit::Passed, "{}", looked.err);
+    // A run the CPUs refuse keeps all of it on that disk: only the disk is worth what it keeps.
+    let small = |dir: &Utf8Path| {
+        let mut host = low(dir)?;
+        host.cpus = 2;
+        Ok(host)
+    };
+    let mark = fake.journal().len();
+    let ran = world.run_on(&fake, &["run", "--json"], &small, &Cancel::new());
+    assert_eq!(ran.exit, Exit::Refused, "{}", ran.err);
+    let cause = ran.line()["failure"]["cause"].to_string();
+    assert!(cause.contains("cpu: requested"), "{cause}");
+    assert!(dropped(&fake.journal()[mark..]).is_empty());
     // Low until the third read: the other session's snapshots and this one's cache go, its kept
     // run stays.
     let reads = Cell::new(0);
@@ -1101,6 +1169,11 @@ fn a_failed_repeat_keeps_the_slot_and_a_breakage_or_ctrl_c_drops_what_the_run_bu
     assert_eq!(creates(&base, "prepare") - prepares, 1, "its setup ran");
     assert_eq!(entries(&world), entries_then);
     assert_eq!(set(&snapshots_left(&base)), left_then);
+    // It kept nothing, so the kept run is still the first.
+    let session = world.sessions().remove(0);
+    let first = folders(&session.join("runs"))[0].clone();
+    let state = read_json(&session.join("session.json"));
+    assert_eq!(state["kept"], first.file_name().unwrap());
     // Ctrl+C after setup: nothing of the cancelled run stays.
     let world = World::new();
     let base = fake(Vec::new());
@@ -1119,6 +1192,87 @@ fn a_failed_repeat_keeps_the_slot_and_a_breakage_or_ctrl_c_drops_what_the_run_bu
         "no entry of the cancelled run stays"
     );
     assert!(snapshots_left(&base).is_empty(), "nor its snapshots");
+}
+
+/// Each step of settling on its own (batch review 6): a cache that fails to settle costs neither
+/// the kept run nor the tar files, and the head's failure still shows.
+#[test]
+fn a_cache_that_fails_to_settle_still_keeps_the_run_and_clears_the_trees() {
+    let world = World::new();
+    let died = fake(vec![on_tree(
+        "api",
+        world.tar("head"),
+        exits(1, 2 * SECOND),
+    )]);
+    assert_eq!(world.run(&died, &["run"]).exit, Exit::AppFailed);
+    // A new head tree: its entry replaces the first one, whose snapshots will not drop.
+    let session = world.sessions().remove(0);
+    let first = cached_of(&session);
+    world.repo.write("main.js", "console.log('v2')\n");
+    let broken = Wrapped {
+        undroppable: &first,
+        ..Wrapped::new(&died)
+    };
+    let ran = world.run(&broken, &["run", "--json"]);
+    assert_eq!(ran.exit, Exit::Broken, "{}", ran.err);
+    let line = ran.line();
+    assert_eq!(line["failure"]["phase"], "report");
+    assert!(
+        ran.err.contains("the head failed: workload died in api"),
+        "{}",
+        ran.err
+    );
+    let state = read_json(&session.join("session.json"));
+    assert_eq!(state["kept"], line["run"]);
+    assert!(!world.tar("head").exists());
+    let args = [
+        "inspect",
+        line["run"].as_str().unwrap(),
+        "head",
+        "db",
+        "--",
+        "true",
+    ];
+    let looked = world.run(&died, &args);
+    assert_eq!(looked.exit, Exit::Passed, "{}", looked.err);
+}
+
+/// The before slot lets go of an entry the head takes in the same run: it keeps its snapshots
+/// (batch review 6).
+#[test]
+fn a_run_with_the_two_trees_swapped_takes_both_setups_and_keeps_both_entries() {
+    let world = World::new();
+    let fake = fake(Vec::new());
+    world.run(&fake, &["snapshot"]);
+    world.repo.write("main.js", "console.log('v2')\n");
+    let first = world
+        .run(&fake, &["run", "--before", "session", "--json"])
+        .line();
+    // The snapshot takes the new tree, and the work tree goes back to the old one.
+    world.run(&fake, &["snapshot"]);
+    world.repo.write("main.js", "console.log('v1')\n");
+    let prepares = creates(&fake, "prepare");
+    let swapped = world
+        .run(&fake, &["run", "--before", "session", "--json"])
+        .line();
+    assert_eq!(creates(&fake, "prepare"), prepares, "both from the cache");
+    let report = world.report(&swapped);
+    assert_eq!(report["before"]["setup"]["cached"], first["run"]);
+    assert_eq!(report["head"]["setup"]["cached"], first["run"]);
+    let session = world.sessions().remove(0);
+    assert!(set(&cached_of(&session)).is_subset(&set(&snapshots_left(&fake))));
+    let again = world
+        .run(&fake, &["run", "--before", "session", "--json"])
+        .line();
+    assert_eq!(
+        creates(&fake, "prepare"),
+        prepares,
+        "both from the cache again"
+    );
+    assert_eq!(
+        world.report(&again)["head"]["setup"]["cached"],
+        first["run"]
+    );
 }
 
 #[test]
@@ -1341,6 +1495,33 @@ fn the_first_run_before_seals_and_a_changed_file_refuses_until_a_reseal() {
     assert_eq!(next["comparisons"], 2, "{next}");
     // The last run of this head before the reseal is the plain one, not the run that resealed.
     assert_eq!(measured_before_seal(&next), plain["run"].as_str(), "{next}");
+}
+
+/// A run writes its seal after its pull (batch review 6): a first run the budget refuses leaves
+/// none, so the recipe it fixes runs without a reseal.
+#[test]
+fn a_first_run_before_that_the_budget_refuses_seals_nothing() {
+    let world = World::new();
+    let fake = fake(Vec::new());
+    world.run(&fake, &["snapshot"]);
+    world.repo.write("main.js", "console.log('v2')\n");
+    let small = |dir: &Utf8Path| {
+        let mut host = roomy(dir)?;
+        host.cpus = 2;
+        Ok(host)
+    };
+    let args = ["run", "--before", "session", "--json"];
+    let refused = world.run_on(&fake, &args, &small, &Cancel::new());
+    assert_eq!(refused.exit, Exit::Refused, "{}", refused.err);
+    assert_eq!(refused.line()["failure"]["phase"], "budget");
+    let sealed = |world: &World| world.sessions().iter().any(|s| s.join("seal").exists());
+    assert!(!sealed(&world));
+    world.write_recipe("load.js", "// load, smaller\n");
+    let ran = world.run(&fake, &args);
+    assert_eq!(ran.exit, Exit::Passed, "{}", ran.err);
+    let journal = ran.line()["seal"]["journal"].clone();
+    assert_eq!(journal.as_array().map(Vec::len), Some(1), "{journal}");
+    assert!(sealed(&world));
 }
 
 #[test]
@@ -1989,4 +2170,42 @@ fn help_holds_at_most_twenty_lines_and_ends_with_the_guide() {
         ran.out.trim_end().lines().last(),
         Some("agents: run `guide`")
     );
+}
+
+/// `main` runs `guide`, `init` and `snapshot` before it opens the stand folder or starts the
+/// adapter (batch review 6): they work where the folder cannot be made, and `guide`, the `next`
+/// of that failure, works after it.
+#[test]
+fn the_local_commands_open_no_stand_folder() {
+    let world = World::with("");
+    let base = Utf8Path::from_path(world.dir.path()).unwrap().to_owned();
+    // A file where the stand folder's parent would be: no folder can be made under it.
+    fs::write(base.join("file"), "").unwrap();
+    let home = base.join("file").join("home");
+    let stand = |args: &[&str]| {
+        std::process::Command::new(env!("CARGO_BIN_EXE_stop-slop-stand"))
+            .args(args)
+            .current_dir(&world.cwd)
+            .env("STOP_SLOP_STAND_HOME", &home)
+            .output()
+            .unwrap()
+    };
+    let run = stand(&["run", "--json"]);
+    assert_eq!(run.status.code(), Some(3));
+    let stderr = String::from_utf8_lossy(&run.stderr);
+    assert!(
+        stderr.ends_with("next: stop-slop-stand guide\n"),
+        "{stderr}"
+    );
+    for args in [
+        &["--help"][..],
+        &["guide"],
+        &["guide", "recipe"],
+        &["init"],
+        &["snapshot"],
+    ] {
+        let local = stand(args);
+        let stderr = String::from_utf8_lossy(&local.stderr);
+        assert!(local.status.success(), "{args:?}: {stderr}");
+    }
 }

@@ -7,8 +7,8 @@ use std::io;
 use std::process::{self, ExitCode};
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use camino::Utf8PathBuf;
-use cli::{Env, Exit};
+use camino::{Utf8Path, Utf8PathBuf};
+use cli::{Command, Env, Exit};
 use run::Cancel;
 use sandbox::Microsandbox;
 use store::{Store, StorePaths};
@@ -19,6 +19,14 @@ fn main() -> ExitCode {
     let command = match cli::parse(args.iter().cloned()) {
         Ok(command) => command,
         Err(error) => return cli::refuse_args(&error, &args, &mut out, &mut err).into(),
+    };
+    let cwd = current_dir();
+    let command = match command {
+        Command::Local(local) => {
+            let cwd = cwd.as_deref().map_err(String::as_str);
+            return cli::execute_local(local, cwd, &mut out, &mut err).into();
+        }
+        command => command,
     };
     show_adapter_warnings();
     let cancel = Cancel::new();
@@ -34,8 +42,8 @@ fn main() -> ExitCode {
             process::exit(Exit::Cancelled as i32);
         }
     });
-    let started = paths().and_then(|(cwd, paths)| {
-        let store = Store::open(paths).map_err(|error| error.to_string())?;
+    let started = cwd.and_then(|cwd| {
+        let store = Store::open(paths(&cwd)?).map_err(|error| error.to_string())?;
         let sandbox =
             Microsandbox::new(&store.sandbox_home()).map_err(|error| error.to_string())?;
         Ok((cwd, store, sandbox))
@@ -55,17 +63,20 @@ fn main() -> ExitCode {
     cli::execute(command, &sandbox, env).into()
 }
 
+fn current_dir() -> Result<Utf8PathBuf, String> {
+    let cwd = env::current_dir().map_err(|error| format!("the current folder: {error}"))?;
+    utf8(cwd)
+}
+
 /// `STOP_SLOP_STAND_HOME`, or the data folder of the OS: LocalAppData on Windows, never Roaming,
 /// which syncs gigabytes of snapshots with the profile (review of T-07). On macOS a short folder in
 /// home: microsandbox keeps sockets under it, and `sun_path` there holds 104 bytes, which
 /// `~/Library/Application Support/stop-slop-stand/msb/run/sandboxes/<24 hex>/control.sock` passes.
-fn paths() -> Result<(Utf8PathBuf, StorePaths), String> {
-    let utf8 = |path: std::path::PathBuf| {
-        Utf8PathBuf::from_path_buf(path).map_err(|path| format!("{}: not UTF-8", path.display()))
-    };
-    let cwd = utf8(env::current_dir().map_err(|error| format!("the current folder: {error}"))?)?;
+/// A relative `STOP_SLOP_STAND_HOME` is taken from `cwd`: the paths the line prints stay valid
+/// from another folder.
+fn paths(cwd: &Utf8Path) -> Result<StorePaths, String> {
     let root = match env::var_os("STOP_SLOP_STAND_HOME") {
-        Some(home) => utf8(home.into())?,
+        Some(home) => cwd.join(utf8(home.into())?),
         None => {
             let base = if cfg!(target_os = "macos") {
                 dirs::home_dir().map(|home| home.join(".stop-slop-stand"))
@@ -77,7 +88,11 @@ fn paths() -> Result<(Utf8PathBuf, StorePaths), String> {
     };
     let config = dirs::config_dir().ok_or("no config folder of the OS")?;
     let config = utf8(config.join("stop-slop-stand").join("stand.toml"))?;
-    Ok((cwd, StorePaths { root, config }))
+    Ok(StorePaths { root, config })
+}
+
+fn utf8(path: std::path::PathBuf) -> Result<Utf8PathBuf, String> {
+    Utf8PathBuf::from_path_buf(path).map_err(|path| format!("{}: not UTF-8", path.display()))
 }
 
 /// The adapter logs through `tracing` and never writes to stderr itself (T-11, stage 4): its

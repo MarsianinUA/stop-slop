@@ -8,7 +8,7 @@ The shortest path, in the fix flow:
 4. After the tests pass: declare the cost of the change in `x-stand.expect` (`guide expect`), then `stop-slop-stand run --before session --json`. The first such run seals the recipe.
 5. Read the line (`guide line`). On an exception: `inspect` the kept state (`guide inspect`), fix the code, `accept` a shift you can explain, or hand `needs` to the user.
 6. `stop-slop hot <report> --json` for the hot functions of the branch and the changed code that never ran.
-7. `stop-slop-stand clean` once, as the last step of the task: it drops the session's snapshot, seal and cache.
+7. `stop-slop-stand clean` once, as the last step of the task, when no other task uses the stand: it drops the snapshots, seals and caches of every work tree, not only this one's.
 
 The exit code says what to do:
 

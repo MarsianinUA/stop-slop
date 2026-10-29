@@ -13,7 +13,7 @@ use camino::{Utf8Path, Utf8PathBuf};
 use report::{Cause, Failure, Line, Next, Phase, slashed};
 use run::Cancel;
 use sandbox::Sandbox;
-use store::{RunLock, Session, Store};
+use store::{RunLock, Session, Store, StoreError};
 
 use crate::error::{At, Halt};
 
@@ -32,7 +32,7 @@ mod seal;
 mod snapshot;
 mod sweep;
 
-pub use args::{Command, Compare, JsonLayout, Output, Reason, parse, refuse_args};
+pub use args::{Command, Compare, JsonLayout, Local, Output, Reason, parse, refuse_args};
 
 use error::StandError;
 
@@ -73,7 +73,6 @@ pub fn execute(command: Command, sandbox: &impl Sandbox, mut env: Env<'_>) -> Ex
         Command::DryRun { before, output } => {
             return measure::dry(before.as_ref(), output, sandbox, &mut env);
         }
-        Command::Snapshot => snapshot::run(&mut env),
         Command::Inspect {
             run,
             side,
@@ -85,11 +84,27 @@ pub fn execute(command: Command, sandbox: &impl Sandbox, mut env: Env<'_>) -> Ex
             allow,
             reason,
         } => accept::run(&measure, &allow, &reason, &mut env),
-        Command::Guide { topic } => guide::run(topic, &mut env),
-        Command::Init => guide::init(&mut env),
         Command::Clean(what) => clean::run(what, sandbox, &mut env),
+        Command::Local(local) => return execute_local(local, Ok(env.cwd), env.out, env.err),
     };
-    done.unwrap_or_else(|error| refused(&error, &mut env))
+    done.unwrap_or_else(|error| refused(&error, env.err))
+}
+
+/// `cwd` is the error of reading the current folder when that failed: only `init` and `snapshot`
+/// need the folder.
+pub fn execute_local(
+    local: Local,
+    cwd: Result<&Utf8Path, &str>,
+    out: &mut dyn Write,
+    err: &mut dyn Write,
+) -> Exit {
+    let done = match (local, cwd) {
+        (Local::Guide { topic }, _) => guide::run(topic, out),
+        (Local::Init, Ok(cwd)) => guide::init(cwd, out),
+        (Local::Snapshot, Ok(cwd)) => snapshot::run(cwd, out),
+        (Local::Init | Local::Snapshot, Err(message)) => return failed_start(message, err),
+    };
+    done.unwrap_or_else(|error| refused(&error, err))
 }
 
 /// What fails before `execute`: the folders of the OS, the stand folder, the adapter. Exit 3, and
@@ -100,15 +115,20 @@ pub fn refuse_start(
     out: &mut dyn Write,
     err: &mut dyn Write,
 ) -> Exit {
-    let next = vec![Next::Guide(None)];
-    let _ = writeln!(err, "{message}");
-    let _ = next::print_next(err, &next);
+    let exit = failed_start(message, err);
     if let Command::Run { output, .. } | Command::DryRun { output, .. } = command
         && let Output::Json(layout) = *output
     {
-        let line = refusal_line(Phase::Config, error_cause(message), next);
+        let line = refusal_line(Phase::Config, error_cause(message), vec![Next::Guide(None)]);
         let _ = next::print_line(out, &line, layout);
     }
+    exit
+}
+
+/// `guide` opens nothing, so it works after any failed start.
+fn failed_start(message: &str, err: &mut dyn Write) -> Exit {
+    let _ = writeln!(err, "{message}");
+    let _ = next::print_next(err, &[Next::Guide(None)]);
     Exit::Broken
 }
 
@@ -129,11 +149,11 @@ fn error_cause(text: &str) -> Cause {
 }
 
 /// The commands without `--json`: the reason, then on 2 and 3 the `next:` lines (plan, row 83).
-fn refused(error: &StandError, env: &mut Env<'_>) -> Exit {
-    let _ = writeln!(env.err, "{error}");
+fn refused(error: &StandError, err: &mut dyn Write) -> Exit {
+    let _ = writeln!(err, "{error}");
     let exit = error.exit();
     if matches!(exit, Exit::Refused | Exit::Broken) {
-        let _ = next::print_next(env.err, &error.next());
+        let _ = next::print_next(err, &error.next());
     }
     exit
 }
@@ -174,22 +194,22 @@ impl Opened {
         })
     }
 
-    fn lock(&self, env: &mut Env<'_>) -> Result<RunLock, Halt> {
+    /// Waits by the `run::span` of this read, then reads again under the lock: the recipe lies in
+    /// the common folder of the repo, and another work tree may change it while this one waits.
+    fn locked(self, env: &mut Env<'_>) -> Result<(RunLock, Opened), Halt> {
         let span = run::span(&self.live);
-        lock::wait(env.store, span, env.cancel, &mut *env.err).at(Phase::Lock)
+        let lock = lock::wait(env.store, span, env.cancel, &mut *env.err).at(Phase::Lock)?;
+        Ok((lock, Opened::read(env)?))
     }
 
-    /// The caller keeps the lock while it uses the session.
-    fn session(
-        &self,
-        env: &mut Env<'_>,
-        now: SystemTime,
-    ) -> Result<(RunLock, Session), StandError> {
-        let lock = self.lock(env)?;
-        let images = images(&self.live);
-        let session = env
-            .store
-            .session(&self.file, &self.worktree.root, &images, now)?;
+    fn open_session(&self, store: &Store, now: SystemTime) -> Result<Session, StoreError> {
+        store.session(&self.file, &self.worktree.root, &images(&self.live), now)
+    }
+
+    /// `inspect` and `accept`; the caller keeps the lock while it uses the session.
+    fn session(self, env: &mut Env<'_>, now: SystemTime) -> Result<(RunLock, Session), StandError> {
+        let (lock, opened) = self.locked(env)?;
+        let session = opened.open_session(env.store, now)?;
         Ok((lock, session))
     }
 }

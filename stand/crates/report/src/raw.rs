@@ -10,8 +10,6 @@ use profile::{Coverage, Samples};
 use sandbox::{ExecOutcome, Metrics, PortStats, Stopped};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
-use crate::Side;
-
 #[derive(Debug)]
 pub struct Raw {
     /// From `Stand`: what the run ran.
@@ -41,6 +39,25 @@ pub struct Raw {
 pub struct ProbeRule {
     pub key: Option<String>,
     pub ignore: Vec<String>,
+}
+
+/// A version of a run: `run` names its folders and `kept.json` by it, the flags of the report
+/// carry it (batch review 6: one type for both).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Side {
+    Head,
+    Before,
+}
+
+/// The word in the names of the run folder and in the report: `setup-head`, `repeat-2-before`.
+impl fmt::Display for Side {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Side::Head => "head",
+            Side::Before => "before",
+        })
+    }
 }
 
 #[derive(Debug)]

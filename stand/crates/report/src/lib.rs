@@ -30,7 +30,7 @@ pub use outputs::{Outputs, read_outputs};
 pub use raw::{
     BeforeOutcome, Cause, CoverageOutcome, Extra, Failure, FaultOutcome, FaultRepeat,
     InstanceOutput, Pass, PassPair, Phase, ProbeRan, ProbeRule, ProfileOutcome, Raw, RepeatOutput,
-    Role, SecondPassOutcome, Setup, SetupSide,
+    Role, SecondPassOutcome, Setup, SetupSide, Side,
 };
 pub use schema::{
     At, BeforeJson, Behaviour, CalledJson, Categories, CategoryChange, CategoryJson, Compared,
@@ -179,21 +179,6 @@ impl<'r> Before<'r> {
             None => Before::Absent,
             Some(BeforeOutcome::Failed(failure)) => Before::Failed(failure),
             Some(BeforeOutcome::Passed(repeats)) => Before::Passed(repeats),
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-enum Side {
-    Head,
-    Before,
-}
-
-impl Side {
-    fn as_str(self) -> &'static str {
-        match self {
-            Side::Head => "head",
-            Side::Before => "before",
         }
     }
 }

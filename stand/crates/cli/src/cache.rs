@@ -135,7 +135,8 @@ pub(crate) fn setup_from(head: &Planned, before: Option<&Planned>) -> SetupFrom 
 /// After exit 0 or 1: each slot points at its version's entry when that setup passed whole;
 /// the entries no slot names lose their snapshots, then their folders. "Before" goes first: the
 /// entry the head slot held may serve "before" now, and the head slot let go of first would give
-/// it up with its snapshots.
+/// it up with its snapshots. An entry the before slot let go of may serve the head now (the two
+/// trees swapped): it stays too (batch review 6).
 pub(crate) fn keep(
     session: &Session,
     plans: &[Planned],
@@ -143,12 +144,15 @@ pub(crate) fn keep(
     store: &Store,
 ) -> Result<(), StandError> {
     let mut gone = Vec::new();
+    let mut slotted = Vec::new();
     let of = |slot: Slot| plans.iter().filter(move |planned| planned.slot == slot);
     for planned in of(Slot::Before).chain(of(Slot::Head)) {
         if run::cached_ids(&planned.entry.dir)?.is_some() {
             gone.extend(session.cache(planned.slot, &planned.key, planned.entry.clone())?);
+            slotted.push(&planned.entry.dir);
         }
     }
+    gone.retain(|entry| !slotted.contains(&entry));
     sweep::drop_snapshots(sandbox, &gone, &[])?;
     store.clear_unused_entries()?;
     Ok(())

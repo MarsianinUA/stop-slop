@@ -13,7 +13,7 @@ use report::{
     FaultOutcome, FaultRepeat, Flag, Grade, InstanceOutput, Intent, Journal, Line, Measure, Need,
     Next, Pass, PassFile, PassPair, PassState, PastRun, Phase, PostHoc, Previous, ProbeRan,
     ProbeRule, ProfileOutcome, Raw, RepeatOutput, Report, ReportError, Role, SealInfo,
-    SecondPassOutcome, Setup, SetupFrom, SetupSide, Src, Topic, Unit, Verdict, load, make,
+    SecondPassOutcome, Setup, SetupFrom, SetupSide, Side, Src, Topic, Unit, Verdict, load, make,
     read_outputs,
 };
 use sandbox::{ExecOutcome, Metrics, PortStats, Stopped, Unexposed};
@@ -496,6 +496,21 @@ fn a_failed_before_has_no_baseline_and_its_failure_is_in_the_report() {
     assert_eq!((wall.median, wall.verdict), (None, Verdict::NoBaseline));
     assert!(wall.samples.is_empty());
     assert!(report.behaviour.is_none());
+
+    // The pool's "before", noisy and short, is no fact of a run whose "before" failed.
+    let noisy = Some(repeats(&folder, "pooled-before", &[100, 300]));
+    let pool = [self::report(&self::raw(
+        &folder,
+        repeats(&folder, "pooled-head", &[100, 100, 100]),
+        noisy,
+    ))];
+    let pooled = report_of(&raw, &context(&raw, Previous::None, &pool), &[]);
+    let mut flags = pooled.flags.iter();
+    assert!(
+        !flags.any(|flag| matches!(flag, Flag::HighNoise { .. } | Flag::LowRepeats { .. })),
+        "{:?}",
+        pooled.flags
+    );
 }
 
 #[test]
@@ -675,19 +690,19 @@ fn each_fact_of_the_raw_outputs_gives_its_flag() {
         },
         Flag::ProbeFailed {
             probe: "seed".to_owned(),
-            side: "head".to_owned(),
+            side: Side::Head,
             repeat: None,
             code: None,
         },
         Flag::ProbeFailed {
             probe: "orders".to_owned(),
-            side: "head".to_owned(),
+            side: Side::Head,
             repeat: Some(1),
             code: Some(2),
         },
         Flag::KilledAtStop {
             service: "api".to_owned(),
-            side: "head".to_owned(),
+            side: Side::Head,
             repeat: 1,
         },
     ];
@@ -787,7 +802,7 @@ fn previous_unreadable_and_recipe_changed_come_from_the_context() {
         Flag::PreviousUnreadable,
         Flag::KilledAtStop {
             service: "api".to_owned(),
-            side: "head".to_owned(),
+            side: Side::Head,
             repeat: 1,
         },
     ];
@@ -1401,6 +1416,42 @@ fn the_pool_teaches_the_noise_mask_through_records_json() {
     assert_eq!(behaviour(&unread, "out.jsonl").diffs[0].path, "/seed");
 }
 
+/// The second pass masks what its version's measured repeats change, the pool's among them, with
+/// no "before" too (batch review 6).
+#[test]
+fn the_pool_teaches_the_second_pass_mask_without_before() {
+    let folder = Folder::new();
+    let totals = |name: &str, at: &[u32]| {
+        let texts: Vec<String> = at.iter().map(|at| format!("{{\"at\":{at}}}\n")).collect();
+        let files: Vec<[(&str, &str); 1]> = texts
+            .iter()
+            .map(|text| [("totals.jsonl", text.as_str())])
+            .collect();
+        let lists: Vec<&[(&str, &str)]> = files.iter().map(|file| &file[..]).collect();
+        with_files(&folder, name, &lists)
+    };
+    let earlier = raw(&folder, totals("a", &[1, 2]), None);
+    let mut earlier_context = context(&earlier, Previous::None, &[]);
+    earlier_context.run = PREVIOUS.to_owned();
+    let (pooled, dir) = written(&folder, "run-a", &earlier, &earlier_context);
+    let mut raw = raw(&folder, totals("head", &[3]), None);
+    let pass_of = |n: u32, at: u32| {
+        let text = format!("{{\"at\":{at}}}\n");
+        pass(&folder, "head", n, &[("totals.jsonl", text.as_str())], &[])
+    };
+    raw.second_pass = Some(SecondPassOutcome {
+        unchanged: vec!["totals.jsonl".to_owned()],
+        head: passed(pass_of(1, 5), pass_of(2, 6)),
+        before: None,
+    });
+
+    let alone = report(&raw);
+    assert_eq!(pass_file(&alone, "totals.jsonl").head, PassState::Changed);
+    let pool = [pooled];
+    let together = report_of(&raw, &context(&raw, Previous::None, &pool), &[dir]);
+    assert_eq!(pass_file(&together, "totals.jsonl").head, PassState::Same);
+}
+
 #[test]
 fn after_setup_records_of_one_setup_origin_count_once() {
     let folder = Folder::new();
@@ -1489,6 +1540,38 @@ fn a_folder_named_jsonl_in_out_is_no_input() {
         matches!(&error, ReportError::Bad { path, .. } if *path == odd),
         "{error}"
     );
+}
+
+/// No JSON could name it; the setup cache skips it too (batch review 6).
+#[test]
+fn a_name_that_is_not_utf8_in_out_is_skipped() {
+    let folder = Folder::new();
+    let head = with_files(&folder, "head", &[&[("out.jsonl", "{}\n")]]);
+    #[cfg(unix)]
+    let odd = {
+        use std::os::unix::ffi::OsStrExt;
+        std::ffi::OsStr::from_bytes(b"odd-\xff.jsonl").to_owned()
+    };
+    #[cfg(windows)]
+    let odd = {
+        use std::os::windows::ffi::OsStringExt;
+        let mut wide: Vec<u16> = "odd-".encode_utf16().collect();
+        wide.push(0xD800);
+        wide.extend(".jsonl".encode_utf16());
+        std::ffi::OsString::from_wide(&wide)
+    };
+    // APFS refuses such a name: macOS has nothing to skip.
+    if fs::write(head[0].out_dir.as_std_path().join(odd), "broken\n").is_err() {
+        return;
+    }
+    let before = with_files(&folder, "before", &[&[("out.jsonl", "{}\n")]]);
+    let raw = raw(&folder, head, Some(before));
+    let report = report(&raw);
+    let behaviour = report.behaviour.iter().flatten();
+    let files: Vec<&str> = behaviour.map(|file| file.file.as_str()).collect();
+    assert_eq!(files, ["out.jsonl"]);
+    let mut flags = report.flags.iter();
+    assert!(!flags.any(|flag| matches!(flag, Flag::BadResultLine { .. })));
 }
 
 /// The guest writes `/stand/out`: a link there would read the host. Windows here gives no right
@@ -1757,7 +1840,7 @@ fn a_failed_line_carries_the_facts_so_far_and_its_next_steps() {
 
     let probe_failed = |probe: &str, repeat, code| Flag::ProbeFailed {
         probe: probe.to_owned(),
-        side: "head".to_owned(),
+        side: Side::Head,
         repeat,
         code,
     };
@@ -2819,7 +2902,7 @@ fn an_unchanged_file_that_changed_on_the_head_is_in_the_second_pass_and_open_con
         .collect();
     let grow = Flag::ConnectionsGrow {
         target: "db:5432".to_owned(),
-        side: "head".to_owned(),
+        side: Side::Head,
         first: 2,
         second: 4,
     };
@@ -2889,7 +2972,7 @@ fn a_failed_second_pass_is_a_flag_and_a_failed_head_has_no_second_pass() {
     let state = pass_file(&report, "state.jsonl");
     assert_eq!((state.before, state.head), (None, PassState::Same));
     let flag = Flag::SecondPassFailed {
-        side: "before".to_owned(),
+        side: Side::Before,
         stage: Phase::Ready,
     };
     assert!(report.flags.contains(&flag), "{:?}", report.flags);
@@ -2910,7 +2993,7 @@ fn a_failed_second_pass_is_a_flag_and_a_failed_head_has_no_second_pass() {
         .filter(|flag| matches!(flag, Flag::SecondPassFailed { .. }))
         .collect();
     let head = Flag::SecondPassFailed {
-        side: "head".to_owned(),
+        side: Side::Head,
         stage: Phase::Workload,
     };
     assert_eq!(failed, [&head, &flag]);

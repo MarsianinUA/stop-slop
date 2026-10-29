@@ -135,7 +135,7 @@ fn on_failure(flag: &Flag, failure: &Failure) -> bool {
     let in_run = matches!(failure.phase, Phase::Setup | Phase::Ready | Phase::Workload);
     in_run
         && matches!(flag, Flag::ProbeFailed { side, repeat, .. }
-            if side == Side::Head.as_str() && *repeat == failure.repeat)
+            if *side == Side::Head && *repeat == failure.repeat)
 }
 
 /// Optional Assumptions, «Исключение строки». An `unmeasurable` stays quiet without an entry (the

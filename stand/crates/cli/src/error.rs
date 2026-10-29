@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use budget::{HostError, Refusal};
 use camino::Utf8PathBuf;
-use report::{Next, Phase, ReportError, Topic};
+use report::{Intent, Next, Phase, ReportError, Topic};
 use run::{InspectError, StandFault};
 use sandbox::SandboxError;
 use source::SourceError;
@@ -48,12 +48,12 @@ pub(crate) enum StandError {
     },
     #[error("another run holds the stand; waited {} s for it", .0.as_secs())]
     LockWait(Duration),
-    /// `before`: the intent as typed, for the command that reseals.
+    /// `before`: for the command that reseals.
     #[error(
         "the recipe changed since its seal: {}; put it back, or seal it again with --reseal",
         .files.join(", ")
     )]
-    RecipeChanged { files: Vec<String>, before: String },
+    RecipeChanged { files: Vec<String>, before: Intent },
     #[error("the before tree is the head tree: there is nothing to compare")]
     NothingToCompare,
     #[error("{0} is there already; edit it, or delete it to start over")]
@@ -154,7 +154,19 @@ impl StandError {
             StandError::TooWide { .. }
             | StandError::Cancelled
             | StandError::Inspect(InspectError::Cancelled) => Vec::new(),
-            _ => vec![Next::Guide(None)],
+            StandError::Source(_)
+            | StandError::Config(_)
+            | StandError::Spec(SpecError::Io { .. })
+            | StandError::Store(_)
+            | StandError::Sandbox(_)
+            | StandError::Host(_)
+            | StandError::Budget(_)
+            | StandError::Report(_)
+            | StandError::Run(_)
+            | StandError::Inspect(InspectError::Stand(_))
+            | StandError::Io { .. }
+            | StandError::LockWait(_)
+            | StandError::NothingToCompare => vec![Next::Guide(None)],
         }
     }
 }

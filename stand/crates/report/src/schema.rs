@@ -14,7 +14,7 @@ use crate::context::{BeforeInfo, Intent, Journal, SealInfo, SetupFrom};
 use crate::flags::Flag;
 use crate::next::Next;
 use crate::outputs::{RECORDS, Records};
-use crate::raw::Failure;
+use crate::raw::{Failure, Side};
 use crate::{Before, ReportError};
 
 pub(crate) const SCHEMA_VERSION: u32 = 1;
@@ -387,7 +387,7 @@ pub enum PassState {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PassOpen {
     pub target: String,
-    pub side: String,
+    pub side: Side,
     pub first: u64,
     pub second: u64,
 }

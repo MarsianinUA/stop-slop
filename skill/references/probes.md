@@ -25,7 +25,7 @@ x-stand:
     slot:
       in: db
       at: after-setup
-      run: ["psql", "-U", "postgres", "-At", "-c", "select pg_create_logical_replication_slot('stand', 'test_decoding')"]
+      run: ["psql", "-U", "postgres", "-At", "-c", "select slot_name from pg_create_logical_replication_slot('stand', 'test_decoding')"]
     changes:
       in: db
       at: after-workload
@@ -34,6 +34,7 @@ x-stand:
 ```
 
 - The slot comes after setup, so it lists only what the workload did; `after-setup` runs before the setup snapshot, so every repeat starts with it.
+- `select slot_name` prints only the name: the position where the slot starts differs between the versions, and printed it would differ every run.
 - `ALTER TABLE <t> REPLICA IDENTITY FULL` in a migration puts the old row into each update and delete.
 - `checkpoint` before the peek: without it the last changes may not be decoded yet.
 

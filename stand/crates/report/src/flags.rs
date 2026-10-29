@@ -110,7 +110,7 @@ pub enum Flag {
     /// `repeat` is `None` for `after-setup`, `code` for the deadline.
     ProbeFailed {
         probe: String,
-        side: String,
+        side: Side,
         repeat: Option<u32>,
         code: Option<i32>,
     },
@@ -120,18 +120,18 @@ pub enum Flag {
     },
     KilledAtStop {
         service: String,
-        side: String,
+        side: Side,
         repeat: u32,
     },
     /// The workload did not run twice on one state there: nothing of that version was compared.
     SecondPassFailed {
-        side: String,
+        side: Side,
         stage: Phase,
     },
     /// The open connections to `target` after the first pass and after the second.
     ConnectionsGrow {
         target: String,
-        side: String,
+        side: Side,
         first: u64,
         second: u64,
     },
@@ -402,7 +402,7 @@ fn probes(sides: &Sides<'_>, flags: &mut Vec<Flag>) {
             };
             flags.push(Flag::ProbeFailed {
                 probe: probe.name.clone(),
-                side: side.as_str().to_owned(),
+                side: *side,
                 repeat,
                 code,
             });
@@ -426,7 +426,7 @@ fn stops(sides: &Sides<'_>, flags: &mut Vec<Flag>) {
     for (side, repeat, service) in killed {
         flags.push(Flag::KilledAtStop {
             service: service.to_owned(),
-            side: side.as_str().to_owned(),
+            side,
             repeat,
         });
     }

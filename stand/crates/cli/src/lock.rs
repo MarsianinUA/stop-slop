@@ -13,8 +13,7 @@ use crate::error::StandError;
 
 const POLL: Duration = Duration::from_secs(1);
 
-/// `run::span` of the stand file, or `run::DEFAULT_SPAN` for a command whose stand file does not
-/// read (Gate 1, «Предел без файла стенда»).
+/// Gate 1, «Предел без файла стенда».
 pub(crate) fn limit(stand: Option<&Stand>) -> Duration {
     stand.map_or(run::DEFAULT_SPAN, run::span)
 }

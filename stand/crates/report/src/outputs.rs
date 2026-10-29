@@ -5,7 +5,7 @@
 
 use std::collections::BTreeMap;
 use std::fs::{self, File};
-use std::io::{self, Read};
+use std::io::{self, BufRead, BufReader, Read};
 use std::sync::Arc;
 
 use camino::{Utf8Path, Utf8PathBuf};
@@ -30,7 +30,7 @@ pub struct Outputs {
     /// The first broken line of each workload file, from 1.
     pub(crate) bad_lines: BTreeMap<String, u32>,
     /// `records.json` of each pooled run in the order of `Context.pool`; `None` when it does not
-    /// read. Empty unless "before" passed: only the diff reads it.
+    /// read. Empty unless "before" passed or the second pass ran: only their masks read it.
     pub(crate) pool: Vec<Option<Records>>,
     /// The records of each `unchanged` file after the first and the second pass, by file and
     /// version; a version whose second pass failed has none.
@@ -91,8 +91,9 @@ pub fn read_outputs(raw: &Raw, pool: &[Utf8PathBuf]) -> Result<Outputs, ReportEr
         }
     }
     // A pooled run whose records do not read teaches the mask nothing, as an unreadable pooled
-    // report is left out of the pool.
-    if let Before::Passed(_) = Before::of(raw) {
+    // report is left out of the pool. The second pass masks by the measured repeats of its
+    // version, with or without "before" (batch review 6).
+    if matches!(Before::of(raw), Before::Passed(_)) || raw.second_pass.is_some() {
         let pooled = pool.iter().map(|dir| read_records(&dir.join(RECORDS)));
         outputs.pool = pooled.collect();
     }
@@ -216,13 +217,17 @@ fn read_records(path: &Utf8Path) -> Option<Records> {
 /// The lines of the log before `cut`: what the service logged after the workload ended is not the
 /// measured window.
 fn error_lines(log: &Utf8Path, cut: u64) -> Result<u32, ReportError> {
-    let mut bytes = Vec::new();
-    File::open(log)
-        .and_then(|file| file.take(cut).read_to_end(&mut bytes))
-        .map_err(ReportError::io(log))?;
-    let text = String::from_utf8_lossy(&bytes);
-    let count = text.lines().filter(|line| is_error(line)).count();
-    Ok(u32::try_from(count).unwrap_or(u32::MAX))
+    let file = File::open(log).map_err(ReportError::io(log))?;
+    // Line by line: a service may log gigabytes in the window.
+    let mut count: u32 = 0;
+    for line in BufReader::new(file.take(cut)).split(b'\n') {
+        let line = line.map_err(ReportError::io(log))?;
+        let line = line.strip_suffix(b"\r").unwrap_or(&line);
+        if is_error(&String::from_utf8_lossy(line)) {
+            count = count.saturating_add(1);
+        }
+    }
+    Ok(count)
 }
 
 /// The plan's rule (Optional Assumptions, «Строка уровня error»): a JSON line by its `level` from

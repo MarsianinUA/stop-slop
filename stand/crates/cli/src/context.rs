@@ -95,12 +95,16 @@ pub(crate) fn of(known: Known<'_>) -> Context<'_> {
     }
 }
 
+pub(crate) fn intent(before: &Before) -> Intent {
+    match before {
+        Before::Session => Intent::Session,
+        Before::Ref(name) => Intent::Ref(name.clone()),
+    }
+}
+
 fn before(resolved: &Resolved) -> BeforeInfo {
     BeforeInfo {
-        intent: match &resolved.intent {
-            Before::Session => Intent::Session,
-            Before::Ref(name) => Intent::Ref(name.clone()),
-        },
+        intent: intent(&resolved.intent),
         treeish: resolved.treeish.to_string(),
         tree: resolved.tree.to_string(),
         taken_at: resolved.taken_at,

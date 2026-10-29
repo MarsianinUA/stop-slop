@@ -4,10 +4,11 @@
 use std::fs::{self, OpenOptions};
 use std::io::{ErrorKind, Write};
 
+use camino::Utf8Path;
 use report::Topic;
 
 use crate::error::StandError;
-use crate::{Env, Exit, slashed, stand_file};
+use crate::{Exit, slashed, stand_file};
 
 const GUIDE: &str = include_str!("../../../../skill/references/guide.md");
 const PROBES: &str = include_str!("../../../../skill/references/probes.md");
@@ -37,7 +38,7 @@ pub(crate) fn names() -> String {
     TOPICS.map(name).join(", ")
 }
 
-pub(crate) fn run(topic: Option<Topic>, env: &mut Env<'_>) -> Result<Exit, StandError> {
+pub(crate) fn run(topic: Option<Topic>, out: &mut dyn Write) -> Result<Exit, StandError> {
     let text = match topic {
         None => format!(
             "{}\n\nTopics: {}. `stop-slop-stand guide <topic>` prints one.\n",
@@ -49,7 +50,7 @@ pub(crate) fn run(topic: Option<Topic>, env: &mut Env<'_>) -> Result<Exit, Stand
             .expect("every topic but probes is a section of guide.md")
             .to_owned(),
     };
-    write!(env.out, "{text}").map_err(StandError::io("stdout"))?;
+    write!(out, "{text}").map_err(StandError::io("stdout"))?;
     Ok(Exit::Passed)
 }
 
@@ -82,9 +83,9 @@ fn section(name: &str) -> Option<&'static str> {
 }
 
 /// Writes the template, never over a stand file that is there (plan, row 75).
-pub(crate) fn init(env: &mut Env<'_>) -> Result<Exit, StandError> {
-    let worktree = source::open(env.cwd)?;
-    let file = stand_file(env.cwd, &worktree);
+pub(crate) fn init(cwd: &Utf8Path, out: &mut dyn Write) -> Result<Exit, StandError> {
+    let worktree = source::open(cwd)?;
+    let file = stand_file(cwd, &worktree);
     let folder = file.parent().expect("the stand file lies in its folder");
     fs::create_dir_all(folder).map_err(StandError::io(folder))?;
     let created = OpenOptions::new().write(true).create_new(true).open(&file);
@@ -95,10 +96,13 @@ pub(crate) fn init(env: &mut Env<'_>) -> Result<Exit, StandError> {
         }
         Err(error) => return Err(StandError::io(&file)(error)),
     };
-    handle
-        .write_all(TEMPLATE.as_bytes())
-        .map_err(StandError::io(&file))?;
-    writeln!(env.out, "wrote {}", slashed(&file)).map_err(StandError::io("stdout"))?;
+    if let Err(error) = handle.write_all(TEMPLATE.as_bytes()) {
+        // A part of the template would refuse the next `init` and fail every `run`.
+        drop(handle);
+        let _ = fs::remove_file(&file);
+        return Err(StandError::io(&file)(error));
+    }
+    writeln!(out, "wrote {}", slashed(&file)).map_err(StandError::io("stdout"))?;
     Ok(Exit::Passed)
 }
 
