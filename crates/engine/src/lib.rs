@@ -2,6 +2,7 @@ mod config;
 mod dispatch;
 mod finding;
 mod fix;
+mod functions;
 mod run;
 mod text;
 
@@ -99,6 +100,17 @@ pub struct Finding {
     pub in_hunk: Option<bool>,
     pub fixable: bool,
     pub fingerprint: Fingerprint,
+}
+
+/// A function or arrow of a file, from `Engine::functions`.
+#[derive(Debug, PartialEq, Eq)]
+pub struct FunctionSpan {
+    /// Its own name, or for an anonymous one the name of the function around it, as a
+    /// fingerprint takes it; `None` when no function around has one.
+    pub name: Option<String>,
+    pub start: Position,
+    /// Just past its last character.
+    pub end: Position,
 }
 
 /// `<rule>:<hash6>` of the finding's text and the name of the function around it, so it
