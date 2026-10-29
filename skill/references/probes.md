@@ -183,13 +183,13 @@ function quote(text,  out, i, c) {
       key: /prefix
 ```
 
-`probes/redis-calls.sh`: the calls of each command since the repeat started Redis. The `ping` of the healthcheck and the `info` of the probes vary with timing, so they stay out.
+`probes/redis-calls.sh`: the calls of each command since the repeat started Redis. The `ping` of the healthcheck, the `info` of the probes and the `llen` and `zcard` of the drain barrier below are counts that follow the timing, so they stay out.
 
 ```sh
 #!/bin/sh
 redis-cli info commandstats | tr -d '\r' |
   sed -n 's/^cmdstat_\([^:]*\):calls=\([0-9]*\),.*/{"cmd":"\1","calls":\2}/p' |
-  grep -Ev '"cmd":"(ping|info)"'
+  grep -Ev '"cmd":"(ping|info|llen|zcard)"'
 ```
 
 `probes/redis-keys.sh`: the keys that never expire, counted by the prefix before their first `:`. A change that adds keys without a TTL grows the store for good. The memory Redis takes is the stand's own measure `<service>.memory`; `used_memory` moves with every allocation, so the probe leaves it out.
