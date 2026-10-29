@@ -1,0 +1,44 @@
+## line
+
+`stop-slop-stand run --json` prints one line on every exit code. It holds only the exceptions: what passed is counted in `quiet`, and every number stays in `report.json` for `stop-slop hot` and people.
+
+- The line has `run`, `report`, `measures`, `behaviour`, `flags`, `failure`, `quiet`, `unmeasurable` and `next`.
+  - `run` is the id of the run for `inspect`, `null` when the run never started. `report` is the path of `report.json`, `null` when the run failed.
+  - `behaviour` is `null` without `--before` or when "before" failed.
+  - `quiet` counts the measures and files with no exception. `unmeasurable` counts the measures without an `expect` entry whose shift the noise could hide; they stay quiet.
+  - `next` holds the commands to run next, ready to paste. A failure and a refusal always have one.
+- A measure has `name`, `unit`, `src` and `median`, then `before` and `previous`.
+  - `name` is `<subject>.<metric>`: the subject is `stand`, a service, a port `<service>:<port>` or a volume `volume:<name>`. `unit` is `ms`, `bytes`, `count` or `share`. `src` is `stand`: the stand measured it, the harness cannot.
+  - `median` is of the samples of every run of the same trees and recipe: running again adds samples instead of starting over.
+- `before` and `previous` of a measure have `median` and `verdict`. `before` is `null` without `--before`; `previous` compares with the last passed run of other trees or recipe.
+  - `verdict` is `improved` or `regressed` when a measure where less is better moved beyond its noise, `changed` when a measure with no better side (connections, bytes) moved, `within-noise`, or `no-baseline` when there is nothing to compare with.
+- A behaviour file has `file`, `src`, `noiseKnown`, `diffs`, `sample` and `path`.
+  - `src` is `workload` for a file the harness wrote into `/stand/out`, `probe` for a probe's output.
+  - A field that changes between repeats of "before" is noise and never a diff. `noiseKnown` is `false` with a single repeat of "before": then nothing is known to be noise.
+  - `diffs` counts the differences from "before", one per field of a record; `sample` holds the first 3, and the file at `path` all of them.
+- A diff has `record` or `key`, `path`, `before` and `head`.
+  - `record` numbers the records of the file from 1; a probe with `key` names the record by its key instead. `path` is the JSON Pointer of the field; a record on one side only has `path` `""` and `null` on the other side.
+- `failure` has `phase`, `service`, `repeat`, `cause`, `logs` and `probes`.
+  - `phase` is where it stopped: `setup`, `ready` or `workload` when the app failed (exit 1), another step on a refusal or a breakage. `cause` is `exit-<code>`, `setup-timeout`, `timeout`, `died`, `unhealthy` or `cancelled`, or the error of a refusal or a breakage.
+  - `logs` is the folder with the logs of the failed setup or repeat; `probes` are the outputs of the `on-failure` probes.
+- A flag has `kind` and the facts of its kind. No flag is a failure; each says what to know before trusting the numbers:
+  - `high-noise` (`measure`): a version's samples spread more than 20% between repeats, so a smaller shift does not show. Give the workload more to do, or raise `repeat`.
+  - `first-repeat-outlier` (`measure`): the first repeat lies far from the others, as a warm-up does; the median already sets it aside.
+  - `low-repeats` (`samples`): a version has fewer than 3 samples. Run again: runs of the same trees and recipe pool their samples.
+  - `no-profile` (`service`): a repeat of this profiled service wrote no profile; it needs Node 20 or later.
+  - `unprofiled`: no service has `x-stand.profile`, so the report has no hot function and no coverage.
+  - `lost-processes` (`service`, `count`): Node processes killed before they wrote their first profile chunk.
+  - `unmapped-time` (`service`, `share`): this share of the service's TypeScript time found no source map; the hot functions miss it.
+  - `memory-near-limit` (`service`, `peak`, `limit`): the service reached 90% of its memory limit.
+  - `network-limit-hit` (`repeat`, `target`, `drops`): the stand's network dropped new connections to `target` after about 256 in 10 seconds to each of its replicas. It is not the app: give the workload keep-alive or a pool.
+  - `missing-expose` (`name`, `attempts`): a service called `name`, which has no `expose`.
+  - `before-failed` (`stage`): "before" failed at this stage, so nothing was compared with it.
+  - `coverage-unknown` (`stage`, `service`): the report has no coverage, so `stop-slop hot` cannot list changed functions that never ran. The reason is one of: repeat failed at `stage`; `service` left no coverage (no profile in a measured repeat and no call in the coverage repeat, so it may have run unseen); no service in the coverage repeat (both `null`).
+  - `previous-unreadable`: the previous report did not read; nothing is compared with it.
+  - `recipe-changed`: the recipe changed since the previous run, so the comparison with it may be unfair.
+  - `no-results` (`file`): with `--before`, `file` exists on one version only, or no `*.jsonl` exists at all (`file` is `null`).
+  - `bad-result-line` (`file`, `line`): `line` is the first line of a workload file that is no JSON; every such line is left out.
+  - `dead-probe` (`probe`, `reason`): the probe can never show a change: no record at all (`no-records`) or `ignore` takes every field (`all-ignored`).
+  - `probe-failed` (`probe`, `side`, `repeat`, `code`): the probe exited with `code`, or hit its deadline when `code` is `null`; `repeat` is `null` after setup. An `on-failure` probe gives none: its output is in `failure.probes`.
+  - `head-only-noise` (`file`, `path`): the field holds on "before" and changes between repeats of the head; it stays in the diff as a change.
+  - `killed-at-stop` (`service`, `side`, `repeat`): the service ignored its stop signal for `stop_grace_period` and was killed.

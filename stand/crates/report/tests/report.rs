@@ -24,6 +24,7 @@ const HEAD_TREE: &str = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
 const BEFORE_TREEISH: &str = "a1b2c3d4e5f60718293a4b5c6d7e8f9012345678";
 const BEFORE_TREE: &str = "7d1e09f3c2b4a5968778695a4b3c2d1e0f9a8b7c";
 const DIGEST: &str = "9f2c41aa6b0e4d3c8a7f5e1d2c4b6a8f0e9d7c5b3a1f2e4d6c8b0a9f7e5d3c1b";
+const FIXTURE: &str = include_str!("../../../../shared/fixtures/report.json");
 
 // --- helpers ---------------------------------------------------------------------------------
 
@@ -1903,5 +1904,161 @@ fn the_summary_names_the_setup_origin_and_the_line_does_not() {
     assert!(
         !line.contains("cached") && !line.contains("setup"),
         "{line}"
+    );
+}
+
+// --- the fixture -------------------------------------------------------------------------------
+
+/// The run of the fixture: `db` with the volume `pgdata` and the probe `orders`, `api` profiled,
+/// the workload `load` calling `api:3000`; three repeats per version, `--before session`.
+fn fixture_repeat(folder: &Folder, side: &str, repeat: u32, wall: u64) -> RepeatOutput {
+    let dir = format!("fixture-{side}-{repeat}");
+    let head = side == "head";
+    let (second, order) = if head { (11, "pending") } else { (10, "paid") };
+    let id = &side[..1];
+    let record = format!(
+        "{{\"order\":1,\"requestId\":\"{id}{repeat}a\",\"total\":10}}\n{{\"order\":2,\"requestId\":\"{id}{repeat}b\",\"total\":{second}}}\n"
+    );
+    let orders = format!(
+        "{{\"id\":7,\"status\":\"{order}\",\"updated_at\":\"{side}-{repeat}\"}}\n{{\"id\":8,\"status\":\"paid\",\"updated_at\":\"{side}-{repeat}\"}}\n"
+    );
+    let files = [
+        ("out.jsonl", record.as_str()),
+        ("probe.orders.jsonl", orders.as_str()),
+        ("probe.orders.jsonl.err", ""),
+    ];
+    let out = folder.out(&dir, &files);
+
+    let mut api = metrics(if head { 6000 } else { 5000 }, 300 << 20);
+    api.ports.push(PortStats {
+        bytes_out: 20_000,
+        bytes_in: 80_000,
+        ..port("db:5432", 4)
+    });
+    let api_log = folder.log(
+        &format!("{dir}-api"),
+        "listening on 3000\nERROR: boom\n",
+        "ERROR: late\n",
+    );
+    let mut api = instance("api", Role::LongRunning, api, api_log);
+    api.stopped = Some(Stopped {
+        after: Duration::from_millis(120),
+        killed: false,
+    });
+    let (build_line, build_self, money_self) = if head {
+        (40, 812.0, 120.0)
+    } else {
+        (38, 500.0, 118.0)
+    };
+    let mut functions = vec![
+        Sampled {
+            total_ms: 2100.0,
+            column: 21,
+            ..sampled(
+                "src/orders/orders.service.ts",
+                "buildReport",
+                build_line,
+                build_self,
+            )
+        },
+        Sampled {
+            total_ms: money_self + 10.0,
+            column: 28,
+            ..sampled("src/util/money.ts", "formatMoney", 3, money_self)
+        },
+    ];
+    // Under 1 ms: left out of `hot`.
+    if head {
+        functions.push(Sampled {
+            column: 5,
+            ..sampled("src/util/money.ts", "round", 10, 0.5)
+        });
+    }
+    api.profile = Some(read(functions));
+
+    let db_log = folder.log(&format!("{dir}-db"), "ready\n", "");
+    let mut db = instance("db", Role::LongRunning, metrics(3000, 200 << 20), db_log);
+    db.stopped = Some(Stopped {
+        after: Duration::from_millis(300),
+        killed: false,
+    });
+
+    let mut load = metrics(1000, 50 << 20);
+    load.memory_limit = 512 << 20;
+    load.ports.push(PortStats {
+        bytes_out: 150_000,
+        bytes_in: 600_000,
+        http: Some([0, 3000, 0, 0, 0]),
+        drops: if head && repeat == 2 { 14 } else { 0 },
+        ..port("api:3000", 300)
+    });
+    let load = instance(
+        "load",
+        Role::Workload,
+        load,
+        folder.log(&format!("{dir}-load"), "", ""),
+    );
+
+    RepeatOutput {
+        repeat,
+        wall: Duration::from_millis(wall),
+        instances: vec![api, db, load],
+        probes: vec![probe_ran("orders", ExecOutcome::Exited(0), &out)],
+        out_dir: out,
+    }
+}
+
+fn fixture_raw(folder: &Folder, head_walls: &[u64], before_walls: Option<&[u64]>) -> Raw {
+    let side = |name: &str, walls: &[u64]| -> Vec<RepeatOutput> {
+        let numbered = walls.iter().zip(1..);
+        numbered
+            .map(|(wall, repeat)| fixture_repeat(folder, name, repeat, *wall))
+            .collect()
+    };
+    let mut raw = raw(
+        folder,
+        side("head", head_walls),
+        before_walls.map(|walls| side("before", walls)),
+    );
+    raw.setup.head.sizes.insert("pgdata".to_owned(), 8_388_608);
+    if let Some(setup) = &mut raw.setup.before {
+        setup.sizes.insert("pgdata".to_owned(), 8_126_464);
+    }
+    probe_rule(&mut raw, "orders", Some("/id"), &["/updated_at"]);
+    let coverage = Coverage {
+        called: vec![
+            called("src/orders/orders.service.ts", 40, 21, 1200),
+            called("src/util/money.ts", 3, 28, 5000),
+        ],
+    };
+    let services = BTreeMap::from([("api".to_owned(), coverage)]);
+    raw.coverage = Some(CoverageOutcome::Read(services));
+    raw
+}
+
+#[test]
+fn make_on_the_raw_outputs_and_context_of_the_fixture_gives_the_fixture() {
+    let folder = Folder::new();
+    let earlier = fixture_raw(&folder, &[41900, 41800, 42000], None);
+    let mut earlier_context = context(&earlier, Previous::None, &[]);
+    earlier_context.run = PREVIOUS.to_owned();
+    earlier_context.created_at = at("2026-10-22T09:45:00Z");
+    let previous = report_of(&earlier, &earlier_context, &[]);
+    let raw = fixture_raw(
+        &folder,
+        &[42210, 41877, 42502],
+        Some(&[41010, 40870, 41502]),
+    );
+    let mut context = context(&raw, Previous::Read(&previous), &[]);
+    context.setup_from.before = Some(PREVIOUS.to_owned());
+    let report = report_of(&raw, &context, &[]);
+
+    let expected: Value = serde_json::from_str(FIXTURE).expect("the fixture is JSON");
+    let made = serde_json::to_value(&report).expect("the report serializes");
+    assert_eq!(
+        made,
+        expected,
+        "made:\n{}",
+        serde_json::to_string_pretty(&made).unwrap()
     );
 }
