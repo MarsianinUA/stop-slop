@@ -56,6 +56,8 @@ pub(crate) enum StandError {
     RecipeChanged { files: Vec<String>, before: String },
     #[error("the before tree is the head tree: there is nothing to compare")]
     NothingToCompare,
+    #[error("{0} is there already; edit it, or delete it to start over")]
+    StandFileExists(Utf8PathBuf),
     #[error("this work tree has no passed run to accept a measure of")]
     NoRun,
     #[error("`{measure}` is not a measure of the last passed run, {run}")]
@@ -103,6 +105,7 @@ impl StandError {
             | StandError::LockWait(_)
             | StandError::RecipeChanged { .. }
             | StandError::NothingToCompare
+            | StandError::StandFileExists(_)
             | StandError::NoRun
             | StandError::NotInReport { .. }
             | StandError::Change(_)
@@ -127,7 +130,9 @@ impl StandError {
             StandError::Source(SourceError::NoSnapshot) => vec![Next::Snapshot],
             // The rules of the stand file, the image of the prepare service among them, live in
             // the topic `recipe` (plan, row 87).
-            StandError::Spec(SpecError::Invalid { .. }) => vec![Next::Guide(Some(Topic::Recipe))],
+            StandError::Spec(SpecError::Invalid { .. }) | StandError::StandFileExists(_) => {
+                vec![Next::Guide(Some(Topic::Recipe))]
+            }
             // The topic says which run, side and service `inspect` takes, and how its copy starts.
             StandError::Inspect(InspectError::NotKept(_) | InspectError::NotStarted { .. }) => {
                 vec![Next::Guide(Some(Topic::Inspect))]

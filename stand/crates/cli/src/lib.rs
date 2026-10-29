@@ -79,6 +79,8 @@ pub fn execute(command: Command, sandbox: &impl Sandbox, mut env: Env<'_>) -> Ex
             allow,
             reason,
         } => accept::run(&measure, &allow, &reason, &mut env),
+        Command::Guide { topic } => guide::run(topic, &mut env),
+        Command::Init => guide::init(&mut env),
         Command::Clean(what) => clean::run(what, sandbox, &mut env),
     };
     done.unwrap_or_else(|error| refused(&error, &mut env))

@@ -1,7 +1,7 @@
 //! `stop-slop-stand run [--before session|<ref> [--reseal --reason <text>]] [--dry-run] [--json
 //! [--pretty]] | snapshot | inspect <run> <side> <service> -- <argv>... | accept <measure> --allow
-//! <bound> --reason <text> | clean [--all]`. `--help` holds at most 20 lines, the last
-//! ``agents: run `guide` ``.
+//! <bound> --reason <text> | guide [topic] | init | clean [--all]`. `--help` holds at most 20 lines,
+//! the last ``agents: run `guide` ``.
 //!
 //! The types say what the flags cannot be: `--reseal` lives only in `Compare`, which only
 //! `run --before` makes, and `DryRun` has no `reseal` (plan, row 9).
@@ -10,11 +10,11 @@ use std::ffi::OsString;
 use std::io::Write;
 
 use clap::{Args, Parser, Subcommand};
-use report::{Cause, Failure, Line, Phase};
+use report::{Cause, Failure, Line, Phase, Topic};
 use run::Side;
 use source::Before;
 
-use crate::{Exit, next};
+use crate::{Exit, guide, next};
 
 pub enum Command {
     Run {
@@ -39,6 +39,10 @@ pub enum Command {
         allow: String,
         reason: Reason,
     },
+    Guide {
+        topic: Option<Topic>,
+    },
+    Init,
     Clean(store::Clean),
 }
 
@@ -158,6 +162,14 @@ enum Sub {
         #[arg(long, value_parser = reason)]
         reason: Reason,
     },
+    /// Print the guide for agents, or one of its topics
+    Guide {
+        /// recipe, probes, expect, line or inspect
+        #[arg(value_parser = topic)]
+        topic: Option<Topic>,
+    },
+    /// Write a stand file to start from
+    Init,
     /// Delete what the stand keeps for its sessions
     Clean {
         /// Everything, the journals and the microsandbox runtime too
@@ -213,6 +225,8 @@ impl Sub {
                 allow,
                 reason,
             },
+            Sub::Guide { topic } => Command::Guide { topic },
+            Sub::Init => Command::Init,
             Sub::Clean { all } => Command::Clean(if all {
                 store::Clean::All
             } else {
@@ -258,6 +272,14 @@ fn side(text: &str) -> Result<Side, String> {
         "before" => Ok(Side::Before),
         _ => Err("head or before".to_owned()),
     }
+}
+
+fn topic(text: &str) -> Result<Topic, String> {
+    guide::TOPICS
+        .iter()
+        .find(|(name, _)| *name == text)
+        .map(|(_, topic)| *topic)
+        .ok_or_else(|| format!("topics: {}", guide::names()))
 }
 
 #[cfg(test)]

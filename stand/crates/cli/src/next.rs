@@ -64,10 +64,13 @@ mod tests {
 
     use super::*;
 
-    /// The `Next` whose commands exist.
+    /// Every variant, `Guide` with each topic.
     fn every_next() -> Vec<Next> {
-        vec![
+        let topics = guide::TOPICS.map(|(_, topic)| Next::Guide(Some(topic)));
+        let mut every = vec![
             Next::Snapshot,
+            Next::Init,
+            Next::Guide(None),
             Next::Reseal {
                 before: "session".into(),
             },
@@ -90,7 +93,20 @@ mod tests {
                 measure: "stand.wall".into(),
                 bound: Bound::None,
             },
-        ]
+        ];
+        every.extend(topics);
+        // Stops the build when a variant is added and not made above.
+        for next in &every {
+            match next {
+                Next::Snapshot
+                | Next::Init
+                | Next::Guide(_)
+                | Next::Accept { .. }
+                | Next::Reseal { .. }
+                | Next::Inspect { .. } => {}
+            }
+        }
+        every
     }
 
     #[test]

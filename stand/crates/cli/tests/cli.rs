@@ -1855,3 +1855,98 @@ fn accept_appends_a_bound_with_its_reason_and_refuses_the_rest() {
     assert!(wide.err.contains("max_tolerance, 25%"), "{}", wide.err);
     assert_eq!(acceptances(&world).len(), 2);
 }
+
+#[test]
+fn guide_prints_the_contents_and_each_topic_and_refuses_another() {
+    let world = World::new();
+    let fake = fake(Vec::new());
+    // The guide needs no repository: an agent reads it before it has a stand file.
+    let outside = tempfile::tempdir().unwrap();
+    let outside = Utf8Path::from_path(outside.path()).unwrap();
+    let contents = world.run_at(outside, &fake, &["guide"], &roomy, &Cancel::new());
+    assert_eq!(contents.exit, Exit::Passed, "{}", contents.err);
+    assert!(
+        contents.out.contains("The shortest path"),
+        "{}",
+        contents.out
+    );
+    assert!(contents.out.contains("- `130`: "), "{}", contents.out);
+    assert!(!contents.out.contains("## "), "{}", contents.out);
+    let last = contents.out.lines().last();
+    let topics = "Topics: recipe, probes, expect, line, inspect. `stop-slop-stand guide <topic>` prints one.";
+    assert_eq!(last, Some(topics));
+    for topic in ["recipe", "expect", "line", "inspect"] {
+        let ran = world.run(&fake, &["guide", topic]);
+        assert_eq!(ran.exit, Exit::Passed, "{topic}");
+        let heading = format!("## {topic}");
+        assert_eq!(ran.out.lines().next(), Some(heading.as_str()));
+        let other = ran.out.lines().skip(1).find(|line| line.starts_with("## "));
+        assert_eq!(other, None, "{topic} prints only its section");
+    }
+    let probes = world.run(&fake, &["guide", "probes"]);
+    assert_eq!(probes.out.lines().next(), Some("# probes"));
+    assert!(probes.out.contains("$$"));
+    let unknown = world.run(&fake, &["guide", "nothing"]);
+    assert_eq!(unknown.exit, Exit::Refused);
+    assert!(
+        unknown
+            .err
+            .contains("topics: recipe, probes, expect, line, inspect"),
+        "{}",
+        unknown.err
+    );
+    assert_eq!(unknown.next(), ["stop-slop-stand guide"]);
+    assert!(fake.journal().is_empty());
+}
+
+#[test]
+fn init_writes_a_template_that_loads_and_refuses_a_second_time() {
+    let world = World::with("");
+    let fake = fake(Vec::new());
+    let ran = world.run(&fake, &["init"]);
+    assert_eq!(ran.exit, Exit::Passed, "{}", ran.err);
+    let file = world.recipe().join("compose.yaml");
+    let wrote = format!("wrote {}", file.as_str().replace('\\', "/"));
+    assert_eq!(ran.out.trim_end(), wrote);
+    assert!(spec::load(&file, &spec::Policy::new(None).unwrap()).is_ok());
+    let dry = world.run(&fake, &["run", "--dry-run"]);
+    assert_eq!(dry.exit, Exit::Passed, "{}", dry.err);
+    let mine = format!("{}# mine\n", fs::read_to_string(&file).unwrap());
+    fs::write(&file, &mine).unwrap();
+    let again = world.run(&fake, &["init"]);
+    assert_eq!(again.exit, Exit::Refused);
+    assert!(again.err.contains("is there already"), "{}", again.err);
+    assert_eq!(again.next(), ["stop-slop-stand guide recipe"]);
+    assert_eq!(fs::read_to_string(&file).unwrap(), mine);
+    assert!(!any_create(&fake));
+    let outside = tempfile::tempdir().unwrap();
+    let outside = Utf8Path::from_path(outside.path()).unwrap();
+    let refused = world.run_at(outside, &fake, &["init"], &roomy, &Cancel::new());
+    assert_eq!(refused.exit, Exit::Refused, "{}", refused.err);
+    assert!(
+        refused.err.contains("not inside a git work tree"),
+        "{}",
+        refused.err
+    );
+}
+
+#[test]
+fn help_holds_at_most_twenty_lines_and_ends_with_the_guide() {
+    let world = World::new();
+    let ran = world.run(&fake(Vec::new()), &["--help"]);
+    assert_eq!(ran.exit, Exit::Passed);
+    assert!(ran.out.lines().count() <= 20, "{}", ran.out);
+    for command in [
+        "run", "snapshot", "inspect", "accept", "guide", "init", "clean",
+    ] {
+        let listed = ran
+            .out
+            .lines()
+            .any(|line| line.trim_start().starts_with(command));
+        assert!(listed, "{command}: {}", ran.out);
+    }
+    assert_eq!(
+        ran.out.trim_end().lines().last(),
+        Some("agents: run `guide`")
+    );
+}
