@@ -1,6 +1,7 @@
 //! What only `cli` knows about a run: it builds the `Context` and copies nothing of `Raw` (plan,
 //! row 85).
 
+use std::collections::BTreeSet;
 use std::fmt;
 use std::time::SystemTime;
 
@@ -14,6 +15,9 @@ pub struct Context<'r> {
     pub created_at: SystemTime,
     pub root: Utf8PathBuf,
     pub head_tree: String,
+    /// The paths from the root, with `/`, that differ between the trees of "before" and the head;
+    /// `None` without `--before`.
+    pub changed: Option<BTreeSet<String>>,
     /// `None` without `--before`.
     pub before: Option<BeforeInfo>,
     /// The seal this run compared under; `None` without `--before`.

@@ -9,10 +9,10 @@ use camino::{Utf8Path, Utf8PathBuf};
 use profile::{Called, Coverage, ModuleTime, Sampled, Samples};
 use report::{
     At, BeforeInfo, BeforeOutcome, Behaviour, Bound, Cause, Context, CoverageOutcome, DeadReason,
-    Declared, ExpectJson, Failure, FaultOutcome, FaultRepeat, Flag, Grade, InstanceOutput, Intent,
-    Journal, Line, Measure, Need, Next, PastRun, Phase, PostHoc, Previous, ProbeRan, ProbeRule,
-    ProfileOutcome, Raw, RepeatOutput, Report, ReportError, Role, SealInfo, Setup, SetupFrom,
-    SetupSide, Src, Topic, Verdict, load, make, read_outputs,
+    Declared, Direction, ExpectJson, Failure, FaultOutcome, FaultRepeat, Flag, Grade,
+    InstanceOutput, Intent, Journal, Line, Measure, Need, Next, PastRun, Phase, PostHoc, Previous,
+    ProbeRan, ProbeRule, ProfileOutcome, Raw, RepeatOutput, Report, ReportError, Role, SealInfo,
+    Setup, SetupFrom, SetupSide, Src, Topic, Unit, Verdict, load, make, read_outputs,
 };
 use sandbox::{ExecOutcome, Metrics, PortStats, Stopped, Unexposed};
 use serde_json::{Value, json};
@@ -197,6 +197,7 @@ fn context<'r>(raw: &Raw, previous: Previous<'r>, pool: &'r [Report]) -> Context
         created_at: at("2026-10-22T10:00:00Z"),
         root: "E:/work/app".into(),
         head_tree: HEAD_TREE.to_owned(),
+        changed: None,
         before,
         seal: None,
         history: Vec::new(),
@@ -1929,6 +1930,72 @@ fn the_summary_names_the_setup_origin_and_the_line_does_not() {
     );
 }
 
+#[test]
+fn the_self_time_of_changed_files_is_the_own_cost_and_the_rest_collateral() {
+    let folder = Folder::new();
+    let changed_head = [
+        ("src/orders.ts", "build", 10, 21, 300.0),
+        ("src/orders.ts", "total", 30, 5, 20.5),
+        ("src/util.ts", "format", 3, 5, 50.0),
+    ];
+    let changed_before = [
+        ("src/orders.ts", "build", 10, 21, 100.0),
+        ("src/util.ts", "format", 3, 5, 50.0),
+    ];
+    let mut head = profiled(&folder, "head", &changed_head);
+    // A second replica adds to the repeat; a repeat without a profile has no sample.
+    let log = folder.log("api-2", "", "");
+    let mut replica = instance("api", Role::LongRunning, metrics(1000, 100 << 20), log);
+    replica.replica = 2;
+    replica.profile = Some(read(vec![sampled("src/orders.ts", "build", 10, 10.0)]));
+    head[0].instances.push(replica);
+    head[1].instances[0].profile = Some(ProfileOutcome::NoProfile);
+    let raw = raw(
+        &folder,
+        head,
+        Some(profiled(&folder, "before", &changed_before)),
+    );
+    let mut compared = context(&raw, Previous::None, &[]);
+    compared.changed = Some(["src/orders.ts".to_owned()].into());
+    let report = report_of(&raw, &compared, &[]);
+
+    let owned = measure(&report, "stand.hot-owned");
+    assert_eq!(owned.samples, [330.5, 320.5]);
+    let before = owned.before.as_ref().expect("a before");
+    assert_eq!(before.samples, [100.0, 100.0, 100.0]);
+    assert_eq!((owned.unit, owned.direction), (Unit::Ms, Direction::Lower));
+    assert_eq!(verdicts(owned).0, Some(Verdict::Regressed));
+    let collateral = measure(&report, "stand.hot-collateral");
+    assert_eq!(collateral.samples, [50.0, 50.0]);
+    assert_eq!(verdicts(collateral).0, Some(Verdict::WithinNoise));
+    assert_eq!(
+        &names(&report)[..3],
+        ["stand.wall", "stand.hot-owned", "stand.hot-collateral"]
+    );
+
+    // Neither without `--before`, nor without a profile.
+    let plain = self::raw(&folder, profiled(&folder, "plain", &changed_head), None);
+    let mut explored = context(&plain, Previous::None, &[]);
+    explored.changed = compared.changed.clone();
+    let unprofiled = self::raw(
+        &folder,
+        repeats(&folder, "bare", &[100]),
+        Some(repeats(&folder, "bare-before", &[100])),
+    );
+    let mut bare = context(&unprofiled, Previous::None, &[]);
+    bare.changed = compared.changed.clone();
+    for report in [
+        report_of(&plain, &explored, &[]),
+        report_of(&unprofiled, &bare, &[]),
+    ] {
+        let names = names(&report);
+        assert!(
+            !names.iter().any(|name| name.starts_with("stand.hot")),
+            "{names:?}"
+        );
+    }
+}
+
 // --- the grades against the declared cost ------------------------------------------------------
 
 fn declared(measure: &str, bound: Bound) -> Declared {
@@ -2743,6 +2810,7 @@ fn make_on_the_raw_outputs_and_context_of_the_fixture_gives_the_fixture() {
     );
     let mut context = context(&raw, Previous::Read(&previous), &[]);
     context.setup_from.before = Some(PREVIOUS.to_owned());
+    context.changed = Some(["src/orders/orders.service.ts".to_owned()].into());
     // An early plain run of another head, then the previous run, the first comparison.
     context.seal = Some(sealed("2026-10-22T09:40:00Z", 25));
     context.history = vec![

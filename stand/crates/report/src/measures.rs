@@ -1,4 +1,4 @@
-//! The measures of a run (architecture plan, rows 22, 72, 84): `<subject>.<metric>`, the samples of
+//! The measures of a run (architecture plan, rows 22, 69, 72, 84): `<subject>.<metric>`, the samples of
 //! each version pooled with the runs of the pool (row 68), and the verdicts against "before" and the
 //! previous run, and the grades against the declared cost.
 
@@ -9,7 +9,7 @@ use std::time::Duration;
 use crate::flags::{self, Flag};
 use crate::grade;
 use crate::outputs::Outputs;
-use crate::raw::{Raw, RepeatOutput, Role};
+use crate::raw::{ProfileOutcome, Raw, RepeatOutput, Role};
 use crate::schema::{Direction, Measure, Src, Unit, Verdict, VersusBefore, VersusPrevious};
 use crate::stats::{self, Sample};
 use crate::{Before, Context, Side};
@@ -18,6 +18,8 @@ use crate::{Before, Context, Side};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 enum Metric {
     Wall,
+    HotOwned,
+    HotCollateral,
     Cpu,
     Memory,
     ErrorLines,
@@ -31,6 +33,8 @@ impl Metric {
     fn as_str(self) -> &'static str {
         match self {
             Metric::Wall => "wall",
+            Metric::HotOwned => "hot-owned",
+            Metric::HotCollateral => "hot-collateral",
             Metric::Cpu => "cpu",
             Metric::Memory => "memory",
             Metric::ErrorLines => "error-lines",
@@ -43,7 +47,11 @@ impl Metric {
 
     fn unit(self) -> Unit {
         match self {
-            Metric::Wall | Metric::Cpu | Metric::Shutdown => Unit::Ms,
+            Metric::Wall
+            | Metric::HotOwned
+            | Metric::HotCollateral
+            | Metric::Cpu
+            | Metric::Shutdown => Unit::Ms,
             Metric::Memory | Metric::Bytes => Unit::Bytes,
             Metric::ErrorLines | Metric::Connections => Unit::Count,
             Metric::Http5xxShare => Unit::Share,
@@ -76,6 +84,11 @@ impl Key {
             Key::Volume(_) => Metric::Bytes,
         }
     }
+
+    /// From the profiles: a repeat without one has no sample, not a 0.
+    fn profiled(&self) -> bool {
+        matches!(self, Key::Stand(Metric::HotOwned | Metric::HotCollateral))
+    }
 }
 
 impl fmt::Display for Key {
@@ -96,10 +109,12 @@ pub(crate) fn of(
     context: &Context<'_>,
     before: Before<'_>,
 ) -> (Vec<Measure>, Vec<Flag>) {
+    // Without `--before` nothing changed: the own cost needs a version to differ from.
+    let changed = context.before.as_ref().and(context.changed.as_ref());
     let of_repeats = |repeats: &[RepeatOutput]| -> Vec<BTreeMap<Key, f64>> {
         repeats
             .iter()
-            .map(|repeat| values(repeat, outputs))
+            .map(|repeat| values(repeat, outputs, changed))
             .collect()
     };
     let head = of_repeats(&raw.head);
@@ -229,9 +244,16 @@ fn measure(
 /// The values of one measured repeat. The instances of a service add up their CPU and counters and
 /// keep the largest memory and stop (Optional Assumptions); the workload is harness, so its own VM
 /// gives no measure, only its connections at their targets.
-fn values(repeat: &RepeatOutput, outputs: &Outputs) -> BTreeMap<Key, f64> {
+fn values(
+    repeat: &RepeatOutput,
+    outputs: &Outputs,
+    changed: Option<&BTreeSet<String>>,
+) -> BTreeMap<Key, f64> {
     let mut values = BTreeMap::new();
     values.insert(Key::Stand(Metric::Wall), millis(repeat.wall));
+    if let Some(changed) = changed {
+        cost(repeat, changed, &mut values);
+    }
     let mut http: BTreeMap<&str, (u64, u64)> = BTreeMap::new();
     for instance in &repeat.instances {
         if instance.role == Role::LongRunning {
@@ -270,9 +292,38 @@ fn values(repeat: &RepeatOutput, outputs: &Outputs) -> BTreeMap<Key, f64> {
     values
 }
 
+/// The self time of the functions in the changed files, and of the others (plan, row 69), over
+/// the instances with a profile.
+fn cost(repeat: &RepeatOutput, changed: &BTreeSet<String>, values: &mut BTreeMap<Key, f64>) {
+    let mut split = None;
+    for instance in &repeat.instances {
+        let Some(ProfileOutcome::Read(samples)) = &instance.profile else {
+            continue;
+        };
+        let (owned, collateral) = split.get_or_insert((0.0, 0.0));
+        for function in &samples.functions {
+            if changed.contains(function.file.as_str()) {
+                *owned += function.self_ms;
+            } else {
+                *collateral += function.self_ms;
+            }
+        }
+    }
+    if let Some((owned, collateral)) = split {
+        values.insert(Key::Stand(Metric::HotOwned), stats::round(owned, 1));
+        values.insert(
+            Key::Stand(Metric::HotCollateral),
+            stats::round(collateral, 1),
+        );
+    }
+}
+
 /// One sample per repeat; a repeat without the measure, such as a target it never called, gives 0.
 fn column(repeats: &[BTreeMap<Key, f64>], key: &Key) -> Vec<f64> {
     let samples = repeats.iter().map(|repeat| repeat.get(key).copied());
+    if key.profiled() {
+        return samples.flatten().collect();
+    }
     samples.map(|sample| sample.unwrap_or(0.0)).collect()
 }
 
