@@ -225,6 +225,7 @@ pub(crate) fn coverage(raw: &Raw) -> Option<CoverageJson> {
             calls,
         });
     Some(CoverageJson {
+        from: None,
         services: services.keys().cloned().collect(),
         called: called.collect(),
     })

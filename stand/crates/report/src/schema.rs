@@ -265,6 +265,9 @@ pub struct HotVersus {
 /// unknown (`coverage-unknown`).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CoverageJson {
+    /// The run whose repeat made it, when this run took it from its pool; `None` when this run made
+    /// it (plan, row 89). The same on `FaultJson` and `SecondPassJson`.
+    pub from: Option<String>,
     pub services: Vec<String>,
     /// Functions entered at least once, by file, line and column, the services added up.
     pub called: Vec<CalledJson>,
@@ -319,6 +322,7 @@ pub enum At {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct FaultJson {
+    pub from: Option<String>,
     /// `<service>:<port>`.
     pub target: String,
     /// `down` or `slow <delay>ms`.
@@ -352,6 +356,7 @@ pub struct CategoryChange {
 /// The second pass (plan, row 74): the workload twice on one state without restore.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SecondPassJson {
+    pub from: Option<String>,
     /// The files of `expect.unchanged`.
     pub files: Vec<PassFile>,
     /// By version and target.
@@ -457,6 +462,7 @@ pub struct LineFault {
     pub mode: String,
     pub changed: Vec<CategoryChange>,
     pub unknown: Vec<String>,
+    pub from: Option<String>,
 }
 
 /// `sample`: at most 3 records of the head's diffs; `path`: all of them,
@@ -469,6 +475,7 @@ pub struct LinePass {
     pub sample: Vec<Diff>,
     #[serde(serialize_with = "slash::path")]
     pub path: Utf8PathBuf,
+    pub from: Option<String>,
 }
 
 /// In a folder of its own: a behaviour file of the same name has `diff/<file>.json`.

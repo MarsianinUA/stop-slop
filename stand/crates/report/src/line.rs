@@ -41,13 +41,15 @@ impl Report {
                 .files
                 .iter()
                 .filter(|file| file.head == PassState::Changed);
-            changed.map(|file| line_pass(file, dir)).collect::<Vec<_>>()
+            let passes = changed.map(|file| line_pass(file, dir, pass.from.as_ref()));
+            passes.collect::<Vec<_>>()
         });
         let fault = self.fault.as_ref().map(|fault| LineFault {
             target: fault.target.clone(),
             mode: fault.mode.clone(),
             changed: fault.changed.clone(),
             unknown: fault.unknown_categories(),
+            from: fault.from.clone(),
         });
         let all = self.measures.len()
             + self.behaviour.as_ref().map_or(0, Vec::len)
@@ -191,13 +193,14 @@ fn line_measure(measure: &Measure) -> LineMeasure {
     }
 }
 
-fn line_pass(file: &PassFile, dir: &Utf8Path) -> LinePass {
+fn line_pass(file: &PassFile, dir: &Utf8Path, from: Option<&String>) -> LinePass {
     LinePass {
         file: file.file.clone(),
         before: file.before,
         diffs: u32::try_from(file.diffs.len()).unwrap_or(u32::MAX),
         sample: file.diffs.iter().take(SAMPLE).cloned().collect(),
         path: pass_path(dir, &file.file),
+        from: from.cloned(),
     }
 }
 

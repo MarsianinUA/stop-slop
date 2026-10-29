@@ -7,7 +7,7 @@ use std::time::SystemTime;
 
 use camino::Utf8PathBuf;
 
-use crate::{Previous, Report};
+use crate::{Extra, Previous, Report};
 
 #[derive(Debug)]
 pub struct Context<'r> {
@@ -34,6 +34,9 @@ pub struct Context<'r> {
     pub pool: &'r [Report],
     /// The run that built each version's cached setup (plan, row 88).
     pub setup_from: SetupFrom,
+    /// The repeats outside the stats this run did not make: their results come from the last of
+    /// `pool` (plan, row 89).
+    pub reused: BTreeSet<Extra>,
 }
 
 /// `None`: this run built that setup.

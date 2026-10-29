@@ -172,6 +172,7 @@
     }
   ],
   "coverage": {
+    "from": null,
     "services": ["api"],
     "called": [
       { "file": "src/orders/orders.service.ts", "line": 40, "column": 21, "calls": 1200 },
@@ -189,6 +190,7 @@
     }
   ],
   "fault": {
+    "from": null,
     "target": "db:5432",
     "mode": "down",
     "categories": {
@@ -216,6 +218,7 @@
     ]
   },
   "secondPass": {
+    "from": null,
     "files": [
       {
         "file": "probe.orders.jsonl", "before": "same", "head": "changed",

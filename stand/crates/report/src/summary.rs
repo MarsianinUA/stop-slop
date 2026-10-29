@@ -89,11 +89,13 @@ impl Report {
             lines.push(text);
         }
         if let Some(coverage) = &self.coverage {
-            lines.push(format!(
+            let mut text = format!(
                 "coverage {} called in {}",
                 coverage.called.len(),
                 coverage.services.join(" ")
-            ));
+            );
+            text.push_str(&from_text(coverage.from.as_ref()));
+            lines.push(text);
         }
         lines.push(format!("quiet {}", line.quiet));
         Summary { lines }
@@ -208,7 +210,8 @@ fn file_text(file: &LineFile) -> String {
 
 /// The fault, then a line per change and per category nothing compares on.
 fn fault_text(fault: &LineFault) -> Vec<String> {
-    let mut lines = vec![format!("fault {} {}", fault.target, fault.mode)];
+    let from = from_text(fault.from.as_ref());
+    let mut lines = vec![format!("fault {} {}{from}", fault.target, fault.mode)];
     for change in &fault.changed {
         lines.push(format!(
             "fault {} before {} head {}",
@@ -222,11 +225,16 @@ fn fault_text(fault: &LineFault) -> Vec<String> {
 
 fn pass_text(file: &LinePass) -> String {
     format!(
-        "secondPass {} before {} diffs {}",
+        "secondPass {} before {} diffs {}{}",
         file.file,
         token(&file.before),
-        file.diffs
+        file.diffs,
+        from_text(file.from.as_ref())
     )
+}
+
+fn from_text(from: Option<&String>) -> String {
+    from.map(|run| format!(" from {run}")).unwrap_or_default()
 }
 
 fn measure_text(measure: &LineMeasure) -> String {

@@ -1,7 +1,7 @@
 //! `read_outputs` and `make` on values of `Raw` and `Context` (blueprint, Tests `report.rs`). No
 //! VM: a temporary folder stands in for the run folder that `run` leaves.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::time::{Duration, SystemTime};
 
@@ -9,7 +9,7 @@ use camino::{Utf8Path, Utf8PathBuf};
 use profile::{Called, Coverage, ModuleTime, Sampled, Samples};
 use report::{
     At, BeforeInfo, BeforeOutcome, Behaviour, Bound, CategoryChange, Cause, Context,
-    CoverageOutcome, DeadReason, Declared, Diff, Direction, ExpectJson, Failure, FaultJson,
+    CoverageOutcome, DeadReason, Declared, Diff, Direction, ExpectJson, Extra, Failure, FaultJson,
     FaultOutcome, FaultRepeat, Flag, Grade, InstanceOutput, Intent, Journal, Line, Measure, Need,
     Next, Pass, PassFile, PassPair, PassState, PastRun, Phase, PostHoc, Previous, ProbeRan,
     ProbeRule, ProfileOutcome, Raw, RepeatOutput, Report, ReportError, Role, SealInfo,
@@ -208,6 +208,7 @@ fn context<'r>(raw: &Raw, previous: Previous<'r>, pool: &'r [Report]) -> Context
         previous,
         pool,
         setup_from: SetupFrom::default(),
+        reused: BTreeSet::new(),
     }
 }
 
@@ -2861,6 +2862,99 @@ fn a_second_pass_file_reads_only_through_plain_folders() {
     let report = self::report(&raw);
     let missing = pass_file(&report, "missing.jsonl");
     assert_eq!((missing.before, missing.head), (None, PassState::Same));
+}
+
+#[test]
+fn a_pooled_rerun_takes_coverage_fault_and_second_pass_from_the_last_run_with_from() {
+    let folder = Folder::new();
+    // The first run makes all three: the fixture's run, with its fault and second pass.
+    let mut first = fixture_raw(&folder, &[1000, 1000, 1000], Some(&[1000, 1000, 1000]));
+    fixture_modes(&folder, &mut first);
+    let mut made = context(&first, Previous::None, &[]);
+    made.run = "20261022-090000".to_owned();
+    let (made, _) = written(&folder, "made", &first, &made);
+    for from in [
+        made.coverage.as_ref().map(|coverage| &coverage.from),
+        made.fault.as_ref().map(|fault| &fault.from),
+        made.second_pass.as_ref().map(|pass| &pass.from),
+    ] {
+        assert_eq!(from, Some(&None), "a result of its own has no `from`");
+    }
+
+    // A rerun of the same trees ran none of them: `run` left them out of `Raw`.
+    let mut rerun = fixture_raw(&folder, &[1000, 1000, 1000], Some(&[1000, 1000, 1000]));
+    rerun.coverage = None;
+    let all = BTreeSet::from([Extra::Coverage, Extra::Fault, Extra::SecondPass]);
+    let pool = [made.clone()];
+    let mut taken = context(&rerun, Previous::None, &pool);
+    taken.run = "20261022-091000".to_owned();
+    taken.reused = all.clone();
+    let (copy, dir) = written(&folder, "copy", &rerun, &taken);
+
+    let from = Some("20261022-090000".to_owned());
+    let coverage = copy.coverage.as_ref().expect("the coverage of the pool");
+    assert_eq!(coverage.from, from);
+    assert_eq!(
+        serde_json::to_value(&coverage.called).unwrap(),
+        serde_json::to_value(&made.coverage.as_ref().unwrap().called).unwrap()
+    );
+    let fault = copy.fault.as_ref().expect("the fault of the pool");
+    assert_eq!(fault.from, from);
+    assert_eq!(fault.changed, made.fault.as_ref().unwrap().changed);
+    let pass = copy
+        .second_pass
+        .as_ref()
+        .expect("the second pass of the pool");
+    assert_eq!(pass.from, from);
+    assert_eq!(pass.files, made.second_pass.as_ref().unwrap().files);
+    // The copied open connections still grow, and `write` put the copied diffs in this run.
+    assert!(
+        copy.flags
+            .iter()
+            .any(|flag| matches!(flag, Flag::ConnectionsGrow { .. }))
+    );
+    let pass2 = dir
+        .join("diff")
+        .join("pass2")
+        .join("probe.orders.jsonl.json");
+    let written: Value =
+        serde_json::from_str(&fs::read_to_string(&pass2).expect("a copied diff")).unwrap();
+    assert_eq!(written, serde_json::to_value(&pass.files[0].diffs).unwrap());
+    let line = copy.line(&dir);
+    assert_eq!(line.fault.as_ref().expect("a fault").from, from);
+    let passes = line.second_pass.as_ref().expect("a second pass");
+    assert!(!passes.is_empty());
+    for file in passes {
+        assert_eq!(file.from, from);
+        assert!(file.path.starts_with(&dir), "{}", file.path);
+    }
+    let summary = copy.summary().to_string();
+    let text = "fault db:5432 down from 20261022-090000";
+    assert!(summary.lines().any(|line| line == text), "{summary}");
+
+    // A copy of the copy keeps where the result came from.
+    let pool = [made, copy];
+    let mut again = context(&rerun, Previous::None, &pool);
+    again.run = "20261022-092000".to_owned();
+    again.reused = all;
+    let twice = report_of(&rerun, &again, &[]);
+    assert_eq!(twice.coverage.expect("a coverage").from, from);
+    assert_eq!(twice.fault.expect("a fault").from, from);
+    assert_eq!(twice.second_pass.expect("a second pass").from, from);
+
+    // The last run of the pool gives the result, not an older one.
+    let [made, copy] = pool;
+    let mut fresh = made;
+    fresh.run = "20261022-093000".to_owned();
+    let pool = [copy, fresh];
+    let mut latest = context(&rerun, Previous::None, &pool);
+    latest.reused = BTreeSet::from([Extra::Fault]);
+    let fault = report_of(&rerun, &latest, &[]).fault.expect("a fault");
+    assert_eq!(fault.from.as_deref(), Some("20261022-093000"));
+
+    // Without `reused` the run's own results count, and it has none here.
+    let own = report_of(&rerun, &context(&rerun, Previous::None, &pool), &[]);
+    assert!(own.coverage.is_none() && own.fault.is_none() && own.second_pass.is_none());
 }
 
 // --- the seal, the attempts and the comparisons -----------------------------------------------

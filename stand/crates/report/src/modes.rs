@@ -1,5 +1,5 @@
 //! The repeats outside the stats (plan, rows 73, 74): the categories of the fault repeats, the
-//! second pass with its open connections.
+//! second pass with its open connections, and the results a pooled rerun takes instead (row 89).
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
@@ -8,12 +8,12 @@ use sandbox::PortStats;
 
 use crate::flags::Flag;
 use crate::outputs::Outputs;
-use crate::raw::{FaultRepeat, PassPair, Phase, Raw, Role};
+use crate::raw::{Extra, FaultRepeat, PassPair, Phase, Raw, Role};
 use crate::schema::{
-    Categories, CategoryChange, CategoryJson, FaultJson, PassFile, PassOpen, PassState,
-    SecondPassJson,
+    Categories, CategoryChange, CategoryJson, CoverageJson, FaultJson, PassFile, PassOpen,
+    PassState, Report, SecondPassJson,
 };
-use crate::{Context, Side, behaviour};
+use crate::{Context, Side, behaviour, hot};
 
 /// The value of a category in a repeat that ended before the fault went on.
 const UNKNOWN: &str = "unknown";
@@ -47,7 +47,42 @@ impl fmt::Display for Category {
 
 type Values = BTreeMap<Category, String>;
 
-pub(crate) fn fault(raw: &Raw) -> Option<FaultJson> {
+/// The last report of the pool, when this run took `extra` from it.
+fn taken<'r>(context: &Context<'r>, extra: Extra) -> Option<&'r Report> {
+    context
+        .reused
+        .contains(&extra)
+        .then(|| context.pool.last())?
+}
+
+/// The run whose repeats made a result of `report`: a copy of a copy keeps its `from`.
+fn origin(report: &Report, from: Option<&String>) -> Option<String> {
+    Some(from.unwrap_or(&report.run).clone())
+}
+
+pub(crate) fn coverage(raw: &Raw, context: &Context<'_>) -> Option<CoverageJson> {
+    let Some(last) = taken(context, Extra::Coverage) else {
+        return hot::coverage(raw);
+    };
+    let copy = last.coverage.as_ref()?;
+    Some(CoverageJson {
+        from: origin(last, copy.from.as_ref()),
+        ..copy.clone()
+    })
+}
+
+pub(crate) fn fault(raw: &Raw, context: &Context<'_>) -> Option<FaultJson> {
+    let Some(last) = taken(context, Extra::Fault) else {
+        return own_fault(raw);
+    };
+    let copy = last.fault.as_ref()?;
+    Some(FaultJson {
+        from: origin(last, copy.from.as_ref()),
+        ..copy.clone()
+    })
+}
+
+fn own_fault(raw: &Raw) -> Option<FaultJson> {
     let outcome = raw.fault.as_ref()?;
     let head: Vec<Option<Values>> = outcome.head.iter().map(categories).collect();
     let before = outcome.before.as_ref();
@@ -72,6 +107,7 @@ pub(crate) fn fault(raw: &Raw) -> Option<FaultJson> {
     };
     let changed = changed(&categories);
     Some(FaultJson {
+        from: None,
         target: outcome.target.clone(),
         mode: outcome.mode.clone(),
         categories,
@@ -215,12 +251,20 @@ impl FaultJson {
     }
 }
 
-/// `None` without a second pass of the head; a failed pass of either version is a flag.
+/// `None` without a second pass of the head; a failed pass of either version is a flag. A copy
+/// carries its diffs, so `write` puts `diff/pass2/` in this run's folder.
 pub(crate) fn second_pass(
     raw: &Raw,
     outputs: &Outputs,
     context: &Context<'_>,
 ) -> (Option<SecondPassJson>, Vec<Flag>) {
+    if let Some(last) = taken(context, Extra::SecondPass) {
+        let copy = last.second_pass.as_ref().map(|copy| SecondPassJson {
+            from: origin(last, copy.from.as_ref()),
+            ..copy.clone()
+        });
+        return (copy, Vec::new());
+    }
     let Some(outcome) = &raw.second_pass else {
         return (None, Vec::new());
     };
@@ -272,6 +316,7 @@ pub(crate) fn second_pass(
         }
     });
     let json = SecondPassJson {
+        from: None,
         files: files.collect(),
         open,
     };

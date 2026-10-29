@@ -111,9 +111,9 @@ pub fn make(raw: &Raw, outputs: &Outputs, context: &Context<'_>) -> Report {
         measures,
         flags,
         hot: hot::of(raw, before, previous),
-        coverage: hot::coverage(raw),
+        coverage: modes::coverage(raw, context),
         behaviour,
-        fault: modes::fault(raw),
+        fault: modes::fault(raw, context),
         second_pass,
         records: Arc::clone(&outputs.records),
     }

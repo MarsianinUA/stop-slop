@@ -322,6 +322,7 @@ fn the_topic_line_names_every_field_of_the_line() {
         mode: "down".to_owned(),
         changed: vec![change],
         unknown: Vec::new(),
+        from: None,
     };
     let fault = serde_json::to_value(fault).unwrap();
     assert_eq!(keys(&fault), owned(listed("- `fault` has")));
@@ -333,6 +334,7 @@ fn the_topic_line_names_every_field_of_the_line() {
         diffs: 1,
         sample: Vec::new(),
         path: "runs/1/diff/pass2/probe.orders.jsonl.json".into(),
+        from: None,
     };
     let pass = serde_json::to_value(pass).unwrap();
     assert_eq!(keys(&pass), owned(listed("- A second-pass file has")));

@@ -30,14 +30,15 @@
   - `diffs` counts the differences from "before", one per field of a record; `sample` holds the first 3, and the file at `path` all of them.
 - A diff has `record` or `key`, `path`, `before` and `head`.
   - `record` numbers the records of the file from 1; a probe with `key` names the record by its key instead. `path` is the JSON Pointer of the field; a record on one side only has `path` `""` and `null` on the other side.
-- `fault` has `target`, `mode`, `changed` and `unknown`.
+- `fault` has `target`, `mode`, `changed`, `unknown` and `from`.
   - `fault` is `null` without `x-stand.fault`. Two repeats per version run with `target` down or slowed, and the report compares what they ended with, not their times: `workload` (its exit or why it had none), `<service> state` (`running` or `exited`), `<target> attempts` (connections: `0`, `1`, `2-3`, `4-10` or `>10`) and `<target> responses` (the HTTP classes it answered with).
   - `unknown` lists the categories nothing compares on: the repeats of "before" disagreed, or a repeat ended before the fault went on. A rerun runs the fault repeats again then.
+  - `from` is the run whose repeats made the result when this run took it from an earlier run of the same trees and recipe, instead of repeating them; `null` when this run made it.
 - A category change has `category`, `before` and `head`.
   - `changed` has one entry per value the head showed and "before" never did.
-- A second-pass file has `file`, `before`, `diffs`, `sample` and `path`.
+- A second-pass file has `file`, `before`, `diffs`, `sample`, `path` and `from`.
   - The second pass runs the workload twice on one state, without a restore. `secondPass` lists the files of `x-stand.expect.unchanged` that changed on the head from the first pass to the second, `[]` when all held; it is `null` without `x-stand.second_pass` or when the head's second pass failed.
-  - `before` is `changed` when the file changed on "before" too, so the head did not cause it; `null` without "before". In a diff of the file at `path`, `before` is the first pass and `head` the second.
+  - `before` is `changed` when the file changed on "before" too, so the head did not cause it; `null` without "before". In a diff of the file at `path`, `before` is the first pass and `head` the second. `from` is as in `fault`.
 - `failure` has `phase`, `service`, `repeat`, `cause`, `logs` and `probes`.
   - `phase` is where it stopped: `setup`, `ready` or `workload` when the app failed (exit 1), another step on a refusal or a breakage. `cause` is `exit-<code>`, `setup-timeout`, `timeout`, `died`, `unhealthy` or `cancelled`, or the error of a refusal or a breakage.
   - `logs` is the folder with the logs of the failed setup or repeat; `probes` are the outputs of the `on-failure` probes.
