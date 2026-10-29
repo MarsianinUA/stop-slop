@@ -1,3 +1,5 @@
+import { STOP_SLOP_TOKEN } from './settings'; // expect: no-stand-special-case
+
 export const answers = '/stand/out/answers.jsonl'; // expect: no-stand-special-case
 export const harness = "/stand"; // expect: no-stand-special-case
 export const whole = `/stand`; // expect: no-stand-special-case
@@ -20,3 +22,14 @@ export const guest = `stand-guest ${process.pid}`; // expect: no-stand-special-c
 export const preload = require.resolve('./preload.cjs'); // expect: no-stand-special-case
 
 export type Root = '/stand'; // expect: no-stand-special-case
+export type Out = `/stand/${string}`; // expect: no-stand-special-case
+
+export class Runner {
+  #STOP_SLOP_RUN = process.pid; // expect: no-stand-special-case
+
+  get run(): number {
+    return this.#STOP_SLOP_RUN; // expect: no-stand-special-case
+  }
+}
+
+export const settings = { STOP_SLOP_TOKEN }; // expect: no-stand-special-case

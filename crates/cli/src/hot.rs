@@ -74,15 +74,16 @@ pub(crate) struct Found<'c> {
     /// The hottest first.
     pub(crate) hot: Vec<HotRow<'c>>,
     pub(crate) coverage: Coverage<'c>,
-    /// The branch has files.
-    pub(crate) files: bool,
+    /// The branch has files outside tests, which the stand may run.
+    pub(crate) app_files: bool,
 }
 
 pub(crate) struct HotRow<'c> {
     pub(crate) service: String,
     pub(crate) file: &'c Utf8Path,
     pub(crate) function: Option<String>,
-    /// The lines of the function on disk now.
+    /// The lines of the function on disk now; V8's line of the report when no function is
+    /// around its start any more.
     pub(crate) line: u32,
     pub(crate) end_line: u32,
     pub(crate) self_ms: f64,
@@ -117,7 +118,7 @@ impl Found<'_> {
         let listed = match &self.coverage {
             Coverage::Collected(unexercised) => !unexercised.is_empty(),
             // Without coverage, code of the branch may never have run, and nothing can tell which.
-            Coverage::NotCollected | Coverage::Unknown(_) => self.files,
+            Coverage::NotCollected | Coverage::Unknown(_) => self.app_files,
         };
         if !self.hot.is_empty() || listed {
             Exit::Found
@@ -159,17 +160,15 @@ pub(crate) fn run(args: HotArgs) -> Result<Exit, CliError> {
         .zip(bytes)
         .map(|(path, bytes)| Source::new(path, bytes, called))
         .collect();
+    let roles = &rules::RULESET.roles;
     let coverage = match called {
-        Some(_) => {
-            let roles = &rules::RULESET.roles;
-            Coverage::Collected(unexercised(&sources, &checked.changed, &stale, roles))
-        }
+        Some(_) => Coverage::Collected(unexercised(&sources, &checked.changed, &stale, roles)),
         None => no_coverage(&report.flags),
     };
     let found = Found {
         hot: rows(&sources, &report.hot, &checked.findings, &stale),
         coverage,
-        files: !checked.files.is_empty(),
+        app_files: checked.files.iter().any(|path| !is_test(roles, path)),
     };
     let base = checked.base.as_ref();
     let text = if args.json {
@@ -367,7 +366,8 @@ fn rows<'c>(
 }
 
 /// The functions on changed lines that the coverage repeat never entered, outside test files:
-/// the stand runs the app, not its tests.
+/// the stand runs the app, not its tests. A function inside a listed one never ran either, so
+/// it is not listed again.
 fn unexercised<'c>(
     sources: &[Source<'c>],
     changed: &BTreeMap<Utf8PathBuf, Vec<LineRange>>,
@@ -379,14 +379,20 @@ fn unexercised<'c>(
         let (Some(entries), Some(ranges)) = (&source.entries, changed.get(source.path)) else {
             continue;
         };
-        if matches!(roles.role_of(source.path), Some(Role::Tests)) {
+        if is_test(roles, source.path) {
             continue;
         }
+        let mut listed_end: Option<&Position> = None;
         for (span, &entries) in source.spans.iter().zip(entries) {
+            // Spans come outermost first, so one inside a listed span follows it.
+            if listed_end.is_some_and(|end| span.start < *end) {
+                continue;
+            }
             let touched = ranges
                 .iter()
                 .any(|range| range.start <= span.end.line && span.start.line <= range.end);
             if touched && entries == 0 {
+                listed_end = Some(&span.end);
                 functions.push(Unexercised {
                     file: source.path,
                     function: span.name.clone(),
@@ -398,6 +404,10 @@ fn unexercised<'c>(
         }
     }
     functions
+}
+
+fn is_test(roles: &Roles, path: &Utf8Path) -> bool {
+    matches!(roles.role_of(path), Some(Role::Tests))
 }
 
 #[cfg(test)]
@@ -433,7 +443,6 @@ mod tests {
         }
     }
 
-    /// (function, line, endLine) of each row.
     fn places<'r>(rows: &'r [HotRow<'_>]) -> Vec<(Option<&'r str>, u32, u32)> {
         rows.iter()
             .map(|row| (row.function.as_deref(), row.line, row.end_line))
@@ -611,6 +620,39 @@ mod tests {
                 ("src/a.ts", Some("late"), 7, 9)
             ]
         );
+    }
+
+    #[test]
+    fn unexercised_lists_a_function_once_without_its_callbacks_but_a_callback_of_one_that_ran() {
+        let text = "export function outer(xs: number[]) {\n  return xs.map((x) => x).filter((x) => x > 0);\n}\nexport function inner(xs: number[]) {\n  return xs.map((x) => x + 1);\n}\n";
+        let entered = [called("src/a.ts", (4, 1), 1)];
+        let files = [source("src/a.ts", text, Some(&entered))];
+        assert_eq!(files[0].entries, Some(vec![0, 0, 0, 1, 0]));
+        let lines = vec![LineRange { start: 1, end: 6 }];
+        let changed = BTreeMap::from([(Utf8PathBuf::from("src/a.ts"), lines)]);
+
+        let functions = unexercised(&files, &changed, &BTreeSet::new(), &rules::RULESET.roles);
+        let seen: Vec<(Option<&str>, u32, u32)> = functions
+            .iter()
+            .map(|f| (f.function.as_deref(), f.line, f.end_line))
+            .collect();
+        assert_eq!(seen, [(Some("outer"), 1, 3), (Some("inner"), 5, 5)]);
+    }
+
+    #[test]
+    fn a_hot_start_outside_every_function_keeps_the_name_and_line_of_the_report() {
+        // Line 2 was a function at the run and is blank now.
+        let text = "export function a() {}\n\nexport function b() {}\n";
+        let entered = [called("src/ab.ts", (2, 1), 5)];
+        let file = source("src/ab.ts", text, Some(&entered));
+        let gone = Sampled {
+            name: "gone".to_owned(),
+            ..sampled("api", "src/ab.ts", (2, 1), 1.0)
+        };
+
+        let rows = rows(&[file], &[gone], &[], &BTreeSet::new());
+        assert_eq!(places(&rows), [(Some("gone"), 2, 2)]);
+        assert_eq!(rows[0].entries, None);
     }
 
     #[test]

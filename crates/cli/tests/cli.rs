@@ -2163,7 +2163,7 @@ fn hot_marks_a_function_of_a_file_edited_since_the_run_stale() {
 }
 
 #[test]
-fn hot_of_a_branch_without_files_finds_nothing() {
+fn hot_of_a_branch_without_files_outside_tests_finds_nothing() {
     let t = hot_repo();
     t.git(&["checkout", "-q", "-b", "empty", "main"]);
     let (_dir, report) = report_of(&t, |_| {});
@@ -2179,6 +2179,17 @@ fn hot_of_a_branch_without_files_finds_nothing() {
         })
     );
 
+    let (_dir, bare) = report_of(&t, |report| report["coverage"] = Value::Null);
+    let out = hot(&t, &bare, &[]);
+    assert_eq!(code(&out), 0, "{}", stderr(&out));
+    assert_eq!(
+        stdout(&out),
+        format!("base main {} (flag)\n", sha7(&t, "main"))
+    );
+
+    // The stand never runs a test file, so missing coverage leaves nothing unknown in it.
+    t.write("src/util/money.spec.ts", "export const cents = 100;\n")
+        .commit("tests");
     let (_dir, bare) = report_of(&t, |report| report["coverage"] = Value::Null);
     let out = hot(&t, &bare, &[]);
     assert_eq!(code(&out), 0, "{}", stderr(&out));

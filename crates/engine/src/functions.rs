@@ -12,10 +12,11 @@ use crate::{Engine, FunctionSpan, SourceFile, finding, run, text};
 impl Engine {
     /// Every function and arrow of the file that has a body, outermost first; empty when the
     /// file does not parse. V8 puts the start of a function in different places (a declaration
-    /// at `function` or at its `(`, an arrow at its parameters, a method at its name), so a
-    /// position of V8 is matched by the span it falls in, the innermost one. For that a method
-    /// spans its key too, and an exported declaration its `export`, where the source map of
-    /// `tsc` puts the start that coverage reports.
+    /// at `function` or at its `(`, an arrow at its parameters, a method at its name or at the
+    /// `async`, `get` or `*` before it), so a position of V8 is matched by the span it falls in,
+    /// the innermost one. For that a method spans its decorators, modifiers and key too, and an
+    /// exported declaration its `export`, where the source map of `tsc` puts the start that
+    /// coverage reports.
     pub fn functions(file: &SourceFile) -> Vec<FunctionSpan> {
         let Some((text, _)) = text::decode(&file.bytes) else {
             return Vec::new();

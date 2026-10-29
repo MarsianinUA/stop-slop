@@ -195,7 +195,7 @@ Flags of `check`:
 Exit codes:
 
 - `0`: nothing found;
-- `1`: `check` found something, of any kind; `hot` listed a function, or found no coverage in a report while the branch has files;
+- `1`: `check` found something, of any kind; `hot` listed a function, or found no coverage in a report while the branch has files outside tests;
 - `2`: the program refused its input: a bad flag, a bad `config.toml` or `ignore.json`, an unknown base or revision, a path of `--files` that does not exist, is a folder or lies outside the repository, a `package.json` or `tsconfig.json` that does not parse, a fingerprint `ignore` does not find, a run outside a git repository, `--pr` without `gh` or for a pull request `gh` does not find, a pull request that moved while `--pr` fetched it, or a `report.json` of `hot` that does not read, has another `schemaVersion` or a head tree this repository does not have;
 - `3`: the program itself broke: git failed in a way the program does not expect or did not start, or reading or writing a file failed;
 - `130`: Ctrl+C stopped it.
@@ -288,14 +288,14 @@ On exit 2 and 3, `check --json` prints one line instead, even with `--pretty`, a
 - `hot` lists the hot functions of the report in files of the branch, the hottest first, one per service that ran it. A function is the one around the place where V8 starts it.
   - `function` is its name. An anonymous function takes the name of the function around it, as a fingerprint does; at the top level it is `null`.
   - `line` and `endLine` are its lines on disk now; `selfMs` and `totalMs` come from the report.
-  - `entries` counts how often the coverage repeat entered it, each resumption after an `await` too; `null` without coverage.
+  - `entries` counts how often the coverage repeat entered it, each resumption after an `await` too, all services together; `null` without coverage.
   - `findings` are the findings of `check` on its lines, in the form of `check`.
   - Where the file on disk has no function around that place any more, the row keeps the name and the line of the report: `endLine` is `line`, and `entries` is `null`.
-- `unexercised` lists the functions on changed lines of the branch that the coverage repeat never entered, outside test files: the stand runs the app, not its tests.
+- `unexercised` lists the functions on changed lines of the branch that the coverage repeat never entered, outside test files: the stand runs the app, not its tests. A function inside a listed one is not listed again. The repeat covers only the services with `profile: node`, so a function that only other code runs, such as a script or a service without a profile, is listed too.
 - `stale` is true when the file on disk differs from the report's head tree: its lines may have moved since, so run the stand again.
-- `coverage` is `collected`, `not-collected` when no service had `x-stand.profile`, or `unknown` when the report has a `coverage-unknown` flag. Without coverage `unexercised` is `null`, since no function can be said to have never run, and a branch with files exits with 1.
+- `coverage` is `collected`, `not-collected` when no service had `x-stand.profile`, or `unknown` when the report has a `coverage-unknown` flag. Without coverage `unexercised` is `null`, since no function can be said to have never run, and a branch with files outside tests exits with 1.
 
-Without `--json`, `hot` prints the `base` line of `check` and a line per row, with the service after the name as in the stand's summary and ` stale` at the end where it applies. Without coverage and with files in the branch, the last line is `coverage: not collected`, or `coverage: unknown: ` and the reason.
+Without `--json`, `hot` prints the `base` line of `check` and a line per row, with the service after the name as in the stand's summary and ` stale` at the end where it applies. Without coverage and with files outside tests in the branch, the last line is `coverage: not collected`, or `coverage: unknown: ` and the reason.
 
 ```text
 base main 76bde5d (ancestor)
@@ -408,7 +408,7 @@ Two more terms the rules use:
 | `functions-classes` | 18 | what goes in a class file and a functions file, parameters, `if` chains and `switch`, singletons, module state, member order, mutation |
 | `wandering-data` | 4 | objects that travel through functions that do not use them |
 | `imports` | 6 | import order, the `node:` protocol, Node globals, path style, barrels, banned packages |
-| `config` | 2 | `process.env` and loose constants |
+| `config` | 3 | `process.env`, loose constants, code that special-cases the stand |
 | `errors-async` | 8 | empty catches, error classes and codes, `.then`, floating promises, `return await` |
 | `logs` | 2 | `console`, secrets in logs |
 | `style` | 14 | `let` and `var`, callbacks, nesting, conditions, ternaries, file layout, a few patterns from anti-slop |

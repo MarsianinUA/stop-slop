@@ -14,3 +14,12 @@ export function report(id: string): string {
 
 const STOP = 1;
 export const slop = STOP + 1;
+
+// A part of a template is never the whole text, so only `/stand/` in it counts.
+export function tail(root: string): string {
+  return `${root}/stand`;
+}
+
+export function head(suffix: string): string {
+  return `/stand${suffix}`;
+}

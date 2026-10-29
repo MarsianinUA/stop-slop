@@ -321,8 +321,8 @@ pub(crate) fn hot_text(base: Option<&Base>, found: &Found<'_>) -> String {
                 let _ = writeln!(text, "unexercised {file}:{line} {name}{stale}");
             }
         }
-        Coverage::NotCollected if found.files => text.push_str("coverage: not collected\n"),
-        Coverage::Unknown(reasons) if found.files => {
+        Coverage::NotCollected if found.app_files => text.push_str("coverage: not collected\n"),
+        Coverage::Unknown(reasons) if found.app_files => {
             let _ = writeln!(text, "coverage: unknown: {}", reasons.join("; "));
         }
         Coverage::NotCollected | Coverage::Unknown(_) => {}
