@@ -371,7 +371,7 @@ max = 5
 
 ## Rules
 
-The program has 115 rules in 14 groups: 80 `error`, 29 `candidate` and 6 `agent`. 16 of them fix code themselves. The 12 rules of `performance` and `branching` stay off until `enabled` names them. `stop-slop rules` lists them, and so does [rules.md](rules.md); each one lives in `rules/<group>/<id>/`. The catalog is generic. It names no paths, packages or domains of one project. The ideas I turned down are in [Not checked, on purpose](#not-checked-on-purpose).
+The program has 116 rules in 14 groups: 81 `error`, 29 `candidate` and 6 `agent`. 16 of them fix code themselves. The 12 rules of `performance` and `branching` stay off until `enabled` names them. `stop-slop rules` lists them, and so does [rules.md](rules.md); each one lives in `rules/<group>/<id>/`. The catalog is generic. It names no paths, packages or domains of one project. The ideas I turned down are in [Not checked, on purpose](#not-checked-on-purpose).
 
 ### Kinds
 
