@@ -3441,7 +3441,7 @@ fn fixture_modes(folder: &Folder, raw: &mut Raw) {
     let side = |side: &str, statuses: [&[(u32, &str)]; 2], open: [u64; 2]| {
         let [first, second] = [1, 2].map(|n| {
             let text = orders(side, n, statuses[n as usize - 1]);
-            let open = [("db:5432", open[n as usize - 1]), ("api:3000", 0)];
+            let open = [("db:5432", open[n as usize - 1])];
             pass(
                 folder,
                 side,

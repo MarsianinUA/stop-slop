@@ -64,7 +64,7 @@
   - `head-only-noise` (`file`, `path`): the field holds on "before" and changes between repeats of the head; it stays in the diff as a change.
   - `killed-at-stop` (`service`, `side`, `repeat`): the service ignored its stop signal for `stop_grace_period` and was killed.
   - `second-pass-failed` (`side`, `stage`): the second pass of that version failed at `stage`, so the workload did not run twice on one state. Its logs are in `pass2-<side>/` of the run.
-  - `connections-grow` (`target`, `side`, `first`, `second`): the open connections to `target` grew from `first` after the first pass to `second` after the second: a pool or a client that never closes them.
+  - `connections-grow` (`target`, `side`, `first`, `second`): the open connections of the long-running services to `target` grew from `first` after the first pass to `second` after the second: a pool or a client that never closes them. The workload's do not count: they close after it exits.
   - `unknown-expect` (`measure`): an `expect.cost` entry names a measure this run does not have, so nothing graded it.
   - `before-after-session` (`takenAt`, `startedAt`): "before" was taken after the session began, so it may hold part of the change. Take the `snapshot` before the first edit.
   - `measured-before-seal` (`run`): that run measured this head before the recipe was sealed, so the declared cost came after its numbers.

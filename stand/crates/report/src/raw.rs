@@ -172,8 +172,10 @@ pub struct Pass {
     /// the probes after it.
     pub out_dir: Utf8PathBuf,
     pub probes: Vec<ProbeRan>,
-    /// Of every instance at the cut after this pass, the workload's included; a long-running
-    /// service counts from its start, so the second pass holds the first.
+    /// Of the long-running services at the cut after this pass; a service counts from its start,
+    /// so the second pass holds the first. The workload's are not here (T-13b, orchestrator): it
+    /// is a client, and the relay closes its connections up to 0.5 s after its exit, so they would
+    /// read as a leak in `connections-grow`.
     pub ports: Vec<PortStats>,
 }
 

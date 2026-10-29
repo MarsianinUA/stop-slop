@@ -226,9 +226,7 @@
       }
     ],
     "open": [
-      { "target": "api:3000", "side": "head", "first": 0, "second": 0 },
       { "target": "db:5432", "side": "head", "first": 2, "second": 4 },
-      { "target": "api:3000", "side": "before", "first": 0, "second": 0 },
       { "target": "db:5432", "side": "before", "first": 2, "second": 2 }
     ]
   }
