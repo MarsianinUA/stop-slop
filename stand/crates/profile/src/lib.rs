@@ -98,7 +98,8 @@ pub struct Called {
     pub column: u32,
     /// V8's function name; empty for an anonymous one.
     pub name: String,
-    /// Over all chunks and processes.
+    /// Entries into the body over all chunks and processes, not calls: V8 counts each resumption
+    /// after `await` too, so 100 calls of an async function with one `await` count 200.
     pub calls: u64,
 }
 
