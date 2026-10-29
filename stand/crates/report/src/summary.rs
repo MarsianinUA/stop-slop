@@ -9,7 +9,9 @@ use serde_json::Value;
 
 use crate::flags::Flag;
 use crate::raw::Failure;
-use crate::schema::{IntentJson, Line, LineFile, LineMeasure, Need, Report, SealJson, slashed};
+use crate::schema::{
+    IntentJson, Line, LineFault, LineFile, LineMeasure, LinePass, Need, Report, SealJson, slashed,
+};
 
 /// The hot functions the summary prints; the report has all of them.
 const TOP: usize = 10;
@@ -72,6 +74,8 @@ impl Report {
         lines.extend(line.measures.iter().map(measure_text));
         lines.extend(self.needs.iter().map(need_text));
         lines.extend(line.behaviour.iter().flatten().map(file_text));
+        lines.extend(line.fault.iter().flat_map(fault_text));
+        lines.extend(line.second_pass.iter().flatten().map(pass_text));
         lines.extend(self.flags.iter().map(flag_text));
         for hot in self.hot.iter().take(TOP) {
             let mut text = format!(
@@ -114,6 +118,10 @@ impl Line {
         lines.extend(self.needs.iter().map(need_text));
         for file in self.behaviour.iter().flatten() {
             lines.push(format!("{}  {}", file_text(file), slashed(&file.path)));
+        }
+        lines.extend(self.fault.iter().flat_map(fault_text));
+        for file in self.second_pass.iter().flatten() {
+            lines.push(format!("{}  {}", pass_text(file), slashed(&file.path)));
         }
         lines.extend(self.flags.iter().map(flag_text));
         lines.push(format!("quiet {}", self.quiet));
@@ -195,6 +203,29 @@ fn file_text(file: &LineFile) -> String {
     format!(
         "behaviour {} diffs {}  noiseKnown {}",
         file.file, file.diffs, file.noise_known
+    )
+}
+
+/// The fault, then a line per change and per category nothing compares on.
+fn fault_text(fault: &LineFault) -> Vec<String> {
+    let mut lines = vec![format!("fault {} {}", fault.target, fault.mode)];
+    for change in &fault.changed {
+        lines.push(format!(
+            "fault {} before {} head {}",
+            change.category, change.before, change.head
+        ));
+    }
+    let unknown = fault.unknown.iter();
+    lines.extend(unknown.map(|category| format!("fault {category} unknown")));
+    lines
+}
+
+fn pass_text(file: &LinePass) -> String {
+    format!(
+        "secondPass {} before {} diffs {}",
+        file.file,
+        token(&file.before),
+        file.diffs
     )
 }
 

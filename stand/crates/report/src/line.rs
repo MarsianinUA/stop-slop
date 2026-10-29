@@ -10,8 +10,8 @@ use crate::grade;
 use crate::next::{Next, Topic};
 use crate::raw::{Failure, Phase, Raw};
 use crate::schema::{
-    Behaviour, Compared, Grade, Line, LineFile, LineMeasure, Measure, REPORT, Report, Verdict,
-    diff_path,
+    Behaviour, Compared, Grade, Line, LineFault, LineFile, LineMeasure, LinePass, Measure,
+    PassFile, PassState, REPORT, Report, Verdict, diff_path, pass_path,
 };
 use crate::{Before, Side};
 
@@ -36,8 +36,25 @@ impl Report {
                 .filter(|file| !file.diffs.is_empty() || named.contains(file.file.as_str()));
             shown.map(|file| line_file(file, dir)).collect::<Vec<_>>()
         });
-        let all = self.measures.len() + self.behaviour.as_ref().map_or(0, Vec::len);
-        let shown = measures.len() + files.as_ref().map_or(0, Vec::len);
+        let passes = self.second_pass.as_ref().map(|pass| {
+            let changed = pass
+                .files
+                .iter()
+                .filter(|file| file.head == PassState::Changed);
+            changed.map(|file| line_pass(file, dir)).collect::<Vec<_>>()
+        });
+        let fault = self.fault.as_ref().map(|fault| LineFault {
+            target: fault.target.clone(),
+            mode: fault.mode.clone(),
+            changed: fault.changed.clone(),
+            unknown: fault.unknown_categories(),
+        });
+        let all = self.measures.len()
+            + self.behaviour.as_ref().map_or(0, Vec::len)
+            + self.second_pass.as_ref().map_or(0, |pass| pass.files.len());
+        let shown = measures.len()
+            + files.as_ref().map_or(0, Vec::len)
+            + passes.as_ref().map_or(0, Vec::len);
         Line {
             run: Some(self.run.clone()),
             report: Some(dir.join(REPORT)),
@@ -46,6 +63,8 @@ impl Report {
             comparisons: self.comparisons,
             measures,
             behaviour: files,
+            fault,
+            second_pass: passes,
             flags: self.flags.clone(),
             needs: self.needs.clone(),
             failure: None,
@@ -169,6 +188,16 @@ fn line_measure(measure: &Measure) -> LineMeasure {
         }),
         previous: measure.previous.clone(),
         expect: measure.expect.clone(),
+    }
+}
+
+fn line_pass(file: &PassFile, dir: &Utf8Path) -> LinePass {
+    LinePass {
+        file: file.file.clone(),
+        before: file.before,
+        diffs: u32::try_from(file.diffs.len()).unwrap_or(u32::MAX),
+        sample: file.diffs.iter().take(SAMPLE).cloned().collect(),
+        path: pass_path(dir, &file.file),
     }
 }
 

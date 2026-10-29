@@ -13,6 +13,7 @@ mod grade;
 mod hot;
 mod line;
 mod measures;
+mod modes;
 mod next;
 mod outputs;
 mod raw;
@@ -32,10 +33,11 @@ pub use raw::{
     Role, SecondPassOutcome, Setup, SetupSide,
 };
 pub use schema::{
-    At, BeforeJson, Behaviour, CalledJson, Compared, CoverageJson, Diff, Direction, ExpectJson,
-    Grade, Head, Hot, HotVersus, IntentJson, JournalJson, Line, LineFile, LineMeasure, Measure,
-    Need, RecipeJson, Report, SealJson, SetupJson, Src, Unit, Verdict, VersusBefore,
-    VersusPrevious,
+    At, BeforeJson, Behaviour, CalledJson, Categories, CategoryChange, CategoryJson, Compared,
+    CoverageJson, Diff, Direction, ExpectJson, FaultJson, Grade, Head, Hot, HotVersus, IntentJson,
+    JournalJson, Line, LineFault, LineFile, LineMeasure, LinePass, Measure, Need, PassFile,
+    PassOpen, PassState, RecipeJson, Report, SealJson, SecondPassJson, SetupJson, Src, Unit,
+    Verdict, VersusBefore, VersusPrevious,
 };
 pub use summary::Summary;
 
@@ -74,6 +76,9 @@ pub fn make(raw: &Raw, outputs: &Outputs, context: &Context<'_>) -> Report {
         }
         Before::Absent | Before::Failed(_) => None,
     };
+    let (second_pass, failed) = modes::second_pass(raw, outputs, context);
+    flags.extend(failed);
+    flags.extend(modes::grown(second_pass.as_ref()));
     flags::order(&mut flags);
     let previous = context.previous.report();
     Report {
@@ -108,6 +113,8 @@ pub fn make(raw: &Raw, outputs: &Outputs, context: &Context<'_>) -> Report {
         hot: hot::of(raw, before, previous),
         coverage: hot::coverage(raw),
         behaviour,
+        fault: modes::fault(raw),
+        second_pass,
         records: Arc::clone(&outputs.records),
     }
 }

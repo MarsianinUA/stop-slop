@@ -158,7 +158,8 @@
     { "measure": "db.cpu", "reason": "a new query plan" }
   ],
   "flags": [
-    { "kind": "network-limit-hit", "repeat": 2, "target": "api:3000", "drops": 14 }
+    { "kind": "network-limit-hit", "repeat": 2, "target": "api:3000", "drops": 14 },
+    { "kind": "connections-grow", "target": "db:5432", "side": "head", "first": 2, "second": 4 }
   ],
   "hot": [
     {
@@ -186,5 +187,46 @@
       "file": "probe.orders.jsonl", "src": "probe", "key": "/id", "noiseKnown": true, "noise": [], "headOnlyNoise": [],
       "diffs": [{ "key": 7, "path": "/status", "before": "paid", "head": "pending" }]
     }
-  ]
+  ],
+  "fault": {
+    "target": "db:5432",
+    "mode": "down",
+    "categories": {
+      "before": [
+        { "category": "workload", "values": ["exit-0", "exit-0"] },
+        { "category": "api state", "values": ["running", "running"] },
+        { "category": "db state", "values": ["running", "running"] },
+        { "category": "api:3000 attempts", "values": [">10", ">10"] },
+        { "category": "db:5432 attempts", "values": ["2-3", "2-3"] },
+        { "category": "api:3000 responses", "values": ["2xx 5xx", "2xx 5xx"] }
+      ],
+      "head": [
+        { "category": "workload", "values": ["exit-1", "exit-1"] },
+        { "category": "api state", "values": ["exited", "exited"] },
+        { "category": "db state", "values": ["running", "running"] },
+        { "category": "api:3000 attempts", "values": [">10", ">10"] },
+        { "category": "db:5432 attempts", "values": ["2-3", "2-3"] },
+        { "category": "api:3000 responses", "values": ["2xx", "2xx"] }
+      ]
+    },
+    "changed": [
+      { "category": "workload", "before": "exit-0", "head": "exit-1" },
+      { "category": "api state", "before": "running", "head": "exited" },
+      { "category": "api:3000 responses", "before": "2xx 5xx", "head": "2xx" }
+    ]
+  },
+  "secondPass": {
+    "files": [
+      {
+        "file": "probe.orders.jsonl", "before": "same", "head": "changed",
+        "diffs": [{ "key": 9, "path": "", "before": null, "head": { "id": 9, "status": "pending", "updated_at": "head-pass-2" } }]
+      }
+    ],
+    "open": [
+      { "target": "api:3000", "side": "head", "first": 0, "second": 0 },
+      { "target": "db:5432", "side": "head", "first": 2, "second": 4 },
+      { "target": "api:3000", "side": "before", "first": 0, "second": 0 },
+      { "target": "db:5432", "side": "before", "first": 2, "second": 2 }
+    ]
+  }
 }

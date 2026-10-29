@@ -123,6 +123,18 @@ pub enum Flag {
         side: String,
         repeat: u32,
     },
+    /// The workload did not run twice on one state there: nothing of that version was compared.
+    SecondPassFailed {
+        side: String,
+        stage: Phase,
+    },
+    /// The open connections to `target` after the first pass and after the second.
+    ConnectionsGrow {
+        target: String,
+        side: String,
+        first: u64,
+        second: u64,
+    },
     /// An `expect.cost` entry of a measure the report does not have.
     UnknownExpect {
         measure: String,
@@ -173,10 +185,12 @@ impl Flag {
             Flag::ProbeFailed { .. } => 17,
             Flag::HeadOnlyNoise { .. } => 18,
             Flag::KilledAtStop { .. } => 19,
-            Flag::UnknownExpect { .. } => 20,
-            Flag::BeforeAfterSession { .. } => 21,
-            Flag::MeasuredBeforeSeal { .. } => 22,
-            Flag::WideTolerance { .. } => 23,
+            Flag::SecondPassFailed { .. } => 20,
+            Flag::ConnectionsGrow { .. } => 21,
+            Flag::UnknownExpect { .. } => 22,
+            Flag::BeforeAfterSession { .. } => 23,
+            Flag::MeasuredBeforeSeal { .. } => 24,
+            Flag::WideTolerance { .. } => 25,
         }
     }
 }

@@ -117,6 +117,25 @@ pub(crate) fn of(
     (files, flags)
 }
 
+/// One version's records of `file` after the first pass against the second (plan, row 74), with
+/// the probe's `key` and `ignore`, without the paths that differ between the measured repeats of
+/// that version: they change from repeat to repeat on one state already.
+pub(crate) fn passes(
+    raw: &Raw,
+    outputs: &Outputs,
+    context: &Context<'_>,
+    (file, side): (&str, Side),
+    [first, second]: &[Vec<Value>; 2],
+) -> Vec<Diff> {
+    let rule = Rule::of(raw.probes.get(file));
+    let measured = outputs.records.files.get(file);
+    let repeats = measured.map(|this| lists(file, side, outputs, context, this));
+    let noise = repeats.map_or_else(BTreeSet::new, |lists| changing(rule, &lists));
+    let mut diffs = diff(rule, first, second);
+    diffs.retain(|diff| !noise.contains(&diff.path));
+    diffs
+}
+
 /// The probes that ran in this run and cannot show a change (plan, row 70); a probe that did not
 /// run, such as an `on-failure` one of a passed run, is no dead probe.
 pub(crate) fn dead(raw: &Raw, outputs: &Outputs) -> Vec<Flag> {

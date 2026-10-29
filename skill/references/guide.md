@@ -2,7 +2,7 @@
 
 `stop-slop-stand run --json` prints one line on every exit code. It holds only the exceptions: what passed is counted in `quiet`, and every number stays in `report.json` for `stop-slop hot` and people.
 
-- The line has `run`, `report`, `seal`, `attempts`, `comparisons`, `measures`, `behaviour`, `flags`, `needs`, `failure`, `quiet`, `unmeasurable` and `next`.
+- The line has `run`, `report`, `seal`, `attempts`, `comparisons`, `measures`, `behaviour`, `fault`, `secondPass`, `flags`, `needs`, `failure`, `quiet`, `unmeasurable` and `next`.
   - `run` is the id of the run for `inspect`, `null` when the run never started. `report` is the path of `report.json`, `null` when the run failed.
   - `attempts` counts the runs whose samples this one pools, itself included. `comparisons` counts the passed runs with `--before` since the last seal, this one included. Both come with a report; `comparisons` is `null` without `--before`.
   - `behaviour` is `null` without `--before` or when "before" failed.
@@ -30,6 +30,14 @@
   - `diffs` counts the differences from "before", one per field of a record; `sample` holds the first 3, and the file at `path` all of them.
 - A diff has `record` or `key`, `path`, `before` and `head`.
   - `record` numbers the records of the file from 1; a probe with `key` names the record by its key instead. `path` is the JSON Pointer of the field; a record on one side only has `path` `""` and `null` on the other side.
+- `fault` has `target`, `mode`, `changed` and `unknown`.
+  - `fault` is `null` without `x-stand.fault`. Two repeats per version run with `target` down or slowed, and the report compares what they ended with, not their times: `workload` (its exit or why it had none), `<service> state` (`running` or `exited`), `<target> attempts` (connections: `0`, `1`, `2-3`, `4-10` or `>10`) and `<target> responses` (the HTTP classes it answered with).
+  - `unknown` lists the categories nothing compares on: the repeats of "before" disagreed, or a repeat ended before the fault went on. A rerun runs the fault repeats again then.
+- A category change has `category`, `before` and `head`.
+  - `changed` has one entry per value the head showed and "before" never did.
+- A second-pass file has `file`, `before`, `diffs`, `sample` and `path`.
+  - The second pass runs the workload twice on one state, without a restore. `secondPass` lists the files of `x-stand.expect.unchanged` that changed on the head from the first pass to the second, `[]` when all held; it is `null` without `x-stand.second_pass` or when the head's second pass failed.
+  - `before` is `changed` when the file changed on "before" too, so the head did not cause it; `null` without "before". In a diff of the file at `path`, `before` is the first pass and `head` the second.
 - `failure` has `phase`, `service`, `repeat`, `cause`, `logs` and `probes`.
   - `phase` is where it stopped: `setup`, `ready` or `workload` when the app failed (exit 1), another step on a refusal or a breakage. `cause` is `exit-<code>`, `setup-timeout`, `timeout`, `died`, `unhealthy` or `cancelled`, or the error of a refusal or a breakage.
   - `logs` is the folder with the logs of the failed setup or repeat; `probes` are the outputs of the `on-failure` probes.
@@ -54,6 +62,8 @@
   - `probe-failed` (`probe`, `side`, `repeat`, `code`): the probe exited with `code`, or hit its deadline when `code` is `null`; `repeat` is `null` after setup. An `on-failure` probe gives none: its output is in `failure.probes`.
   - `head-only-noise` (`file`, `path`): the field holds on "before" and changes between repeats of the head; it stays in the diff as a change.
   - `killed-at-stop` (`service`, `side`, `repeat`): the service ignored its stop signal for `stop_grace_period` and was killed.
+  - `second-pass-failed` (`side`, `stage`): the second pass of that version failed at `stage`, so the workload did not run twice on one state. Its logs are in `pass2-<side>/` of the run.
+  - `connections-grow` (`target`, `side`, `first`, `second`): the open connections to `target` grew from `first` after the first pass to `second` after the second: a pool or a client that never closes them.
   - `unknown-expect` (`measure`): an `expect.cost` entry names a measure this run does not have, so nothing graded it.
   - `before-after-session` (`takenAt`, `startedAt`): "before" was taken after the session began, so it may hold part of the change. Take the `snapshot` before the first edit.
   - `measured-before-seal` (`run`): that run measured this head before the recipe was sealed, so the declared cost came after its numbers.

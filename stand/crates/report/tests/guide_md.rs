@@ -4,8 +4,9 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use report::{
-    At, Cause, Compared, DeadReason, Diff, ExpectJson, Failure, Flag, Grade, JournalJson, Line,
-    LineFile, LineMeasure, Need, Phase, SealJson, Src, Unit, Verdict, VersusPrevious,
+    At, CategoryChange, Cause, Compared, DeadReason, Diff, ExpectJson, Failure, Flag, Grade,
+    JournalJson, Line, LineFault, LineFile, LineMeasure, LinePass, Need, PassState, Phase,
+    SealJson, Src, Unit, Verdict, VersusPrevious,
 };
 use serde_json::{Value, json};
 
@@ -162,6 +163,16 @@ fn every_flag() -> Vec<Flag> {
             side: text(),
             repeat: 1,
         },
+        Flag::SecondPassFailed {
+            side: text(),
+            stage: Phase::Workload,
+        },
+        Flag::ConnectionsGrow {
+            target: text(),
+            side: text(),
+            first: 1,
+            second: 2,
+        },
         Flag::UnknownExpect { measure: text() },
         Flag::BeforeAfterSession {
             taken_at: text(),
@@ -192,6 +203,8 @@ fn every_flag() -> Vec<Flag> {
             | Flag::ProbeFailed { .. }
             | Flag::HeadOnlyNoise { .. }
             | Flag::KilledAtStop { .. }
+            | Flag::SecondPassFailed { .. }
+            | Flag::ConnectionsGrow { .. }
             | Flag::UnknownExpect { .. }
             | Flag::BeforeAfterSession { .. }
             | Flag::MeasuredBeforeSeal { .. }
@@ -298,6 +311,31 @@ fn the_topic_line_names_every_field_of_the_line() {
     assert_eq!(keys(&file), owned(listed("- A behaviour file has")));
     let diffs = &keys(&file["sample"][0]) | &keys(&file["sample"][1]);
     assert_eq!(diffs, owned(listed("- A diff has")));
+
+    let change = CategoryChange {
+        category: "workload".to_owned(),
+        before: "exit-0".to_owned(),
+        head: "exit-1".to_owned(),
+    };
+    let fault = LineFault {
+        target: "db:5432".to_owned(),
+        mode: "down".to_owned(),
+        changed: vec![change],
+        unknown: Vec::new(),
+    };
+    let fault = serde_json::to_value(fault).unwrap();
+    assert_eq!(keys(&fault), owned(listed("- `fault` has")));
+    let change = listed("- A category change has");
+    assert_eq!(keys(&fault["changed"][0]), owned(change));
+    let pass = LinePass {
+        file: "probe.orders.jsonl".to_owned(),
+        before: Some(PassState::Same),
+        diffs: 1,
+        sample: Vec::new(),
+        path: "runs/1/diff/pass2/probe.orders.jsonl.json".into(),
+    };
+    let pass = serde_json::to_value(pass).unwrap();
+    assert_eq!(keys(&pass), owned(listed("- A second-pass file has")));
 }
 
 #[test]

@@ -55,6 +55,10 @@ pub struct Report {
     pub coverage: Option<CoverageJson>,
     /// `None` without `--before` or when "before" failed.
     pub behaviour: Option<Vec<Behaviour>>,
+    /// `None` without the fault repeats.
+    pub fault: Option<FaultJson>,
+    /// `None` without the second pass, or when the head's failed.
+    pub second_pass: Option<SecondPassJson>,
     /// This run's records for `records.json`; a loaded report has none.
     #[serde(skip)]
     pub(crate) records: Arc<Records>,
@@ -310,6 +314,77 @@ pub enum At {
     Key { key: Value },
 }
 
+/// The fault repeats (plan, row 73): categories of what the head and "before" did under the
+/// fault, not times.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FaultJson {
+    /// `<service>:<port>`.
+    pub target: String,
+    /// `down` or `slow <delay>ms`.
+    pub mode: String,
+    pub categories: Categories,
+    /// One entry per value of the head other than the one "before" agreed on.
+    pub changed: Vec<CategoryChange>,
+}
+
+/// Every category on both versions, in one order; `before` is `None` without "before".
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Categories {
+    pub before: Option<Vec<CategoryJson>>,
+    pub head: Vec<CategoryJson>,
+}
+
+/// `values`: one per fault repeat in order, `unknown` for one that ended before the fault went on.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CategoryJson {
+    pub category: String,
+    pub values: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CategoryChange {
+    pub category: String,
+    pub before: String,
+    pub head: String,
+}
+
+/// The second pass (plan, row 74): the workload twice on one state without restore.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SecondPassJson {
+    /// The files of `expect.unchanged`.
+    pub files: Vec<PassFile>,
+    /// By version and target.
+    pub open: Vec<PassOpen>,
+}
+
+/// Whether the file changed from the first pass to the second; `before` is `None` without a
+/// passed second pass of "before". `diffs` are the head's, the first pass as `before` and the
+/// second as `head`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PassFile {
+    pub file: String,
+    pub before: Option<PassState>,
+    pub head: PassState,
+    pub diffs: Vec<Diff>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum PassState {
+    Same,
+    Changed,
+}
+
+/// The open connections to `target` after each pass, added up over the instances.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PassOpen {
+    pub target: String,
+    pub side: String,
+    pub first: u64,
+    pub second: u64,
+}
+
 /// The quiet `--json` line (plan, row 76): `Report::line` or `Line::failed`. `cli` prints it with
 /// `next` as command strings, and sets `run` of a failed run that has its folder. The default is
 /// the empty line of `--dry-run --json`.
@@ -327,6 +402,9 @@ pub struct Line {
     pub measures: Vec<LineMeasure>,
     /// Only the files with a diff or a flag that names them; `None` as in the report.
     pub behaviour: Option<Vec<LineFile>>,
+    pub fault: Option<LineFault>,
+    /// The files of `expect.unchanged` that changed on the head; `None` as in the report.
+    pub second_pass: Option<Vec<LinePass>>,
     pub flags: Vec<Flag>,
     pub needs: Vec<Need>,
     pub failure: Option<Failure>,
@@ -372,17 +450,46 @@ pub struct LineFile {
     pub path: Utf8PathBuf,
 }
 
+/// `unknown`: the categories nothing compares on.
+#[derive(Debug, Clone, Serialize)]
+pub struct LineFault {
+    pub target: String,
+    pub mode: String,
+    pub changed: Vec<CategoryChange>,
+    pub unknown: Vec<String>,
+}
+
+/// `sample`: at most 3 records of the head's diffs; `path`: all of them,
+/// `diff/pass2/<file>.json` of the run folder.
+#[derive(Debug, Clone, Serialize)]
+pub struct LinePass {
+    pub file: String,
+    pub before: Option<PassState>,
+    pub diffs: u32,
+    pub sample: Vec<Diff>,
+    #[serde(serialize_with = "slash::path")]
+    pub path: Utf8PathBuf,
+}
+
+/// In a folder of its own: a behaviour file of the same name has `diff/<file>.json`.
+pub(crate) fn pass_path(dir: &Utf8Path, file: &str) -> Utf8PathBuf {
+    dir.join("diff").join("pass2").join(format!("{file}.json"))
+}
+
 impl Report {
-    /// `<dir>/diff/<file>.json` with all the diffs of each behaviour file and `<dir>/records.json`,
-    /// then `<dir>/report.json` through a temporary file and a rename: a `report.json` is whole and
-    /// says the rest is.
+    /// `<dir>/diff/<file>.json` with all the diffs of each behaviour file, `<dir>/diff/pass2/`
+    /// with those of the second pass, and `<dir>/records.json`, then `<dir>/report.json` through
+    /// a temporary file and a rename: a `report.json` is whole and says the rest is.
     pub fn write(&self, dir: &Utf8Path) -> Result<(), ReportError> {
-        for file in self.behaviour.iter().flatten() {
-            let path = diff_path(dir, &file.file);
+        let behaviour = self.behaviour.iter().flatten();
+        let behaviour = behaviour.map(|file| (diff_path(dir, &file.file), &file.diffs));
+        let passes = self.second_pass.iter().flat_map(|pass| &pass.files);
+        let passes = passes.map(|file| (pass_path(dir, &file.file), &file.diffs));
+        for (path, diffs) in behaviour.chain(passes) {
             if let Some(parent) = path.parent() {
                 fs::create_dir_all(parent).map_err(ReportError::io(parent))?;
             }
-            write_json(&path, &file.diffs, false)?;
+            write_json(&path, diffs, false)?;
         }
         write_json(&dir.join(RECORDS), self.records.as_ref(), false)?;
         let temporary = dir.join(format!("{REPORT}.tmp"));
