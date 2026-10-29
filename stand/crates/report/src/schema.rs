@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::Before;
 use crate::context::{BeforeInfo, Intent, SetupFrom};
+use crate::flags::Flag;
 use crate::raw::Failure;
 
 pub(crate) const SCHEMA_VERSION: u32 = 1;
@@ -28,6 +29,7 @@ pub struct Report {
     pub before: Option<BeforeJson>,
     pub previous_run: Option<String>,
     pub measures: Vec<Measure>,
+    pub flags: Vec<Flag>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

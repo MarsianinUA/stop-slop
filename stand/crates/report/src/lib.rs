@@ -6,6 +6,7 @@ use std::io;
 use camino::Utf8Path;
 
 mod context;
+mod flags;
 mod measures;
 mod next;
 mod outputs;
@@ -14,6 +15,7 @@ mod schema;
 mod stats;
 
 pub use context::{BeforeInfo, Context, Intent, SetupFrom};
+pub use flags::{DeadReason, Flag};
 pub use next::{Next, Topic};
 pub use outputs::{Outputs, read_outputs};
 pub use raw::{
@@ -38,7 +40,10 @@ pub enum Previous<'r> {
 /// the run) count once: they are one measurement (plan, row 88).
 pub fn make(raw: &Raw, outputs: &Outputs, context: &Context<'_>) -> Report {
     let before = Before::of(raw);
-    let measures = measures::of(raw, outputs, context, before);
+    let (measures, mut flags) = measures::of(raw, outputs, context, before);
+    flags.extend(flags::facts(raw));
+    flags.extend(flags::of_context(raw, context));
+    flags::order(&mut flags);
     let previous = match context.previous {
         Previous::Read(report) => Some(report),
         Previous::None | Previous::Unreadable => None,
@@ -67,6 +72,7 @@ pub fn make(raw: &Raw, outputs: &Outputs, context: &Context<'_>) -> Report {
             .map(|info| schema::before_json(info, before, &context.setup_from)),
         previous_run: previous.map(|report| report.run.clone()),
         measures,
+        flags,
     }
 }
 
@@ -123,6 +129,15 @@ impl<'r> Before<'r> {
 enum Side {
     Head,
     Before,
+}
+
+impl Side {
+    fn as_str(self) -> &'static str {
+        match self {
+            Side::Head => "head",
+            Side::Before => "before",
+        }
+    }
 }
 
 /// The versions the report reads: the head, and "before" when it passed. A failed "before" has

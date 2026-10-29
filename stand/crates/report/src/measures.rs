@@ -6,6 +6,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::time::Duration;
 
+use crate::flags::{self, Flag};
 use crate::outputs::Outputs;
 use crate::raw::{Raw, RepeatOutput, Role};
 use crate::schema::{Direction, Measure, Report, Src, Unit, Verdict, VersusBefore, VersusPrevious};
@@ -93,7 +94,7 @@ pub(crate) fn of(
     outputs: &Outputs,
     context: &Context<'_>,
     before: Before<'_>,
-) -> Vec<Measure> {
+) -> (Vec<Measure>, Vec<Flag>) {
     let of_repeats = |repeats: &[RepeatOutput]| -> Vec<BTreeMap<Key, f64>> {
         repeats
             .iter()
@@ -119,7 +120,10 @@ pub(crate) fn of(
         Previous::Read(report) => Some(report),
         Previous::None | Previous::Unreadable => None,
     };
-    let measures = keys.into_iter().map(|key| {
+    let mut measures = Vec::with_capacity(keys.len());
+    let mut flags = Vec::new();
+    let mut counts = None;
+    for key in keys {
         let (own_head, own_before) = match &key {
             Key::Volume(name) => (
                 size(&raw.setup.head.sizes, name),
@@ -134,11 +138,19 @@ pub(crate) fn of(
         let setup = matches!(key, Key::Volume(_));
         let own_before = own_before.as_deref();
         let attempts = Attempts::of(&name, setup, &own_head, own_before, context);
-        measure(
+        if key == Key::Stand(Metric::Wall) {
+            counts = Some(attempts.counts());
+        }
+        let (measure, noisy) = measure(
             &key, name, &own_head, own_before, &attempts, before, previous,
-        )
-    });
-    measures.collect()
+        );
+        flags.extend(noisy);
+        measures.push(measure);
+    }
+    if let Some((head, before)) = counts {
+        flags.extend(flags::low_repeats(head, before));
+    }
+    (measures, flags)
 }
 
 fn measure(
@@ -149,7 +161,7 @@ fn measure(
     attempts: &Attempts<'_>,
     before: Before<'_>,
     previous: Option<&Report>,
-) -> Measure {
+) -> (Measure, Vec<Flag>) {
     let metric = key.metric();
     let direction = metric.direction();
     let head = Sample::of(&attempts.head).unwrap_or(Sample {
@@ -157,6 +169,14 @@ fn measure(
         spread: 0.0,
     });
     let base = Sample::of(&attempts.before);
+    let mut flags = Vec::new();
+    flags.extend(flags::high_noise(&name, head, base));
+    if flags::first_repeat_outlier(own_head) || own_before.is_some_and(flags::first_repeat_outlier)
+    {
+        flags.push(Flag::FirstRepeatOutlier {
+            measure: name.clone(),
+        });
+    }
     let samples = own_before.map(<[f64]>::to_vec).unwrap_or_default();
     let versus_before = match (before, base) {
         (Before::Absent, _) => None,
@@ -188,7 +208,7 @@ fn measure(
             verdict: Verdict::NoBaseline,
         },
     };
-    Measure {
+    let measure = Measure {
         name,
         unit: metric.unit(),
         direction,
@@ -198,7 +218,8 @@ fn measure(
         spread: stats::round(head.spread, 4),
         before: versus_before,
         previous: versus_previous,
-    }
+    };
+    (measure, flags)
 }
 
 /// The values of one measured repeat. The instances of a service add up their CPU and counters and
@@ -313,5 +334,13 @@ impl<'a> Attempts<'a> {
             attempts.before.push(own);
         }
         attempts
+    }
+
+    /// The pooled samples of each version, for `low-repeats`.
+    fn counts(&self) -> (usize, Option<usize>) {
+        let count =
+            |attempts: &[&[f64]]| attempts.iter().map(|attempt| attempt.len()).sum::<usize>();
+        let before = (!self.before.is_empty()).then(|| count(&self.before));
+        (count(&self.head), before)
     }
 }
