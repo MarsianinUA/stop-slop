@@ -584,6 +584,11 @@ fn each_fact_of_the_raw_outputs_gives_its_flag() {
         name: "cache".to_owned(),
         attempts: 4,
     });
+    // The guest's `net` lists every peer without `expose`, the uncalled ones too.
+    api.metrics.unexposed.push(Unexposed {
+        name: "load".to_owned(),
+        attempts: 0,
+    });
     let worker_log = folder.log("worker", "", "");
     let mut worker = instance(
         "worker",

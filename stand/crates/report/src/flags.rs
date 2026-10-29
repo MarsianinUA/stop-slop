@@ -377,7 +377,8 @@ fn unexposed(sides: &Sides<'_>, flags: &mut Vec<Flag>) {
             *names.entry(call.name.as_str()).or_default() += call.attempts;
         }
     }
-    for (name, attempts) in names {
+    // `net` counts every peer name without `expose`, so most come with 0: a name nobody called.
+    for (name, attempts) in names.into_iter().filter(|&(_, attempts)| attempts > 0) {
         flags.push(Flag::MissingExpose {
             name: name.to_owned(),
             attempts,
