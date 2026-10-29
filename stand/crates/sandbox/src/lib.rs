@@ -27,6 +27,9 @@ pub trait Sandbox {
     /// Virtual in `Fake`: it moves only in `wait`.
     fn now(&self) -> Instant;
     fn pull(&self, images: &[ImageRef]) -> Result<Pulled, SandboxError>;
+    /// What `pull` would give, for `run --dry-run`: the digest of each image already in the home,
+    /// `None` for one `pull` would download. No VM, no network, nothing written.
+    fn cached(&self, images: &[ImageRef]) -> Result<Cached, SandboxError>;
     /// One batch starts in parallel; ids in the order of `batch`. Returns once each service's command
     /// runs under `stand-guest run`: that is `service_started`. Env, workdir and command go into that exec,
     /// never onto the VM (a restored VM has no VM env), and every later exec of the VM gets the same env.
@@ -118,6 +121,16 @@ pub struct Pulled {
     /// The digest each image resolved to, in the order of `images`.
     pub digests: Vec<(ImageRef, String)>,
     /// The pinned `stand-guest` version; with `STOP_SLOP_STAND_GUEST`, `dev-` and the sha256 of that file.
+    pub guest: String,
+}
+
+/// The setup cache key holds the digests and `guest`, so a dry run can name a hit only when every
+/// digest is known.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Cached {
+    /// In the order of `images`.
+    pub digests: Vec<(ImageRef, Option<String>)>,
+    /// As `Pulled.guest`.
     pub guest: String,
 }
 

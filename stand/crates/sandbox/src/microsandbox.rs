@@ -26,8 +26,8 @@ use tokio::sync::OnceCell;
 use tokio::time::timeout;
 
 use crate::{
-    ExecId, ExecOutcome, Exited, Fault, ImageRef, Launch, Leftovers, Metrics, Mount, Pulled,
-    Sandbox, SandboxError, SandboxId, Seed, SnapshotId, Stopped, VolumeName, Waitable,
+    Cached, ExecId, ExecOutcome, Exited, Fault, ImageRef, Launch, Leftovers, Metrics, Mount,
+    Pulled, Sandbox, SandboxError, SandboxId, Seed, SnapshotId, Stopped, VolumeName, Waitable,
 };
 
 /// The prefix of every VM and snapshot name, and the label key where the SDK takes one: a VM
@@ -118,6 +118,11 @@ impl Sandbox for Microsandbox {
     fn pull(&self, images: &[ImageRef]) -> Result<Pulled, SandboxError> {
         let images = images.to_vec();
         self.block(|inner| async move { inner.pull(images).await })
+    }
+
+    fn cached(&self, images: &[ImageRef]) -> Result<Cached, SandboxError> {
+        let images = images.to_vec();
+        self.block(|inner| async move { inner.cached(images).await })
     }
 
     fn create(&self, batch: &[Launch]) -> Result<Vec<SandboxId>, SandboxError> {
@@ -221,13 +226,16 @@ impl Sandbox for Microsandbox {
     fn drop_snapshot(&self, snapshot: &SnapshotId) -> Result<(), SandboxError> {
         let snapshot = snapshot.clone();
         self.block(|inner| async move {
-            inner.local().await?;
+            let local = inner.local().await?;
             let Some(found) = volumes::listed(&snapshot).await? else {
                 return Ok(());
             };
             let remove = msb::Snapshot::remove_ref(found.reference(), true);
             match within(GUEST_CALL, "drop a snapshot", remove).await? {
-                Ok(()) | Err(msb::MicrosandboxError::SnapshotNotFound(_)) => Ok(()),
+                Ok(()) | Err(msb::MicrosandboxError::SnapshotNotFound(_)) => {
+                    volumes::remove_empty_group(local, &found).await;
+                    Ok(())
+                }
                 Err(error) => Err(backend(error)),
             }
         })
@@ -320,17 +328,35 @@ impl Inner {
                 }
                 Err(error) => return Err(backend(error)),
             };
-            let digest = handle.manifest_digest().ok_or_else(|| {
-                backend(format!(
-                    "microsandbox gave no digest for `{image}` after the pull"
-                ))
-            })?;
-            digests.push((image.clone(), digest.to_owned()));
+            let digest = manifest_digest(&image, &handle)?;
+            digests.push((image, digest));
         }
         Ok(Pulled {
             digests,
             guest: binary.version.clone(),
         })
+    }
+
+    /// Reads the image database alone: `install` downloads the runtime and `stand-guest`.
+    async fn cached(&self, images: Vec<ImageRef>) -> Result<Cached, SandboxError> {
+        let guest = guest::version(guest::local_build()).await?;
+        let local = self.local().await?;
+        // SDK 0.7.8 makes its database on the first open, and a home without one holds no image.
+        let catalog = local.config().home().join("db").join("msb.db");
+        let mut digests = Vec::with_capacity(images.len());
+        for image in images {
+            let digest = if !catalog.exists() {
+                None
+            } else {
+                match msb::Image::get(image.as_str()).await {
+                    Ok(handle) => Some(manifest_digest(&image, &handle)?),
+                    Err(msb::MicrosandboxError::ImageNotFound(_)) => None,
+                    Err(error) => return Err(backend(error)),
+                }
+            };
+            digests.push((image, digest));
+        }
+        Ok(Cached { digests, guest })
     }
 
     /// SDK 0.7.8 pulls only as part of `create`, so a missing image costs one VM boot. A cached
@@ -812,5 +838,31 @@ fn image_error(image: &ImageRef, error: msb::MicrosandboxError) -> SandboxError 
         SandboxError::Registry { message: text }
     } else {
         backend(text)
+    }
+}
+
+/// One reading for `pull` and `cached`, so a dry run names the digest the run's key takes.
+fn manifest_digest(image: &ImageRef, handle: &msb::ImageHandle) -> Result<String, SandboxError> {
+    let digest = handle.manifest_digest().map(str::to_owned);
+    digest.ok_or_else(|| backend(format!("microsandbox holds `{image}` without a digest")))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A dry run on a new machine. The only case here that opens the SDK, whose home is one per
+    /// process.
+    #[test]
+    fn cached_on_a_new_home_names_no_image_and_makes_nothing() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = Utf8Path::from_path(temp.path()).unwrap().join("msb");
+        let sandbox = Microsandbox::new(&home).unwrap();
+        let image = ImageRef::new("alpine:3.20");
+        let cached = sandbox.cached(std::slice::from_ref(&image)).unwrap();
+        assert_eq!(cached.digests, [(image, None)]);
+        let guest = guest::version(guest::local_build());
+        assert_eq!(cached.guest, sandbox.runtime.block_on(guest).unwrap());
+        assert!(!home.exists(), "{home} was made");
     }
 }

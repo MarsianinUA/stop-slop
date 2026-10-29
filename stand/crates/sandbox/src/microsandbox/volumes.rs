@@ -6,13 +6,15 @@
 //! snapshot, and the limits, the network, the ports and the host folders from its own call (plan
 //! rows 77, 86, 87).
 
-use std::path::PathBuf;
+use std::io;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use ::guest::{Command, TRIM_NO_DISCARD, TrimArgs};
 use ::microsandbox as msb;
 use camino::{Utf8Path, Utf8PathBuf};
 use msb::sandbox::{MountBuilder, SandboxBuilder};
+use sha2::{Digest, Sha256};
 use tokio::io::AsyncReadExt;
 
 use super::guest::Binary;
@@ -385,6 +387,86 @@ pub(super) async fn snapshot(live: &Live, name: &str) -> Result<SnapshotId, Sand
         .await?
         .map_err(backend)?;
     Ok(SnapshotId::new(taken.digest().to_owned()))
+}
+
+/// After the remove of the group's one member. SDK 0.7.8 keeps an empty group (`group.json`
+/// without a head, its locks), and in its cache a pointer to the group's folder for the recovery
+/// of an interrupted remove that it never deletes and every listing reads. Both go here; a
+/// failure only costs a few bytes, so it warns.
+pub(super) async fn remove_empty_group(local: &msb::LocalBackend, snapshot: &msb::SnapshotHandle) {
+    let Some(group) = snapshot.group().filter(|group| super::ours(group)) else {
+        return;
+    };
+    if !forgotten(snapshot.digest()).await {
+        tracing::debug!(
+            group,
+            "the SDK still indexes a dropped snapshot, its group stays"
+        );
+        return;
+    }
+    let dir = local.snapshots_dir().join(group);
+    let pointers = local.cache_dir().join(".snapshot-deletion-parents");
+    if let Err(error) = remove_group(&dir, &pointers) {
+        tracing::warn!(
+            group,
+            "the empty group of a dropped snapshot stays: {error}"
+        );
+    }
+}
+
+/// `remove_ref` drops the canonical index row of a snapshot. On Windows the SDK also indexes each
+/// new snapshot under its path as given, and only a listing forgets that row once its folder is
+/// gone, through a lease whose lock lies in the group's folder: without that folder every listing
+/// fails. So one listing first, then a lookup by digest, which sees every row: none left is
+/// `SnapshotNotFound` naming the digest (a row whose folder is gone names its path).
+async fn forgotten(digest: &str) -> bool {
+    let listed = within(GUEST_CALL, "list the snapshots", msb::Snapshot::list()).await;
+    if !matches!(listed, Ok(Ok(_))) {
+        return false;
+    }
+    let found = within(GUEST_CALL, "find a snapshot", msb::Snapshot::get(digest)).await;
+    matches!(found, Ok(Err(msb::MicrosandboxError::SnapshotNotFound(what))) if what == digest)
+}
+
+fn remove_group(dir: &Path, pointers: &Path) -> io::Result<()> {
+    match holds_a_member(dir) {
+        Ok(false) => {}
+        Err(error) if error.kind() != io::ErrorKind::NotFound => return Err(error),
+        _ => return Ok(()),
+    }
+    // Named as the SDK names it: the sha256 of the folder's canonical path in JSON.
+    let json = serde_json::to_vec(&dir.canonicalize()?)?;
+    let pointer = pointers.join(format!("{}.json", guest::hex(&Sha256::digest(&json))));
+    std::fs::remove_dir_all(dir)?;
+    match std::fs::remove_file(&pointer) {
+        Err(error) if error.kind() != io::ErrorKind::NotFound => {
+            let at = pointer.display();
+            Err(io::Error::new(error.kind(), format!("{at}: {error}")))
+        }
+        _ => Ok(()),
+    }
+}
+
+/// A member is a folder of the group; `.snapshot-deletions/` holds a folder per remove that has
+/// not finished.
+fn holds_a_member(group: &Path) -> io::Result<bool> {
+    for entry in std::fs::read_dir(group)? {
+        let entry = entry?;
+        if !entry.file_type()?.is_dir() {
+            continue;
+        }
+        let name = entry.file_name();
+        if name == ".snapshot-deletions" {
+            for pending in std::fs::read_dir(entry.path())? {
+                if pending?.file_type()?.is_dir() {
+                    return Ok(true);
+                }
+            }
+        } else if !name.to_string_lossy().starts_with('.') {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 /// FITRIM on every owned disk, so the blocks of deleted files stay out of the snapshot. A failure
