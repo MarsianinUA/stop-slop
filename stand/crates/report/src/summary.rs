@@ -9,7 +9,7 @@ use serde_json::Value;
 
 use crate::flags::Flag;
 use crate::raw::Failure;
-use crate::schema::{IntentJson, Line, LineFile, LineMeasure, Report, SealJson, slashed};
+use crate::schema::{IntentJson, Line, LineFile, LineMeasure, Need, Report, SealJson, slashed};
 
 /// The hot functions the summary prints; the report has all of them.
 const TOP: usize = 10;
@@ -70,6 +70,7 @@ impl Report {
             self.comparisons,
         ));
         lines.extend(line.measures.iter().map(measure_text));
+        lines.extend(self.needs.iter().map(need_text));
         lines.extend(line.behaviour.iter().flatten().map(file_text));
         lines.extend(self.flags.iter().map(flag_text));
         for hot in self.hot.iter().take(TOP) {
@@ -110,6 +111,7 @@ impl Line {
             self.comparisons,
         ));
         lines.extend(self.measures.iter().map(measure_text));
+        lines.extend(self.needs.iter().map(need_text));
         for file in self.behaviour.iter().flatten() {
             lines.push(format!("{}  {}", file_text(file), slashed(&file.path)));
         }
@@ -210,7 +212,24 @@ fn measure_text(measure: &LineMeasure) -> String {
     let previous = &measure.previous;
     let verdict = token(&previous.verdict);
     text.push_str(&format!(" previous {} {verdict}", number(previous.median)));
+    if let Some(expect) = &measure.expect {
+        let grade = token(&expect.grade);
+        text.push_str(&format!(" expect {} {grade}", expect.change));
+        if expect.post_hoc {
+            text.push_str(" postHoc");
+        }
+        if expect.stale {
+            text.push_str(" stale");
+        }
+        if expect.acceptances > 0 {
+            text.push_str(&format!(" acceptances {}", expect.acceptances));
+        }
+    }
     text
+}
+
+fn need_text(need: &Need) -> String {
+    format!("needs {}: {}", need.measure, need.reason)
 }
 
 /// `<kind>`, then each fact of the flag as `<key> <value>`.

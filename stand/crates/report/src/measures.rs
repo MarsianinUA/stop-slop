@@ -1,15 +1,16 @@
 //! The measures of a run (architecture plan, rows 22, 72, 84): `<subject>.<metric>`, the samples of
 //! each version pooled with the runs of the pool (row 68), and the verdicts against "before" and the
-//! previous run.
+//! previous run, and the grades against the declared cost.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::time::Duration;
 
 use crate::flags::{self, Flag};
+use crate::grade;
 use crate::outputs::Outputs;
 use crate::raw::{Raw, RepeatOutput, Role};
-use crate::schema::{Direction, Measure, Report, Src, Unit, Verdict, VersusBefore, VersusPrevious};
+use crate::schema::{Direction, Measure, Src, Unit, Verdict, VersusBefore, VersusPrevious};
 use crate::stats::{self, Sample};
 use crate::{Before, Context, Side};
 
@@ -116,7 +117,6 @@ pub(crate) fn of(
     let volumes = raw.setup.head.sizes.keys().chain(before_volumes);
     keys.extend(volumes.map(|name| Key::Volume(name.clone())));
 
-    let previous = context.previous.report();
     let mut measures = Vec::with_capacity(keys.len());
     let mut flags = Vec::new();
     let mut counts = None;
@@ -139,7 +139,7 @@ pub(crate) fn of(
             counts = Some(attempts.counts());
         }
         let (measure, noisy) = measure(
-            &key, name, &own_head, own_before, &attempts, before, previous,
+            &key, name, &own_head, own_before, &attempts, before, context,
         );
         flags.extend(noisy);
         measures.push(measure);
@@ -157,7 +157,7 @@ fn measure(
     own_before: Option<&[f64]>,
     attempts: &Attempts<'_>,
     before: Before<'_>,
-    previous: Option<&Report>,
+    context: &Context<'_>,
 ) -> (Measure, Vec<Flag>) {
     let metric = key.metric();
     let direction = metric.direction();
@@ -175,19 +175,25 @@ fn measure(
         });
     }
     let samples = own_before.map(<[f64]>::to_vec).unwrap_or_default();
+    let mut expect = None;
     let versus_before = match (before, base) {
         (Before::Absent, _) => None,
-        (Before::Passed(_), Some(base)) => Some(VersusBefore {
-            samples,
-            median: Some(base.median),
-            verdict: stats::verdict(direction, base, head),
-        }),
+        (Before::Passed(_), Some(base)) => {
+            let verdict = stats::verdict(direction, base, head);
+            expect = Some(grade::expect(&name, verdict, base, head, context));
+            Some(VersusBefore {
+                samples,
+                median: Some(base.median),
+                verdict,
+            })
+        }
         (Before::Failed(_) | Before::Passed(_), _) => Some(VersusBefore {
             samples,
             median: None,
             verdict: Verdict::NoBaseline,
         }),
     };
+    let previous = context.previous.report();
     let last = previous.and_then(|report| find(&report.measures, &name));
     let versus_previous = match last {
         Some(last) => {
@@ -215,6 +221,7 @@ fn measure(
         spread: stats::round(head.spread, 4),
         before: versus_before,
         previous: versus_previous,
+        expect,
     };
     (measure, flags)
 }

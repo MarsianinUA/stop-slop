@@ -47,6 +47,8 @@ pub struct Report {
     pub before: Option<BeforeJson>,
     pub previous_run: Option<String>,
     pub measures: Vec<Measure>,
+    /// The measures whose cost only a person can judge: `change: unknown` (plan, row 66).
+    pub needs: Vec<Need>,
     pub flags: Vec<Flag>,
     /// By `selfMs`, the hottest first.
     pub hot: Vec<Hot>,
@@ -140,6 +142,42 @@ pub struct Measure {
     /// `None` without `--before`.
     pub before: Option<VersusBefore>,
     pub previous: VersusPrevious,
+    /// `None` unless "before" passed: there is no shift to grade.
+    pub expect: Option<ExpectJson>,
+}
+
+/// The bound that applies, the last acceptance of this head tree over the declared one, and its
+/// grade.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExpectJson {
+    /// `none`, `+X%`, `-X%`, `down` or `unknown`.
+    pub change: String,
+    /// `None`: no entry names the measure, so it is the implicit `none`.
+    pub reason: Option<String>,
+    /// `None` for `change: unknown`.
+    pub grade: Option<Grade>,
+    pub post_hoc: bool,
+    /// An acceptance of the measure for another head tree, and none for this one.
+    pub stale: bool,
+    /// Of the measure in the session, on any head tree.
+    pub acceptances: u32,
+}
+
+/// With a shift that shows, a grade is never `unmeasurable` (plan, row 66).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Grade {
+    Met,
+    Exceeded,
+    Surprise,
+    Unmeasurable,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Need {
+    pub measure: String,
+    pub reason: String,
 }
 
 /// `median` is `None` when "before" failed.
@@ -290,11 +328,12 @@ pub struct Line {
     /// Only the files with a diff or a flag that names them; `None` as in the report.
     pub behaviour: Option<Vec<LineFile>>,
     pub flags: Vec<Flag>,
+    pub needs: Vec<Need>,
     pub failure: Option<Failure>,
     /// The measures and files with no exception.
     pub quiet: u32,
-    /// Measures without an `expect` entry graded `unmeasurable`: they stay quiet (plan, row 66).
-    /// 0 until the grades of T-13b.
+    /// Of the quiet ones, the measures without an `expect` entry graded `unmeasurable` (plan,
+    /// row 66).
     pub unmeasurable: u32,
     #[serde(skip)]
     pub next: Vec<Next>,
@@ -310,6 +349,7 @@ pub struct LineMeasure {
     pub median: f64,
     pub before: Option<Compared>,
     pub previous: VersusPrevious,
+    pub expect: Option<ExpectJson>,
 }
 
 /// `median` is `None` when "before" failed, as in `VersusBefore`.

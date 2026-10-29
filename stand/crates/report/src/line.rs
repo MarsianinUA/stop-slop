@@ -6,10 +6,12 @@ use std::collections::BTreeSet;
 use camino::Utf8Path;
 
 use crate::flags::{self, Flag};
-use crate::next::Next;
+use crate::grade;
+use crate::next::{Next, Topic};
 use crate::raw::{Failure, Phase, Raw};
 use crate::schema::{
-    Behaviour, Compared, Line, LineFile, LineMeasure, Measure, REPORT, Report, Verdict, diff_path,
+    Behaviour, Compared, Grade, Line, LineFile, LineMeasure, Measure, REPORT, Report, Verdict,
+    diff_path,
 };
 use crate::{Before, Side};
 
@@ -18,8 +20,15 @@ const SAMPLE: usize = 3;
 
 impl Report {
     pub fn line(&self, dir: &Utf8Path) -> Line {
-        let measures = self.measures.iter().filter(|measure| moved(measure));
-        let measures: Vec<LineMeasure> = measures.map(line_measure).collect();
+        let shown: Vec<&Measure> = self
+            .measures
+            .iter()
+            .filter(|measure| exception(measure))
+            .collect();
+        let quiet = self.measures.iter().filter(|measure| !exception(measure));
+        let unmeasurable = quiet.filter(|measure| graded(measure) == Some(Grade::Unmeasurable));
+        let next = self.next(&shown);
+        let measures: Vec<LineMeasure> = shown.into_iter().map(line_measure).collect();
         let named = named(&self.flags);
         let files = self.behaviour.as_ref().map(|files| {
             let shown = files
@@ -38,11 +47,33 @@ impl Report {
             measures,
             behaviour: files,
             flags: self.flags.clone(),
+            needs: self.needs.clone(),
             failure: None,
             quiet: u32::try_from(all - shown).unwrap_or(u32::MAX),
-            unmeasurable: 0,
-            next: Vec::new(),
+            unmeasurable: u32::try_from(unmeasurable.count()).unwrap_or(u32::MAX),
+            next,
         }
+    }
+
+    /// An `accept` template per `surprise` and `exceeded` that fits `maxTolerance`, then
+    /// `guide expect` once for an `unmeasurable` entry: its bound is tighter than the noise.
+    fn next(&self, shown: &[&Measure]) -> Vec<Next> {
+        let max_tolerance = self.seal.as_ref().map(|seal| seal.max_tolerance);
+        let accepts = shown.iter().filter_map(|measure| {
+            let bound = grade::accept(measure, max_tolerance?)?;
+            Some(Next::Accept {
+                measure: measure.name.clone(),
+                bound,
+            })
+        });
+        let mut next: Vec<Next> = accepts.collect();
+        if shown
+            .iter()
+            .any(|measure| graded(measure) == Some(Grade::Unmeasurable))
+        {
+            next.push(Next::Guide(Some(Topic::Expect)));
+        }
+        next
     }
 }
 
@@ -87,15 +118,29 @@ fn on_failure(flag: &Flag, failure: &Failure) -> bool {
             if side == Side::Head.as_str() && *repeat == failure.repeat)
 }
 
-/// A shift that shows: against "before" with `--before`, else against the previous run. The grades
-/// of T-13b replace this rule.
-fn moved(measure: &Measure) -> bool {
-    let before = measure.before.as_ref();
-    let verdict = before.map_or(measure.previous.verdict, |before| before.verdict);
-    matches!(
-        verdict,
-        Verdict::Improved | Verdict::Regressed | Verdict::Changed
-    )
+/// Optional Assumptions, «Исключение строки»: a grade other than `met`, but the `unmeasurable` of
+/// a measure without an entry, which stays quiet; `change: unknown`; `postHoc` and `stale`, always.
+/// Without `--before` a shift against the previous run; with a failed "before" nothing was graded.
+fn exception(measure: &Measure) -> bool {
+    let Some(expect) = &measure.expect else {
+        let moved = matches!(
+            measure.previous.verdict,
+            Verdict::Improved | Verdict::Regressed | Verdict::Changed
+        );
+        return measure.before.is_none() && moved;
+    };
+    expect.post_hoc
+        || expect.stale
+        || match expect.grade {
+            None => true,
+            Some(Grade::Met) => false,
+            Some(Grade::Unmeasurable) => expect.reason.is_some(),
+            Some(Grade::Exceeded | Grade::Surprise) => true,
+        }
+}
+
+fn graded(measure: &Measure) -> Option<Grade> {
+    measure.expect.as_ref()?.grade
 }
 
 /// The files a flag names: they go into the line even without a diff.
@@ -123,6 +168,7 @@ fn line_measure(measure: &Measure) -> LineMeasure {
             verdict: before.verdict,
         }),
         previous: measure.previous.clone(),
+        expect: measure.expect.clone(),
     }
 }
 

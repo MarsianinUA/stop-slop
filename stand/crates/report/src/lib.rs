@@ -9,6 +9,7 @@ use camino::Utf8Path;
 mod behaviour;
 mod context;
 mod flags;
+mod grade;
 mod hot;
 mod line;
 mod measures;
@@ -19,7 +20,9 @@ mod schema;
 mod stats;
 mod summary;
 
-pub use context::{BeforeInfo, Context, Intent, Journal, PastRun, SealInfo, SetupFrom};
+pub use context::{
+    BeforeInfo, Bound, Context, Declared, Intent, Journal, PastRun, PostHoc, SealInfo, SetupFrom,
+};
 pub use flags::{DeadReason, Flag};
 pub use next::{Next, Topic};
 pub use outputs::{Outputs, read_outputs};
@@ -29,9 +32,10 @@ pub use raw::{
     Role, SecondPassOutcome, Setup, SetupSide,
 };
 pub use schema::{
-    At, BeforeJson, Behaviour, CalledJson, Compared, CoverageJson, Diff, Direction, Head, Hot,
-    HotVersus, IntentJson, JournalJson, Line, LineFile, LineMeasure, Measure, RecipeJson, Report,
-    SealJson, SetupJson, Src, Unit, Verdict, VersusBefore, VersusPrevious,
+    At, BeforeJson, Behaviour, CalledJson, Compared, CoverageJson, Diff, Direction, ExpectJson,
+    Grade, Head, Hot, HotVersus, IntentJson, JournalJson, Line, LineFile, LineMeasure, Measure,
+    Need, RecipeJson, Report, SealJson, SetupJson, Src, Unit, Verdict, VersusBefore,
+    VersusPrevious,
 };
 pub use summary::Summary;
 
@@ -57,6 +61,7 @@ impl<'r> Previous<'r> {
 pub fn make(raw: &Raw, outputs: &Outputs, context: &Context<'_>) -> Report {
     let before = Before::of(raw);
     let (measures, mut flags) = measures::of(raw, outputs, context, before);
+    flags.extend(grade::unknown_expect(&measures, context));
     flags.extend(flags::facts(raw));
     flags.extend(flags::of_context(raw, context));
     flags.extend(flags::bad_lines(outputs));
@@ -97,6 +102,7 @@ pub fn make(raw: &Raw, outputs: &Outputs, context: &Context<'_>) -> Report {
             .as_ref()
             .map(|info| schema::before_json(info, before, &context.setup_from)),
         previous_run: previous.map(|report| report.run.clone()),
+        needs: grade::needs(&measures),
         measures,
         flags,
         hot: hot::of(raw, before, previous),

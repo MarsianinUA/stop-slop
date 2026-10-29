@@ -1,6 +1,7 @@
 //! What only `cli` knows about a run: it builds the `Context` and copies nothing of `Raw` (plan,
 //! row 85).
 
+use std::fmt;
 use std::time::SystemTime;
 
 use camino::Utf8PathBuf;
@@ -19,6 +20,10 @@ pub struct Context<'r> {
     pub seal: Option<SealInfo>,
     /// The earlier runs of the session, oldest first.
     pub history: Vec<PastRun>,
+    /// `expect.cost` of the recipe: a measure without an entry is `none` (plan, row 66).
+    pub declared: Vec<Declared>,
+    /// The session's acceptances, oldest first (plan, row 67).
+    pub accepted: Vec<Declared>,
     pub previous: Previous<'r>,
     /// The passed reports with this run's `PoolKey`, oldest first; their raw samples join this
     /// run's.
@@ -85,4 +90,44 @@ pub struct PastRun {
     pub head_tree: String,
     pub compared: bool,
     pub passed: bool,
+}
+
+/// From `expect.cost` with `post_hoc: None`, or from `accept` with `post_hoc: Some`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Declared {
+    pub measure: String,
+    pub bound: Bound,
+    pub reason: String,
+    pub post_hoc: Option<PostHoc>,
+}
+
+/// An acceptance holds only for the head tree it was made on.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PostHoc {
+    pub head_tree: String,
+    pub accepted_at: SystemTime,
+}
+
+/// `UpTo` and `DownTo` in whole percent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Bound {
+    None,
+    UpTo(u16),
+    DownTo(u16),
+    Down,
+    Unknown,
+}
+
+/// The grammar of `expect.cost[].change` and of `accept --allow`: `none`, `+10%`, `-10%`,
+/// `down`, `unknown`.
+impl fmt::Display for Bound {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Bound::None => f.write_str("none"),
+            Bound::UpTo(percent) => write!(f, "+{percent}%"),
+            Bound::DownTo(percent) => write!(f, "-{percent}%"),
+            Bound::Down => f.write_str("down"),
+            Bound::Unknown => f.write_str("unknown"),
+        }
+    }
 }

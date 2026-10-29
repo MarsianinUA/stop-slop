@@ -4,8 +4,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use report::{
-    At, Cause, Compared, DeadReason, Diff, Failure, Flag, JournalJson, Line, LineFile, LineMeasure,
-    Phase, SealJson, Src, Unit, Verdict, VersusPrevious,
+    At, Cause, Compared, DeadReason, Diff, ExpectJson, Failure, Flag, Grade, JournalJson, Line,
+    LineFile, LineMeasure, Need, Phase, SealJson, Src, Unit, Verdict, VersusPrevious,
 };
 use serde_json::{Value, json};
 
@@ -162,6 +162,7 @@ fn every_flag() -> Vec<Flag> {
             side: text(),
             repeat: 1,
         },
+        Flag::UnknownExpect { measure: text() },
         Flag::BeforeAfterSession {
             taken_at: text(),
             started_at: text(),
@@ -191,6 +192,7 @@ fn every_flag() -> Vec<Flag> {
             | Flag::ProbeFailed { .. }
             | Flag::HeadOnlyNoise { .. }
             | Flag::KilledAtStop { .. }
+            | Flag::UnknownExpect { .. }
             | Flag::BeforeAfterSession { .. }
             | Flag::MeasuredBeforeSeal { .. }
             | Flag::WideTolerance { .. } => {}
@@ -252,9 +254,25 @@ fn the_topic_line_names_every_field_of_the_line() {
             median: None,
             verdict: Verdict::NoBaseline,
         },
+        expect: Some(ExpectJson {
+            change: "+10%".to_owned(),
+            reason: Some(String::new()),
+            grade: Some(Grade::Exceeded),
+            post_hoc: false,
+            stale: false,
+            acceptances: 0,
+        }),
     };
     let measure = serde_json::to_value(measure).unwrap();
     assert_eq!(keys(&measure), owned(listed("- A measure has")));
+    let expect = listed("- `expect` of a measure has");
+    assert_eq!(keys(&measure["expect"]), owned(expect));
+    let need = Need {
+        measure: String::new(),
+        reason: String::new(),
+    };
+    let need = serde_json::to_value(need).unwrap();
+    assert_eq!(keys(&need), owned(listed("- A need has")));
     let against = &keys(&measure["before"]) | &keys(&measure["previous"]);
     let documented = listed("- `before` and `previous` of a measure have");
     assert_eq!(against, owned(documented));

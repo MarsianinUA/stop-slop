@@ -38,92 +38,110 @@
       "name": "stand.wall", "unit": "ms", "direction": "lower", "src": "stand",
       "samples": [42210.0, 41877.0, 42502.0], "median": 42210.0, "spread": 0.0148,
       "before": { "samples": [41010.0, 40870.0, 41502.0], "median": 41010.0, "verdict": "within-noise" },
-      "previous": { "median": 41900.0, "verdict": "within-noise" }
+      "previous": { "median": 41900.0, "verdict": "within-noise" },
+      "expect": { "change": "+10%", "reason": "one more index lookup per order", "grade": "met", "postHoc": false, "stale": false, "acceptances": 0 }
     },
     {
       "name": "api.cpu", "unit": "ms", "direction": "lower", "src": "stand",
       "samples": [6000.0, 6000.0, 6000.0], "median": 6000.0, "spread": 0.0,
       "before": { "samples": [5000.0, 5000.0, 5000.0], "median": 5000.0, "verdict": "regressed" },
-      "previous": { "median": 6000.0, "verdict": "within-noise" }
+      "previous": { "median": 6000.0, "verdict": "within-noise" },
+      "expect": { "change": "+20%", "reason": "the report formats every order", "grade": "met", "postHoc": true, "stale": false, "acceptances": 1 }
     },
     {
       "name": "api.memory", "unit": "bytes", "direction": "lower", "src": "stand",
       "samples": [314572800.0, 314572800.0, 314572800.0], "median": 314572800.0, "spread": 0.0,
       "before": { "samples": [314572800.0, 314572800.0, 314572800.0], "median": 314572800.0, "verdict": "within-noise" },
-      "previous": { "median": 314572800.0, "verdict": "within-noise" }
+      "previous": { "median": 314572800.0, "verdict": "within-noise" },
+      "expect": { "change": "none", "reason": null, "grade": "met", "postHoc": false, "stale": false, "acceptances": 0 }
     },
     {
       "name": "api.error-lines", "unit": "count", "direction": "lower", "src": "stand",
       "samples": [1.0, 1.0, 1.0], "median": 1.0, "spread": 0.0,
       "before": { "samples": [1.0, 1.0, 1.0], "median": 1.0, "verdict": "within-noise" },
-      "previous": { "median": 1.0, "verdict": "within-noise" }
+      "previous": { "median": 1.0, "verdict": "within-noise" },
+      "expect": { "change": "none", "reason": null, "grade": "met", "postHoc": false, "stale": false, "acceptances": 0 }
     },
     {
       "name": "api.shutdown", "unit": "ms", "direction": "lower", "src": "stand",
       "samples": [120.0, 120.0, 120.0], "median": 120.0, "spread": 0.0,
       "before": { "samples": [120.0, 120.0, 120.0], "median": 120.0, "verdict": "within-noise" },
-      "previous": { "median": 120.0, "verdict": "within-noise" }
+      "previous": { "median": 120.0, "verdict": "within-noise" },
+      "expect": { "change": "none", "reason": null, "grade": "met", "postHoc": false, "stale": false, "acceptances": 0 }
     },
     {
       "name": "db.cpu", "unit": "ms", "direction": "lower", "src": "stand",
       "samples": [3000.0, 3000.0, 3000.0], "median": 3000.0, "spread": 0.0,
       "before": { "samples": [3000.0, 3000.0, 3000.0], "median": 3000.0, "verdict": "within-noise" },
-      "previous": { "median": 3000.0, "verdict": "within-noise" }
+      "previous": { "median": 3000.0, "verdict": "within-noise" },
+      "expect": { "change": "unknown", "reason": "a new query plan", "grade": null, "postHoc": false, "stale": false, "acceptances": 0 }
     },
     {
       "name": "db.memory", "unit": "bytes", "direction": "lower", "src": "stand",
       "samples": [209715200.0, 209715200.0, 209715200.0], "median": 209715200.0, "spread": 0.0,
       "before": { "samples": [209715200.0, 209715200.0, 209715200.0], "median": 209715200.0, "verdict": "within-noise" },
-      "previous": { "median": 209715200.0, "verdict": "within-noise" }
+      "previous": { "median": 209715200.0, "verdict": "within-noise" },
+      "expect": { "change": "none", "reason": null, "grade": "met", "postHoc": false, "stale": false, "acceptances": 0 }
     },
     {
       "name": "db.error-lines", "unit": "count", "direction": "lower", "src": "stand",
       "samples": [0.0, 0.0, 0.0], "median": 0.0, "spread": 0.0,
       "before": { "samples": [0.0, 0.0, 0.0], "median": 0.0, "verdict": "within-noise" },
-      "previous": { "median": 0.0, "verdict": "within-noise" }
+      "previous": { "median": 0.0, "verdict": "within-noise" },
+      "expect": { "change": "none", "reason": null, "grade": "met", "postHoc": false, "stale": false, "acceptances": 0 }
     },
     {
       "name": "db.shutdown", "unit": "ms", "direction": "lower", "src": "stand",
       "samples": [300.0, 300.0, 300.0], "median": 300.0, "spread": 0.0,
       "before": { "samples": [300.0, 300.0, 300.0], "median": 300.0, "verdict": "within-noise" },
-      "previous": { "median": 300.0, "verdict": "within-noise" }
+      "previous": { "median": 300.0, "verdict": "within-noise" },
+      "expect": { "change": "none", "reason": null, "grade": "met", "postHoc": false, "stale": false, "acceptances": 0 }
     },
     {
       "name": "api:3000.connections", "unit": "count", "direction": "neutral", "src": "stand",
       "samples": [300.0, 300.0, 300.0], "median": 300.0, "spread": 0.0,
       "before": { "samples": [300.0, 300.0, 300.0], "median": 300.0, "verdict": "within-noise" },
-      "previous": { "median": 300.0, "verdict": "within-noise" }
+      "previous": { "median": 300.0, "verdict": "within-noise" },
+      "expect": { "change": "none", "reason": null, "grade": "met", "postHoc": false, "stale": false, "acceptances": 0 }
     },
     {
       "name": "api:3000.bytes", "unit": "bytes", "direction": "neutral", "src": "stand",
       "samples": [750000.0, 750000.0, 750000.0], "median": 750000.0, "spread": 0.0,
       "before": { "samples": [750000.0, 750000.0, 750000.0], "median": 750000.0, "verdict": "within-noise" },
-      "previous": { "median": 750000.0, "verdict": "within-noise" }
+      "previous": { "median": 750000.0, "verdict": "within-noise" },
+      "expect": { "change": "none", "reason": null, "grade": "met", "postHoc": false, "stale": false, "acceptances": 0 }
     },
     {
       "name": "api:3000.http-5xx-share", "unit": "share", "direction": "lower", "src": "stand",
       "samples": [0.0, 0.0, 0.0], "median": 0.0, "spread": 0.0,
       "before": { "samples": [0.0, 0.0, 0.0], "median": 0.0, "verdict": "within-noise" },
-      "previous": { "median": 0.0, "verdict": "within-noise" }
+      "previous": { "median": 0.0, "verdict": "within-noise" },
+      "expect": { "change": "none", "reason": null, "grade": "met", "postHoc": false, "stale": false, "acceptances": 0 }
     },
     {
       "name": "db:5432.connections", "unit": "count", "direction": "neutral", "src": "stand",
       "samples": [4.0, 4.0, 4.0], "median": 4.0, "spread": 0.0,
       "before": { "samples": [4.0, 4.0, 4.0], "median": 4.0, "verdict": "within-noise" },
-      "previous": { "median": 4.0, "verdict": "within-noise" }
+      "previous": { "median": 4.0, "verdict": "within-noise" },
+      "expect": { "change": "none", "reason": null, "grade": "met", "postHoc": false, "stale": false, "acceptances": 0 }
     },
     {
       "name": "db:5432.bytes", "unit": "bytes", "direction": "neutral", "src": "stand",
       "samples": [100000.0, 100000.0, 100000.0], "median": 100000.0, "spread": 0.0,
       "before": { "samples": [100000.0, 100000.0, 100000.0], "median": 100000.0, "verdict": "within-noise" },
-      "previous": { "median": 100000.0, "verdict": "within-noise" }
+      "previous": { "median": 100000.0, "verdict": "within-noise" },
+      "expect": { "change": "none", "reason": null, "grade": "met", "postHoc": false, "stale": false, "acceptances": 0 }
     },
     {
       "name": "volume:pgdata.bytes", "unit": "bytes", "direction": "neutral", "src": "stand",
       "samples": [8388608.0], "median": 8388608.0, "spread": 0.0,
       "before": { "samples": [8126464.0], "median": 8126464.0, "verdict": "within-noise" },
-      "previous": { "median": 8388608.0, "verdict": "within-noise" }
+      "previous": { "median": 8388608.0, "verdict": "within-noise" },
+      "expect": { "change": "none", "reason": null, "grade": "met", "postHoc": false, "stale": false, "acceptances": 0 }
     }
+  ],
+  "needs": [
+    { "measure": "db.cpu", "reason": "a new query plan" }
   ],
   "flags": [
     { "kind": "network-limit-hit", "repeat": 2, "target": "api:3000", "drops": 14 }

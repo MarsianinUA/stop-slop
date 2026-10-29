@@ -123,6 +123,10 @@ pub enum Flag {
         side: String,
         repeat: u32,
     },
+    /// An `expect.cost` entry of a measure the report does not have.
+    UnknownExpect {
+        measure: String,
+    },
     /// "Before" was taken after the session began, the earliest of its first run and the seal.
     BeforeAfterSession {
         taken_at: String,
@@ -169,9 +173,10 @@ impl Flag {
             Flag::ProbeFailed { .. } => 17,
             Flag::HeadOnlyNoise { .. } => 18,
             Flag::KilledAtStop { .. } => 19,
-            Flag::BeforeAfterSession { .. } => 20,
-            Flag::MeasuredBeforeSeal { .. } => 21,
-            Flag::WideTolerance { .. } => 22,
+            Flag::UnknownExpect { .. } => 20,
+            Flag::BeforeAfterSession { .. } => 21,
+            Flag::MeasuredBeforeSeal { .. } => 22,
+            Flag::WideTolerance { .. } => 23,
         }
     }
 }
