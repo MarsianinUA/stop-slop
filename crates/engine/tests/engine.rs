@@ -1160,7 +1160,7 @@ fn an_edit_that_changes_nothing_is_no_fix() {
 fn functions_gives_each_function_with_a_body_and_where_v8_may_start_it() {
     let text = "export function total(xs: number[]) {\n  return xs.map((x) => x * 2);\n}\n\
                 const label = () => \"a\";\n\
-                class Report {\n  build() {\n    function inner() {}\n    return inner;\n  }\n}\n\
+                class Report {\n  build() {\n    function inner() {}\n    return inner;\n  }\n  static async load() {}\n}\n\
                 const e = \"é😀\", f = () => 1;\n\
                 run(function () {});\n\
                 declare function gone(): void;\n";
@@ -1188,9 +1188,11 @@ fn functions_gives_each_function_with_a_body_and_where_v8_may_start_it() {
             // From the name of the method.
             "build 6:3-9:4",
             "inner 7:5-7:24",
+            // From `static`: coverage starts it at `async`.
+            "load 10:3-10:25",
             // Columns count characters: `é` is 2 bytes, the emoji 4 bytes and 2 UTF-16 units.
-            "f 11:21-11:28",
-            "- 12:5-12:19",
+            "f 12:21-12:28",
+            "- 13:5-13:19",
         ]
     );
     assert!(Engine::functions(&source("src/b.ts", "function (")).is_empty());

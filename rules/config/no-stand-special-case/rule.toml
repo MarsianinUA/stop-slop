@@ -1,0 +1,5 @@
+description = "Code that mentions `/stand`, `STOP_SLOP`, `stand-guest`, `microsandbox` or `preload.cjs`, so the app behaves otherwise on the stand"
+kind = "error"
+files = "all"
+source = ["personal"]
+message = "`{mark}` is a name of the stand of stop-slop: code that knows it runs on the stand acts there unlike in production, so the stand measures code that never ships. The app needs none of these names, since the harness lives in the recipe, outside the repository. Take the value from config like any other setting, and keep what only the stand needs in the recipe."

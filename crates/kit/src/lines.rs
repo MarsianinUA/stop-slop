@@ -1,7 +1,6 @@
 use crate::File;
 use crate::code_comment::{DIRECTIVES, Reach, mentions};
 
-/// Ordered by line, then column.
 #[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Position {
     pub line: u32,
