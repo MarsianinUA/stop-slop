@@ -140,8 +140,9 @@ fn on_failure(flag: &Flag, failure: &Failure) -> bool {
 }
 
 /// Optional Assumptions, «Исключение строки»: a grade other than `met`, but the `unmeasurable` of
-/// a measure without an entry, which stays quiet; `change: unknown`; `postHoc` and `stale`, always.
-/// Without `--before` a shift against the previous run; with a failed "before" nothing was graded.
+/// a measure without an entry or of new code, which stays quiet; `change: unknown`; `postHoc` and
+/// `stale`, always. Without `--before` a shift against the previous run; with a failed "before"
+/// nothing was graded.
 fn exception(measure: &Measure) -> bool {
     let Some(expect) = &measure.expect else {
         let moved = matches!(
@@ -155,7 +156,7 @@ fn exception(measure: &Measure) -> bool {
         || match expect.grade {
             None => true,
             Some(Grade::Met) => false,
-            Some(Grade::Unmeasurable) => expect.reason.is_some(),
+            Some(Grade::Unmeasurable) => expect.reason.is_some() && !grade::new_code(measure),
             Some(Grade::Exceeded | Grade::Surprise) => true,
         }
 }

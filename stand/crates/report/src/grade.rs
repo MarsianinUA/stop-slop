@@ -11,6 +11,13 @@ use crate::stats::{self, Sample};
 /// noise.
 const TOLERANCE: f64 = 0.05;
 
+/// The `reason` of the own hot time of new code (T-13b, orchestrator): a function "before" did not
+/// have appears rather than shifts, so its rise from 0 says nothing of the cost. `stand.wall` and
+/// `stand.hot-collateral` carry the check.
+const NEW_CODE: &str = "new-code";
+
+const HOT_OWNED: &str = "stand.hot-owned";
+
 /// The head's median against "before".
 #[derive(Debug, Clone, Copy)]
 struct Shift {
@@ -50,10 +57,16 @@ pub(crate) fn expect(
     let declared = context.declared.iter().find(|entry| entry.measure == name);
     let applies = effective.copied().or(declared);
     let bound = applies.map_or(Bound::None, |entry| entry.bound);
+    let mut reason = applies.map(|entry| entry.reason.clone());
+    let mut grade = grade(bound, shift);
+    if bound != Bound::Unknown && appears(name, base.median, head.median) {
+        reason = Some(NEW_CODE.to_owned());
+        grade = Some(Grade::Unmeasurable);
+    }
     ExpectJson {
         change: bound.to_string(),
-        reason: applies.map(|entry| entry.reason.clone()),
-        grade: grade(bound, shift),
+        reason,
+        grade,
         post_hoc: effective.is_some(),
         stale,
         acceptances: u32::try_from(accepted.len()).unwrap_or(u32::MAX),
@@ -155,6 +168,17 @@ pub(crate) fn unknown_expect(measures: &[Measure], context: &Context<'_>) -> Vec
         measure: entry.measure.clone(),
     });
     flags.collect()
+}
+
+/// A grade of `NEW_CODE`, which the line keeps quiet as the `unmeasurable` of a measure without an
+/// entry.
+pub(crate) fn new_code(measure: &Measure) -> bool {
+    let base = measure.before.as_ref().and_then(|before| before.median);
+    base.is_some_and(|base| appears(&measure.name, base, measure.median))
+}
+
+fn appears(name: &str, base: f64, head: f64) -> bool {
+    name == HOT_OWNED && base == 0.0 && head > 0.0
 }
 
 /// `None` for an entry of `expect.cost`.

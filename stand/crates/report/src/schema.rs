@@ -157,7 +157,8 @@ pub struct Measure {
 pub struct ExpectJson {
     /// `none`, `+X%`, `-X%`, `down` or `unknown`.
     pub change: String,
-    /// `None`: no entry names the measure, so it is the implicit `none`.
+    /// `None`: no entry names the measure, so it is the implicit `none`. `new-code` for the own hot
+    /// time of new code, whatever the entry says.
     pub reason: Option<String>,
     /// `None` for `change: unknown`.
     pub grade: Option<Grade>,
@@ -168,7 +169,8 @@ pub struct ExpectJson {
     pub acceptances: u32,
 }
 
-/// With a shift that shows, a grade is never `unmeasurable` (plan, row 66).
+/// With a shift that shows, a grade is never `unmeasurable` (plan, row 66), but for the own hot time
+/// of new code.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum Grade {
@@ -415,8 +417,8 @@ pub struct Line {
     pub failure: Option<Failure>,
     /// The measures and files with no exception.
     pub quiet: u32,
-    /// Of the quiet ones, the measures without an `expect` entry graded `unmeasurable` (plan,
-    /// row 66).
+    /// Of the quiet ones, the measures graded `unmeasurable` without an `expect` entry (plan, row
+    /// 66) or as new code.
     pub unmeasurable: u32,
     #[serde(skip)]
     pub next: Vec<Next>,

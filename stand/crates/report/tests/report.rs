@@ -2168,6 +2168,69 @@ fn a_rise_from_zero_exceeds_any_bound_and_has_no_template() {
 }
 
 #[test]
+fn the_own_hot_time_of_new_code_is_a_quiet_unmeasurable_and_a_rise_from_more_grades() {
+    let folder = Folder::new();
+    let util = ("src/util.ts", "format", 3, 5, 50.0);
+    let head = [("src/orders.ts", "build", 10, 21, 300.0), util];
+    let graded = |before: &[(&str, &str, u32, u32, f64)], changed: &str, entry: Option<Bound>| {
+        let raw = raw(
+            &folder,
+            profiled(&folder, "head", &head),
+            Some(profiled(&folder, "before", before)),
+        );
+        let mut compared = context(&raw, Previous::None, &[]);
+        compared.seal = Some(sealed("2026-10-22T09:40:00Z", 1000));
+        compared.changed = Some([changed.to_owned()].into());
+        compared.declared = entry
+            .map(|bound| declared("stand.hot-owned", bound))
+            .into_iter()
+            .collect();
+        report_of(&raw, &compared, &[])
+    };
+    let new = graded(&[util], "src/orders.ts", None);
+    let owned = expect(&new, "stand.hot-owned");
+    assert_eq!(
+        (owned.change.as_str(), owned.reason.as_deref(), owned.grade),
+        ("none", Some("new-code"), Some(Grade::Unmeasurable))
+    );
+    assert_eq!(expect(&new, "stand.hot-collateral").grade, Some(Grade::Met));
+    let line = new.line(Utf8Path::new("run"));
+    assert!(names_of(&line).is_empty(), "{:?}", names_of(&line));
+    assert_eq!(line.unmeasurable, 1);
+    assert!(line.next.is_empty(), "{:?}", line.next);
+    // An entry changes the bound, not the grade; `unknown` still asks a person.
+    let bounded = graded(&[util], "src/orders.ts", Some(Bound::UpTo(10)));
+    let owned = expect(&bounded, "stand.hot-owned");
+    assert_eq!(
+        (owned.change.as_str(), owned.reason.as_deref(), owned.grade),
+        ("+10%", Some("new-code"), Some(Grade::Unmeasurable))
+    );
+    assert!(names_of(&bounded.line(Utf8Path::new("run"))).is_empty());
+    let asked = graded(&[util], "src/orders.ts", Some(Bound::Unknown));
+    assert_eq!(expect(&asked, "stand.hot-owned").grade, None);
+    assert_eq!(asked.needs.len(), 1, "{:?}", asked.needs);
+    // From 100 ms the rise shows under `none`; at 0 on both sides nothing moved.
+    let grown = graded(
+        &[("src/orders.ts", "build", 10, 21, 100.0), util],
+        "src/orders.ts",
+        None,
+    );
+    let owned = expect(&grown, "stand.hot-owned");
+    assert_eq!(
+        (owned.reason.as_deref(), owned.grade),
+        (None, Some(Grade::Surprise))
+    );
+    let line = grown.line(Utf8Path::new("run"));
+    assert_eq!(names_of(&line), ["stand.hot-owned"]);
+    let untouched = graded(&[util], "src/other.ts", None);
+    let owned = expect(&untouched, "stand.hot-owned");
+    assert_eq!(
+        (owned.reason.as_deref(), owned.grade),
+        (None, Some(Grade::Met))
+    );
+}
+
+#[test]
 fn unknown_has_no_grade_and_asks_a_person_in_needs() {
     let report = compared_wall(&[1300, 1300, 1300], |context| {
         context.declared = vec![declared("stand.wall", Bound::Unknown)];
