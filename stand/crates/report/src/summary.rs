@@ -133,7 +133,7 @@ fn headlines(flags: &[Flag]) -> Vec<String> {
         Flag::CoverageUnknown {
             stage: Some(stage), ..
         } => Some(format!(
-            "coverage unknown: the coverage repeat failed at {}",
+            "coverage unknown: repeat failed at {}",
             token(stage)
         )),
         Flag::CoverageUnknown {

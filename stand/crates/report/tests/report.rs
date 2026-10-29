@@ -1862,7 +1862,7 @@ fn the_summary_opens_with_no_comparison_and_coverage_unknown() {
     let first: Vec<&str> = summary.lines().take(3).collect();
     let opening = [
         "NO COMPARISON: before failed at setup",
-        "coverage unknown: the coverage repeat failed at workload",
+        "coverage unknown: repeat failed at workload",
     ];
     let run = format!("run {RUN}");
     assert_eq!(first, [opening[0], opening[1], run.as_str()]);
