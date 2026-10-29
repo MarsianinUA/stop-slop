@@ -7,7 +7,7 @@ publish = false
 
 [features]
 fake = []
-# Only `cli` turns it on (T-14); until then the live tests pass `--features sandbox/microsandbox`.
+# Only `cli` turns it on: a workspace build has the adapter, `-p sandbox` alone needs `--features microsandbox`.
 microsandbox = [
     "dep:guest",
     "dep:microsandbox",

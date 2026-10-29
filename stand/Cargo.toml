@@ -9,6 +9,9 @@ rust-version = "1.97"
 
 [workspace.dependencies]
 camino = "1"
+clap = { version = "4", features = ["derive"] }
+ctrlc = "3"
+dirs = "7"
 humantime = "2"
 libc = "0.2"
 microsandbox = { version = "=0.7.8", default-features = false, features = ["local", "net"] }
@@ -29,3 +32,5 @@ thiserror = "2"
 tokio = { version = "1.52", features = ["rt-multi-thread", "sync", "time"] }
 toml = "1"
 tracing = "0.1"
+# `fmt` without `ansi`: the adapter's warnings on stderr; `registry` and `std` for the target filter.
+tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "registry", "std"] }

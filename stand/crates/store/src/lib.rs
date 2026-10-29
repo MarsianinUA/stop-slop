@@ -37,9 +37,10 @@ const JOURNAL: &str = "journal";
 /// read.
 const WHOLE_FILE: &str = "toml";
 
+#[derive(Debug, Clone)]
 pub struct StorePaths {
     pub root: Utf8PathBuf,
-    /// `stand.toml`; on macOS the config and data folders are one, so it lies in `root`.
+    /// `stand.toml`, in the config folder of the OS; `clean --all` leaves it when it lies in `root`.
     pub config: Utf8PathBuf,
 }
 
@@ -68,6 +69,10 @@ impl Store {
             Err(TryLockError::WouldBlock) => Ok(None),
             Err(TryLockError::Error(source)) => Err(StoreError::Io { path, source }),
         }
+    }
+
+    pub fn paths(&self) -> &StorePaths {
+        &self.paths
     }
 
     pub fn sandbox_home(&self) -> Utf8PathBuf {

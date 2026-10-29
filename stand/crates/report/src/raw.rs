@@ -207,10 +207,13 @@ pub struct Failure {
     pub probes: Vec<Utf8PathBuf>,
 }
 
-/// The steps of the plan's call order; `run` uses only `Setup`, `Ready` and `Workload`.
+/// The steps of the plan's call order, after `args`; `run` uses only `Setup`, `Ready` and
+/// `Workload`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum Phase {
+    /// A flag `clap` refused: `run --json` still prints its line, as the linter's `check --json`.
+    Args,
     Config,
     Spec,
     Lock,

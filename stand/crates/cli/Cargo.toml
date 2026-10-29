@@ -1,0 +1,38 @@
+[package]
+name = "cli"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish = false
+
+[[bin]]
+name = "stop-slop-stand"
+path = "src/main.rs"
+
+[dependencies]
+budget = { path = "../budget" }
+camino.workspace = true
+clap.workspace = true
+ctrlc.workspace = true
+dirs.workspace = true
+report = { path = "../report" }
+run = { path = "../run" }
+# The only crate that turns the adapter on (plan, row 85).
+sandbox = { path = "../sandbox", features = ["microsandbox"] }
+serde.workspace = true
+serde_json.workspace = true
+source = { path = "../source" }
+spec = { path = "../spec" }
+store = { path = "../store" }
+thiserror.workspace = true
+# The adapter's warnings (a failed trim before a snapshot) reach stderr only through it.
+tracing-subscriber.workspace = true
+
+[dev-dependencies]
+# `usedAt` of `session.json`, moved back for the TTL.
+humantime.workspace = true
+sandbox = { path = "../sandbox", features = ["fake"] }
+# The command strings of `next` split as a shell splits them.
+shlex.workspace = true
+tempfile.workspace = true
+testkit = { path = "../../../shared/testkit" }
