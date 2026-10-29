@@ -167,4 +167,30 @@ mod tests {
             assert!(loaded.is_ok(), "{:?}", loaded.err());
         }
     }
+
+    /// 8 logical CPUs (a MacBook) give a stand 4 vCPUs, what the setup of the template asks; its
+    /// services ask 6 in all.
+    #[test]
+    fn the_template_fits_a_host_of_eight_cpus() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = Utf8Path::from_path(dir.path())
+            .unwrap()
+            .join("compose.yaml");
+        fs::write(&file, TEMPLATE).unwrap();
+        let stand = spec::load(&file, &spec::Policy::new(None).unwrap()).unwrap();
+        const GIB: u64 = 1 << 30;
+        let host = budget::Host {
+            cpus: 8,
+            memory: 16 * GIB,
+            free_memory: 12 * GIB,
+            free_disk: 100 * GIB,
+        };
+        let admitted = budget::check(
+            crate::measure::demand(&stand),
+            &host,
+            budget::Share::new(None).unwrap(),
+        )
+        .unwrap();
+        assert_eq!((admitted.cpus, admitted.memory), (4, 3 * GIB));
+    }
 }

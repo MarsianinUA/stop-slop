@@ -7,8 +7,8 @@
 //! in a job without breakaway, where a VM from a snapshot cannot start, and the binary under test
 //! is a child of this one.
 //!
-//! The budget counts every service and replica at once and gives a stand half the logical CPUs
-//! unless `stand.toml` says more (80% at most): the whole case asks 4 vCPUs, so 8 logical CPUs,
+//! The budget counts the peak of a run, setup or a repeat, and gives a stand half the logical CPUs
+//! unless `stand.toml` says more (80% at most): the whole case asks 3 vCPUs, so 6 logical CPUs,
 //! and the small one 2, which a CI runner of 4 gives. The stand also keeps 20 GiB free on the disk
 //! of its folder: on Windows `TMP` moves the folder to another disk, on Linux a link at its path.
 //!
@@ -35,8 +35,7 @@ const NODE: &str = "node:22-slim";
 /// Postgres with a volume and the probe `orders`; the prepare service installs `pg`, builds and
 /// migrates on the version disk; a profiled `api` with a pool of connections to `db`; the workload
 /// makes 50 orders over keep-alive, twice on one state with the second pass. Migrations run in
-/// prepare, which waits for `db`, so `db` runs in setup and its volume goes into the cache entry:
-/// a `migrate` service of its own would ask a fifth vCPU.
+/// prepare, which waits for `db`, so `db` runs in setup and its volume goes into the cache entry.
 const RECIPE: &str = r#"
 services:
   db:

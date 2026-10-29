@@ -563,7 +563,7 @@ fn write_tar(worktree: &Worktree, tree: &Tree, path: &Utf8Path) -> Result<(), St
     written
 }
 
-fn demand(stand: &Stand) -> budget::Demand {
+pub(crate) fn demand(stand: &Stand) -> budget::Demand {
     let demand = stand.demand();
     budget::Demand {
         cpus: demand.cpus,

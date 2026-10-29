@@ -144,7 +144,7 @@ jobs:
           df -h / /mnt
       # The pinned stand-guest from the release, as a user gets it: without STOP_SLOP_STAND_GUEST
       # the adapter downloads it and checks its sha256. The runner's 4 CPUs give a stand 2 vCPUs, so
-      # only the small case fits; the whole one asks 4 and runs on Windows and the Mac.
+      # only the small case fits; the whole one asks 3 and runs on Windows and the Mac.
       - name: The stand command on microsandbox VMs
         run: >-
           env -u STOP_SLOP_STAND_GUEST cargo test --locked -p cli --test live -- --test-threads=1

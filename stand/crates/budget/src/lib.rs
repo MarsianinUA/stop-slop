@@ -140,7 +140,7 @@ fn part(whole: u64, share: Share) -> u64 {
     (u128::from(whole) * u128::from(share.0) / 100) as u64
 }
 
-/// Every service and replica at once; CPUs as whole vCPUs.
+/// The demand that fit: the peak of a run, CPUs as whole vCPUs.
 #[derive(Debug)]
 pub struct Admission {
     pub cpus: u32,
