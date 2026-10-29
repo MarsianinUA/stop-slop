@@ -7,6 +7,7 @@ use camino::Utf8Path;
 
 mod context;
 mod flags;
+mod hot;
 mod measures;
 mod next;
 mod outputs;
@@ -24,8 +25,8 @@ pub use raw::{
     Role, SecondPassOutcome, Setup, SetupSide,
 };
 pub use schema::{
-    BeforeJson, Direction, Head, IntentJson, Measure, RecipeJson, Report, SetupJson, Src, Unit,
-    Verdict, VersusBefore, VersusPrevious,
+    BeforeJson, CalledJson, CoverageJson, Direction, Head, Hot, HotVersus, IntentJson, Measure,
+    RecipeJson, Report, SetupJson, Src, Unit, Verdict, VersusBefore, VersusPrevious,
 };
 
 /// The last passed run outside the pool (plan, row 35). `Unreadable` is `previous-unreadable`.
@@ -73,6 +74,8 @@ pub fn make(raw: &Raw, outputs: &Outputs, context: &Context<'_>) -> Report {
         previous_run: previous.map(|report| report.run.clone()),
         measures,
         flags,
+        hot: hot::of(raw, before, previous),
+        coverage: hot::coverage(raw),
     }
 }
 

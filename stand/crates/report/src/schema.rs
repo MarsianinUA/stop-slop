@@ -30,6 +30,9 @@ pub struct Report {
     pub previous_run: Option<String>,
     pub measures: Vec<Measure>,
     pub flags: Vec<Flag>,
+    /// By `selfMs`, the hottest first.
+    pub hot: Vec<Hot>,
+    pub coverage: Option<CoverageJson>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -141,6 +144,48 @@ pub enum Verdict {
     Changed,
     WithinNoise,
     NoBaseline,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Hot {
+    pub service: String,
+    /// From the repo root, with `/`.
+    pub file: String,
+    /// V8's name; empty for an anonymous function.
+    pub name: String,
+    /// From 1, where V8 starts the function.
+    pub line: u32,
+    pub column: u32,
+    /// Medians of the head's measured repeats, the replicas of the service added up.
+    pub self_ms: f64,
+    pub total_ms: f64,
+    /// `None` without `--before`.
+    pub before: Option<HotVersus>,
+    pub previous: HotVersus,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HotVersus {
+    pub verdict: Verdict,
+}
+
+/// From the coverage repeat only; `None` without one, when it failed (`coverage-unknown`), or when
+/// a service's coverage is unknown (`no-profile`).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CoverageJson {
+    pub services: Vec<String>,
+    /// Functions entered at least once, by file, line and column, the services added up.
+    pub called: Vec<CalledJson>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CalledJson {
+    pub file: String,
+    pub line: u32,
+    pub column: u32,
+    /// Entries into the body, not calls: each resumption after `await` counts too.
+    pub calls: u64,
 }
 
 pub(crate) fn before_json(
