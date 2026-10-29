@@ -110,11 +110,21 @@ fn a_build_writes_out_and_entry_json_after_the_whole_setup_and_nothing_else() {
     assert_clean(&fake, &case.left());
 }
 
-/// A link a service leaves in `/stand/out` stays out of the entry: a copy would read what it
-/// points at on the host.
+/// A link a service leaves in `/stand/out` never gets into an entry, nor out of one: a copy would
+/// read what it points at on the host, and the report refuses it in a build.
 #[cfg(unix)]
 #[test]
-fn a_build_copies_no_link_into_the_entry() {
+fn a_link_in_the_setup_outputs_is_a_stand_fault_in_a_build_and_on_a_hit() {
+    let refused = |result: &Result<_, RunError>, link: &Utf8Path| {
+        matches!(
+            result,
+            Err(RunError::Stand {
+                phase: Phase::Setup,
+                fault: StandFault::Io { path, .. },
+            }) if *path == link
+        )
+    };
+    // A build: its setup passes, no entry is written, no repeat starts, its snapshots go.
     let case = Case::new(EXAMPLE);
     let out = case.run_dir().join("setup-head/out");
     fs::create_dir_all(&out).unwrap();
@@ -122,10 +132,31 @@ fn a_build_copies_no_link_into_the_entry() {
     fs::write(&secret, b"host").unwrap();
     std::os::unix::fs::symlink(&secret, out.join("leak")).unwrap();
     let fake = fake(example_rules());
-    case.run(&fake, &case.versions(false)).unwrap();
-    let copied = names_in(&case.entry(Side::Head).join("out"));
-    assert_eq!(copied, ["probe.schema.jsonl", "probe.schema.jsonl.err"]);
-    assert_clean(&fake, &case.left());
+    let result = case.run(&fake, &case.versions(false));
+    assert!(refused(&result, &out.join("leak")), "{result:?}");
+    assert_eq!(run::cached_ids(&case.entry(Side::Head)).unwrap(), None);
+    assert_eq!(
+        services(&fake.journal()),
+        ["db-1", "prepare-1", "migrate-1"]
+    );
+    assert_clean(&fake, &[]);
+
+    // A hit on an entry that holds one: nothing starts.
+    let first = Case::new(EXAMPLE);
+    let fake = crate::fake(example_rules());
+    first.run(&fake, &first.versions(false)).unwrap();
+    let built = fake.journal().len();
+    let link = first.entry(Side::Head).join("out/leak");
+    std::os::unix::fs::symlink(&secret, &link).unwrap();
+    let second = Case::new(EXAMPLE);
+    let versions = Versions {
+        head: hit(&second, &first, Side::Head),
+        before: None,
+    };
+    let result = second.run(&fake, &versions);
+    assert!(refused(&result, &link), "{result:?}");
+    assert_eq!(fake.journal().len(), built);
+    assert_clean(&fake, &first.left());
 }
 
 #[test]

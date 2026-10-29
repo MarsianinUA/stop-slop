@@ -104,8 +104,9 @@ fn read(entry: &Utf8Path) -> Result<Option<EntryFile>, StandFault> {
 }
 
 /// The whole of `/stand/out` of setup: `.err` and `.status` lie beside each probe output, and a
-/// service with a probe may write there too. Only folders and plain files: a link a service left
-/// would read the host.
+/// service with a probe may write there too. Anything but a folder or a plain file is refused: a
+/// link a service left would read the host, and the report refuses it in a build, so a hit must not
+/// pass with it either.
 fn copy_dir(from: &Utf8Path, to: &Utf8Path) -> Result<(), StandFault> {
     fs::create_dir_all(to).map_err(StandFault::io(to))?;
     for entry in from.read_dir_utf8().map_err(StandFault::io(from))? {
@@ -116,6 +117,12 @@ fn copy_dir(from: &Utf8Path, to: &Utf8Path) -> Result<(), StandFault> {
             copy_dir(entry.path(), &target)?;
         } else if kind.is_file() {
             fs::copy(entry.path(), &target).map_err(StandFault::io(&target))?;
+        } else {
+            return Err(StandFault::bad(
+                entry.path(),
+                "not a folder or a plain file: the stand takes the outputs in /stand/out only as \
+                 folders and plain files, never through a link",
+            ));
         }
     }
     Ok(())
