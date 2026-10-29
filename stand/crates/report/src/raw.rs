@@ -186,8 +186,10 @@ pub struct Failure {
     pub repeat: Option<u32>,
     pub cause: Cause,
     /// The folder of the failed setup or repeat, with its logs.
+    #[serde(serialize_with = "crate::schema::slash::option")]
     pub logs: Option<Utf8PathBuf>,
     /// The outputs of the `on-failure` probes.
+    #[serde(serialize_with = "crate::schema::slash::paths")]
     pub probes: Vec<Utf8PathBuf>,
 }
 
@@ -321,6 +323,18 @@ mod tests {
         let json = serde_json::to_value(&failure).unwrap();
         assert_eq!(json["phase"], "workload");
         assert_eq!(json["cause"], "timeout");
+        assert_eq!(json["logs"], "runs/1/repeat-2-head");
         assert_eq!(serde_json::from_value::<Failure>(json).unwrap(), failure);
+        #[cfg(windows)]
+        {
+            let failure = Failure {
+                logs: Some(r"runs\1\repeat-2-head".into()),
+                probes: vec![r"runs\1\repeat-2-head\out\probe.a.jsonl".into()],
+                ..failure
+            };
+            let json = serde_json::to_value(&failure).unwrap();
+            assert_eq!(json["logs"], "runs/1/repeat-2-head");
+            assert_eq!(json["probes"][0], "runs/1/repeat-2-head/out/probe.a.jsonl");
+        }
     }
 }
