@@ -1,0 +1,2081 @@
+//! `read_outputs` and `make` on values of `Raw` and `Context` (blueprint, Tests `report.rs`). No
+//! VM: a temporary folder stands in for the run folder that `run` leaves.
+
+use std::collections::BTreeMap;
+use std::fs;
+use std::time::{Duration, SystemTime};
+
+use camino::{Utf8Path, Utf8PathBuf};
+use profile::{Called, Coverage, ModuleTime, Sampled, Samples};
+use report::{
+    At, BeforeInfo, BeforeOutcome, Behaviour, Cause, Context, CoverageOutcome, DeadReason, Failure,
+    FaultOutcome, FaultRepeat, Flag, InstanceOutput, Intent, Line, Measure, Next, Phase, Previous,
+    ProbeRan, ProbeRule, ProfileOutcome, Raw, RepeatOutput, Report, ReportError, Role, Setup,
+    SetupFrom, SetupSide, Src, Verdict, load, make, read_outputs,
+};
+use sandbox::{ExecOutcome, Metrics, PortStats, Stopped, Unexposed};
+use serde_json::{Value, json};
+use tempfile::TempDir;
+
+const GIB: u64 = 1 << 30;
+const RUN: &str = "20261022-100000";
+const PREVIOUS: &str = "20261022-094500";
+const HEAD_TREE: &str = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
+const BEFORE_TREEISH: &str = "a1b2c3d4e5f60718293a4b5c6d7e8f9012345678";
+const BEFORE_TREE: &str = "7d1e09f3c2b4a5968778695a4b3c2d1e0f9a8b7c";
+const DIGEST: &str = "9f2c41aa6b0e4d3c8a7f5e1d2c4b6a8f0e9d7c5b3a1f2e4d6c8b0a9f7e5d3c1b";
+const FIXTURE: &str = include_str!("../../../../shared/fixtures/report.json");
+
+// --- helpers ---------------------------------------------------------------------------------
+
+/// The run folder `run` leaves: `<name>/out/` per setup and repeat, one log per instance.
+struct Folder(TempDir);
+
+impl Folder {
+    fn new() -> Folder {
+        Folder(tempfile::tempdir().expect("a temporary folder"))
+    }
+
+    fn path(&self) -> &Utf8Path {
+        Utf8Path::from_path(self.0.path()).expect("a UTF-8 temporary folder")
+    }
+
+    /// `<name>/out/` with `files` in it.
+    fn out(&self, name: &str, files: &[(&str, &str)]) -> Utf8PathBuf {
+        let out = self.path().join(name).join("out");
+        fs::create_dir_all(&out).expect("create out");
+        for (file, text) in files {
+            fs::write(out.join(file), text).expect("write an output");
+        }
+        out
+    }
+
+    /// `<name>.log`: `cut` is the measured window, `after` the lines past the cut.
+    fn log(&self, name: &str, cut: &str, after: &str) -> (Utf8PathBuf, u64) {
+        let path = self.path().join(format!("{name}.log"));
+        fs::write(&path, format!("{cut}{after}")).expect("write a log");
+        (path, cut.len() as u64)
+    }
+}
+
+fn metrics(cpu_ms: u64, memory: u64) -> Metrics {
+    Metrics {
+        cpu: Duration::from_millis(cpu_ms),
+        memory_peak: memory,
+        memory_limit: GIB,
+        ports: Vec::new(),
+        unexposed: Vec::new(),
+    }
+}
+
+fn port(target: &str, connections: u64) -> PortStats {
+    PortStats {
+        target: target.to_owned(),
+        connections,
+        open: 0,
+        bytes_out: 0,
+        bytes_in: 0,
+        http: None,
+        drops: 0,
+    }
+}
+
+fn instance(
+    service: &str,
+    role: Role,
+    metrics: Metrics,
+    (log, log_cut): (Utf8PathBuf, u64),
+) -> InstanceOutput {
+    let stopped = Stopped {
+        after: Duration::from_millis(100),
+        killed: false,
+    };
+    InstanceOutput {
+        service: service.to_owned(),
+        replica: 1,
+        role,
+        metrics,
+        log,
+        log_cut,
+        stopped: (role == Role::LongRunning).then_some(stopped),
+        profile: None,
+    }
+}
+
+/// A measured repeat with the long-running `api` and the workload `load`, which calls `api:3000`.
+fn plain(folder: &Folder, side: &str, repeat: u32, wall: u64) -> RepeatOutput {
+    plain_with(folder, side, repeat, wall, &[])
+}
+
+/// `files` in its `out/`.
+fn plain_with(
+    folder: &Folder,
+    side: &str,
+    repeat: u32,
+    wall: u64,
+    files: &[(&str, &str)],
+) -> RepeatOutput {
+    let dir = format!("repeat-{repeat}-{side}");
+    let mut load = metrics(500, 50 << 20);
+    load.ports.push(port("api:3000", 10));
+    let api_log = folder.log(&format!("{dir}-api"), "ready\n", "");
+    RepeatOutput {
+        repeat,
+        wall: Duration::from_millis(wall),
+        instances: vec![
+            instance("api", Role::LongRunning, metrics(1000, 100 << 20), api_log),
+            instance(
+                "load",
+                Role::Workload,
+                load,
+                folder.log(&format!("{dir}-load"), "", ""),
+            ),
+        ],
+        probes: Vec::new(),
+        out_dir: folder.out(&dir, files),
+    }
+}
+
+/// One repeat per wall time.
+fn repeats(folder: &Folder, side: &str, walls: &[u64]) -> Vec<RepeatOutput> {
+    let numbered = walls.iter().zip(1..);
+    numbered
+        .map(|(wall, repeat)| plain(folder, side, repeat, *wall))
+        .collect()
+}
+
+/// One repeat per list of files in its `out/`.
+fn with_files(folder: &Folder, side: &str, files: &[&[(&str, &str)]]) -> Vec<RepeatOutput> {
+    let numbered = files.iter().zip(1..);
+    numbered
+        .map(|(files, repeat)| plain_with(folder, side, repeat, 1000, files))
+        .collect()
+}
+
+fn setup_side(folder: &Folder, side: &str, files: &[(&str, &str)]) -> SetupSide {
+    SetupSide {
+        sizes: BTreeMap::new(),
+        probes: Vec::new(),
+        out_dir: folder.out(&format!("setup-{side}"), files),
+    }
+}
+
+fn raw(folder: &Folder, head: Vec<RepeatOutput>, before: Option<Vec<RepeatOutput>>) -> Raw {
+    Raw {
+        digest: DIGEST.to_owned(),
+        repeat: u32::try_from(head.len()).expect("a few repeats"),
+        setup_timeout: Duration::from_secs(600),
+        timeout: Duration::from_secs(300),
+        harness: vec!["/harness".to_owned()],
+        probes: BTreeMap::new(),
+        setup: Setup {
+            head: setup_side(folder, "head", &[]),
+            before: before.as_ref().map(|_| setup_side(folder, "before", &[])),
+        },
+        head,
+        before: before.map(BeforeOutcome::Passed),
+        coverage: None,
+        fault: None,
+        second_pass: None,
+    }
+}
+
+fn at(time: &str) -> SystemTime {
+    humantime::parse_rfc3339(time).expect("an RFC 3339 time")
+}
+
+fn context<'r>(raw: &Raw, previous: Previous<'r>, pool: &'r [Report]) -> Context<'r> {
+    let before = raw.before.as_ref().map(|_| BeforeInfo {
+        intent: Intent::Session,
+        treeish: BEFORE_TREEISH.to_owned(),
+        tree: BEFORE_TREE.to_owned(),
+        taken_at: at("2026-10-22T09:12:00Z"),
+    });
+    Context {
+        run: RUN.to_owned(),
+        created_at: at("2026-10-22T10:00:00Z"),
+        root: "E:/work/app".into(),
+        head_tree: HEAD_TREE.to_owned(),
+        before,
+        previous,
+        pool,
+        setup_from: SetupFrom::default(),
+    }
+}
+
+fn report_of(raw: &Raw, context: &Context<'_>, pool: &[Utf8PathBuf]) -> Report {
+    make(
+        raw,
+        &read_outputs(raw, pool).expect("the outputs read"),
+        context,
+    )
+}
+
+fn report(raw: &Raw) -> Report {
+    report_of(raw, &context(raw, Previous::None, &[]), &[])
+}
+
+/// A passed run of the pool, written as `cli` writes it, with its folder.
+fn written(folder: &Folder, name: &str, raw: &Raw, context: &Context<'_>) -> (Report, Utf8PathBuf) {
+    let report = report_of(raw, context, &[]);
+    let dir = folder.path().join(name);
+    fs::create_dir_all(&dir).expect("create the run folder");
+    report.write(&dir).expect("the report writes");
+    (report, dir)
+}
+
+fn measure<'r>(report: &'r Report, name: &str) -> &'r Measure {
+    let found = report.measures.iter().find(|measure| measure.name == name);
+    found.unwrap_or_else(|| panic!("no measure {name} in {:?}", names(report)))
+}
+
+fn names(report: &Report) -> Vec<&str> {
+    let names = report.measures.iter();
+    names.map(|measure| measure.name.as_str()).collect()
+}
+
+fn verdicts(measure: &Measure) -> (Option<Verdict>, Verdict) {
+    let before = measure.before.as_ref();
+    (
+        before.map(|before| before.verdict),
+        measure.previous.verdict,
+    )
+}
+
+fn probe_ran(name: &str, outcome: ExecOutcome, out: &Utf8Path) -> ProbeRan {
+    ProbeRan {
+        name: name.to_owned(),
+        outcome,
+        out: out.join(format!("probe.{name}.jsonl")),
+    }
+}
+
+fn read(functions: Vec<Sampled>) -> ProfileOutcome {
+    let local_ms = functions.iter().map(|function| function.self_ms).sum();
+    ProfileOutcome::Read(Samples {
+        total_ms: local_ms,
+        local_ms,
+        unmapped_ms: 0.0,
+        processes: 1,
+        lost_processes: 0,
+        functions,
+        modules: Vec::new(),
+    })
+}
+
+fn sampled(file: &str, name: &str, line: u32, self_ms: f64) -> Sampled {
+    Sampled {
+        file: file.into(),
+        line,
+        column: 21,
+        name: name.to_owned(),
+        self_ms,
+        total_ms: self_ms * 2.0,
+        lines: Vec::new(),
+    }
+}
+
+fn killed() -> Option<Stopped> {
+    Some(Stopped {
+        after: Duration::from_secs(10),
+        killed: true,
+    })
+}
+
+fn behaviour<'r>(report: &'r Report, file: &str) -> &'r Behaviour {
+    let files = report.behaviour.as_ref().expect("a behaviour section");
+    let found = files.iter().find(|found| found.file == file);
+    found.unwrap_or_else(|| panic!("no file {file}"))
+}
+
+// --- measures ----------------------------------------------------------------------------------
+
+#[test]
+fn measures_take_the_median_the_spread_and_the_verdicts_against_before_and_the_previous_run() {
+    let folder = Folder::new();
+    let earlier = raw(
+        &folder,
+        repeats(&folder, "previous", &[131, 132, 133]),
+        None,
+    );
+    let previous = report(&earlier);
+    let mut head = repeats(&folder, "head", &[130, 132, 134]);
+    let mut before = repeats(&folder, "before", &[100, 101, 102]);
+    for repeat in head.iter_mut().chain(&mut before) {
+        repeat.instances[0].metrics.ports.push(port("db:5432", 3));
+    }
+    let raw = raw(&folder, head, Some(before));
+    let report = report_of(&raw, &context(&raw, Previous::Read(&previous), &[]), &[]);
+
+    assert_eq!(
+        (report.setup_timeout.as_str(), report.timeout.as_str()),
+        ("10m", "5m")
+    );
+    assert_eq!(report.created_at, "2026-10-22T10:00:00Z");
+    let wall = measure(&report, "stand.wall");
+    assert_eq!(wall.samples, [130.0, 132.0, 134.0]);
+    assert_eq!((wall.median, wall.spread), (132.0, 0.0303));
+    let against = wall.before.as_ref().expect("a before");
+    assert_eq!(against.samples, [100.0, 101.0, 102.0]);
+    assert_eq!(
+        (against.median, against.verdict),
+        (Some(101.0), Verdict::Regressed)
+    );
+    assert_eq!(
+        (wall.previous.median, wall.previous.verdict),
+        (Some(132.0), Verdict::WithinNoise)
+    );
+    assert_eq!(
+        verdicts(measure(&report, "api.cpu")),
+        (Some(Verdict::WithinNoise), Verdict::WithinNoise)
+    );
+    // The previous run never called `db:5432`.
+    let db = measure(&report, "db:5432.connections");
+    assert_eq!(
+        (db.previous.median, db.previous.verdict),
+        (None, Verdict::NoBaseline)
+    );
+    assert_eq!(report.previous_run.as_deref(), Some(RUN));
+    assert!(measure(&previous, "stand.wall").before.is_none());
+}
+
+#[test]
+fn error_lines_and_the_5xx_share_rising_from_zero_regress() {
+    let folder = Folder::new();
+    let mut head = repeats(&folder, "head", &[100, 100, 100]);
+    let mut before = repeats(&folder, "before", &[100, 100, 100]);
+    for (index, repeat) in head.iter_mut().enumerate() {
+        let (log, cut) = folder.log(&format!("head-api-{index}"), "ready\nERROR: boom\n", "");
+        repeat.instances[0].log = log;
+        repeat.instances[0].log_cut = cut;
+        repeat.instances[1].metrics.ports[0].http = Some([0, 99, 0, 0, 1]);
+    }
+    for repeat in &mut before {
+        repeat.instances[1].metrics.ports[0].http = Some([0, 100, 0, 0, 0]);
+    }
+    let report = report(&raw(&folder, head, Some(before)));
+
+    let errors = measure(&report, "api.error-lines");
+    assert_eq!(errors.samples, [1.0, 1.0, 1.0]);
+    assert_eq!(verdicts(errors).0, Some(Verdict::Regressed));
+    let share = measure(&report, "api:3000.http-5xx-share");
+    assert_eq!(share.samples, [0.01, 0.01, 0.01]);
+    assert_eq!(verdicts(share).0, Some(Verdict::Regressed));
+}
+
+#[test]
+fn every_measure_is_subject_dot_metric_and_the_stand_measured_it() {
+    let folder = Folder::new();
+    let mut head = repeats(&folder, "head", &[100]);
+    head[0].instances[0].metrics.ports.push(port("db:5432", 3));
+    head[0].instances[1].metrics.ports[0].http = Some([0, 10, 0, 0, 0]);
+    let mut raw = raw(&folder, head, None);
+    raw.setup.head.sizes.insert("pgdata".to_owned(), 4096);
+    let report = report(&raw);
+
+    assert_eq!(
+        names(&report),
+        [
+            "stand.wall",
+            "api.cpu",
+            "api.memory",
+            "api.error-lines",
+            "api.shutdown",
+            "api:3000.connections",
+            "api:3000.bytes",
+            "api:3000.http-5xx-share",
+            "db:5432.connections",
+            "db:5432.bytes",
+            "volume:pgdata.bytes",
+        ]
+    );
+    for measure in &report.measures {
+        let (subject, metric) = measure.name.rsplit_once('.').expect("<subject>.<metric>");
+        assert!(
+            !subject.is_empty() && !metric.is_empty(),
+            "{}",
+            measure.name
+        );
+        let kebab = |byte: u8| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-';
+        assert!(metric.bytes().all(kebab), "{}", measure.name);
+        assert_eq!(measure.src, Src::Stand, "{}", measure.name);
+    }
+}
+
+#[test]
+fn a_neutral_measure_only_changes_and_a_lower_one_improves_or_regresses() {
+    let folder = Folder::new();
+    let mut head = repeats(&folder, "head", &[100, 100, 100]);
+    for repeat in &mut head {
+        repeat.instances[1].metrics.ports[0].connections = 20;
+    }
+    let before = repeats(&folder, "before", &[200, 200, 200]);
+    let mut raw = raw(&folder, head, Some(before));
+    raw.setup.head.sizes.insert("pgdata".to_owned(), 500);
+    let before_setup = raw.setup.before.as_mut().expect("a before setup");
+    before_setup.sizes.insert("pgdata".to_owned(), 1000);
+    let report = report(&raw);
+
+    assert_eq!(
+        verdicts(measure(&report, "stand.wall")).0,
+        Some(Verdict::Improved)
+    );
+    // More connections and less data both only change: neither side is better.
+    assert_eq!(
+        verdicts(measure(&report, "api:3000.connections")).0,
+        Some(Verdict::Changed)
+    );
+    assert_eq!(
+        verdicts(measure(&report, "volume:pgdata.bytes")).0,
+        Some(Verdict::Changed)
+    );
+}
+
+#[test]
+fn error_lines_and_node_warnings_count_before_the_cut_and_the_slowest_stop_is_the_shutdown() {
+    let folder = Folder::new();
+    let mut head = repeats(&folder, "head", &[100]);
+    let cut = "ready\n(node:7) MaxListenersExceededWarning: Possible EventEmitter memory leak\nERROR: boom\n";
+    let (log, log_cut) = folder.log("api-1", cut, "ERROR: past the cut\n");
+    let first = &mut head[0].instances[0];
+    first.log = log;
+    first.log_cut = log_cut;
+    first.stopped = Some(Stopped {
+        after: Duration::from_millis(250),
+        killed: false,
+    });
+    let second_log = folder.log("api-2", "[ERROR] x\n", "");
+    let mut second = instance(
+        "api",
+        Role::LongRunning,
+        metrics(1000, 100 << 20),
+        second_log,
+    );
+    second.replica = 2;
+    second.stopped = Some(Stopped {
+        after: Duration::from_millis(400),
+        killed: false,
+    });
+    head[0].instances.push(second);
+    let report = report(&raw(&folder, head, None));
+
+    assert_eq!(measure(&report, "api.error-lines").samples, [3.0]);
+    assert_eq!(measure(&report, "api.shutdown").samples, [400.0]);
+    assert_eq!(measure(&report, "api.cpu").samples, [2000.0]);
+}
+
+#[test]
+fn a_failed_before_has_no_baseline_and_its_failure_is_in_the_report() {
+    let folder = Folder::new();
+    let failure = Failure {
+        phase: Phase::Setup,
+        service: Some("prepare".to_owned()),
+        repeat: None,
+        cause: Cause::Exit(1),
+        logs: Some(folder.path().join("setup-before")),
+        probes: Vec::new(),
+    };
+    let mut raw = raw(&folder, repeats(&folder, "head", &[100, 100, 100]), None);
+    raw.setup.before = Some(setup_side(&folder, "before", &[]));
+    raw.before = Some(BeforeOutcome::Failed(failure.clone()));
+    let report = report(&raw);
+
+    let before = report.before.as_ref().expect("a before");
+    assert_eq!(before.failed.as_ref(), Some(&failure));
+    let wall = measure(&report, "stand.wall");
+    let wall = wall.before.as_ref().expect("a verdict against before");
+    assert_eq!((wall.median, wall.verdict), (None, Verdict::NoBaseline));
+    assert!(wall.samples.is_empty());
+    assert!(report.behaviour.is_none());
+}
+
+#[test]
+fn setup_cached_names_the_run_that_built_the_setup_of_each_version() {
+    let folder = Folder::new();
+    let before = Some(repeats(&folder, "before", &[100]));
+    let raw = raw(&folder, repeats(&folder, "head", &[100]), before);
+    let mut context = context(&raw, Previous::None, &[]);
+    context.setup_from = SetupFrom {
+        head: None,
+        before: Some(PREVIOUS.to_owned()),
+    };
+    let report = report_of(&raw, &context, &[]);
+
+    assert_eq!(report.head.setup.cached, None);
+    let before = report.before.as_ref().expect("a before");
+    assert_eq!(before.setup.cached.as_deref(), Some(PREVIOUS));
+}
+
+#[test]
+fn pooled_runs_join_their_samples_and_keep_the_spread_of_one_attempt() {
+    let folder = Folder::new();
+    let pool: Vec<Report> = ["a", "b"]
+        .iter()
+        .map(|name| {
+            report(&raw(
+                &folder,
+                repeats(&folder, name, &[100, 110, 120]),
+                None,
+            ))
+        })
+        .collect();
+    let raw = raw(&folder, repeats(&folder, "head", &[200, 220, 240]), None);
+    let report = report_of(&raw, &context(&raw, Previous::None, &pool), &[]);
+
+    let wall = measure(&report, "stand.wall");
+    assert_eq!(wall.samples, [200.0, 220.0, 240.0]);
+    assert_eq!(wall.median, 120.0);
+    // Each attempt spreads by 20/110 = 40/220; three of them spread no wider than one.
+    assert_eq!(wall.spread, 0.1818);
+}
+
+#[test]
+fn volume_sizes_of_one_setup_origin_count_once_in_the_pool() {
+    let folder = Folder::new();
+    let sized = |name: &str, bytes: u64, origin: &str| {
+        let mut raw = raw(&folder, repeats(&folder, name, &[100]), None);
+        raw.setup.head.sizes.insert("pgdata".to_owned(), bytes);
+        (raw, origin.to_owned())
+    };
+    let pooled = |runs: &[(Raw, String)]| -> Vec<Report> {
+        let built = runs.iter().zip(["20261022-090000", "20261022-091000"]);
+        let built = built.map(|((raw, origin), run)| {
+            let mut context = context(raw, Previous::None, &[]);
+            context.run = run.to_owned();
+            context.setup_from.head = Some(origin.clone());
+            report_of(raw, &context, &[])
+        });
+        built.collect()
+    };
+    let (this, _) = sized("head", 400, "x");
+    let context_x = |pool: &[Report]| {
+        let mut context = context(&this, Previous::None, pool);
+        context.setup_from.head = Some("x".to_owned());
+        measure(&report_of(&this, &context, &[]), "volume:pgdata.bytes").median
+    };
+
+    let one = pooled(&[sized("a", 100, "x"), sized("b", 200, "x")]);
+    assert_eq!(context_x(&one), 100.0);
+    let two = pooled(&[sized("a", 100, "x"), sized("b", 200, "y")]);
+    assert_eq!(context_x(&two), 150.0);
+}
+
+// --- flags -------------------------------------------------------------------------------------
+
+#[test]
+fn each_fact_of_the_raw_outputs_gives_its_flag() {
+    let folder = Folder::new();
+    let mut head = repeats(&folder, "head", &[100]);
+    let repeat = &mut head[0];
+    let out = repeat.out_dir.clone();
+    let api = &mut repeat.instances[0];
+    api.profile = Some(ProfileOutcome::NoProfile);
+    api.stopped = killed();
+    api.metrics.unexposed.push(Unexposed {
+        name: "cache".to_owned(),
+        attempts: 4,
+    });
+    let worker_log = folder.log("worker", "", "");
+    let mut worker = instance(
+        "worker",
+        Role::LongRunning,
+        metrics(10, 10 << 20),
+        worker_log,
+    );
+    // 30 of the 100 ms of TypeScript found no map; the 300 ms of JavaScript are not TypeScript.
+    worker.profile = Some(ProfileOutcome::Read(Samples {
+        total_ms: 400.0,
+        local_ms: 400.0,
+        unmapped_ms: 30.0,
+        processes: 3,
+        lost_processes: 2,
+        functions: vec![
+            sampled("src/worker.ts", "work", 3, 50.0),
+            sampled("scripts/seed.js", "seed", 1, 300.0),
+        ],
+        modules: vec![ModuleTime {
+            file: "src/main.ts".into(),
+            self_ms: 20.0,
+        }],
+    }));
+    repeat.instances.push(worker);
+    let load = &mut repeat.instances[1].metrics;
+    load.memory_peak = GIB / 20 * 19;
+    load.ports[0].connections = 300;
+    load.ports[0].drops = 5;
+    let orders = probe_ran("orders", ExecOutcome::Exited(2), &out);
+    repeat.probes.push(orders);
+    let mut raw = raw(&folder, head, None);
+    let setup_out = raw.setup.head.out_dir.clone();
+    let seed = probe_ran("seed", ExecOutcome::TimedOut, &setup_out);
+    raw.setup.head.probes.push(seed);
+    raw.coverage = Some(CoverageOutcome::Failed(Failure {
+        phase: Phase::Ready,
+        service: Some("api".to_owned()),
+        repeat: None,
+        cause: Cause::Unhealthy,
+        logs: None,
+        probes: Vec::new(),
+    }));
+    let report = report(&raw);
+
+    let expected = [
+        Flag::LowRepeats { samples: 1 },
+        Flag::NoProfile {
+            service: "api".to_owned(),
+        },
+        Flag::LostProcesses {
+            service: "worker".to_owned(),
+            count: 2,
+        },
+        Flag::UnmappedTime {
+            service: "worker".to_owned(),
+            share: 0.3,
+        },
+        Flag::MemoryNearLimit {
+            service: "load".to_owned(),
+            peak: GIB / 20 * 19,
+            limit: GIB,
+        },
+        Flag::NetworkLimitHit {
+            repeat: 1,
+            target: "api:3000".to_owned(),
+            drops: 5,
+        },
+        Flag::MissingExpose {
+            name: "cache".to_owned(),
+            attempts: 4,
+        },
+        Flag::CoverageUnknown {
+            stage: Some(Phase::Ready),
+            service: None,
+        },
+        // Both ran and wrote no `probe.<name>.jsonl`.
+        Flag::DeadProbe {
+            probe: "orders".to_owned(),
+            reason: DeadReason::NoRecords,
+        },
+        Flag::DeadProbe {
+            probe: "seed".to_owned(),
+            reason: DeadReason::NoRecords,
+        },
+        Flag::ProbeFailed {
+            probe: "seed".to_owned(),
+            side: "head".to_owned(),
+            repeat: None,
+            code: None,
+        },
+        Flag::ProbeFailed {
+            probe: "orders".to_owned(),
+            side: "head".to_owned(),
+            repeat: Some(1),
+            code: Some(2),
+        },
+        Flag::KilledAtStop {
+            service: "api".to_owned(),
+            side: "head".to_owned(),
+            repeat: 1,
+        },
+    ];
+    assert_eq!(report.flags, expected);
+}
+
+#[test]
+fn network_limit_hit_takes_drops_and_256_connections_to_the_target_over_all_guests() {
+    let folder = Folder::new();
+    let mut head = repeats(&folder, "head", &[100, 100, 100]);
+    let mut before = repeats(&folder, "before", &[100, 100, 100]);
+    // 200 from the workload and 56 from `api` itself reach `api:3000` in the first repeat.
+    head[0].instances[1].metrics.ports[0].connections = 200;
+    let mut back = port("api:3000", 56);
+    back.drops = 1;
+    head[0].instances[0].metrics.ports.push(back);
+    // Drops under 256 connections are a target that was not ready: they add to no flag.
+    let calls = [(255, 3), (300, 0)];
+    for (repeat, (connections, drops)) in head[1..].iter_mut().zip(calls) {
+        let port = &mut repeat.instances[1].metrics.ports[0];
+        (port.connections, port.drops) = (connections, drops);
+    }
+    let calls = [(300, 2), (300, 4), (100, 5)];
+    for (repeat, (connections, drops)) in before.iter_mut().zip(calls) {
+        let port = &mut repeat.instances[1].metrics.ports[0];
+        (port.connections, port.drops) = (connections, drops);
+    }
+    let report = report(&raw(&folder, head, Some(before)));
+
+    let flags = report.flags.iter();
+    let hits: Vec<&Flag> = flags
+        .filter(|flag| matches!(flag, Flag::NetworkLimitHit { .. }))
+        .collect();
+    let hit = |repeat, drops| Flag::NetworkLimitHit {
+        repeat,
+        target: "api:3000".to_owned(),
+        drops,
+    };
+    assert_eq!(hits, [&hit(1, 3), &hit(2, 4)]);
+}
+
+#[test]
+fn a_target_with_two_replicas_hits_the_limit_from_512_connections() {
+    let folder = Folder::new();
+    let mut head = repeats(&folder, "head", &[100, 100]);
+    for (repeat, connections) in head.iter_mut().zip([511, 512]) {
+        let log = folder.log(&format!("api-2-{}", repeat.repeat), "", "");
+        let mut second = instance("api", Role::LongRunning, metrics(1000, 100 << 20), log);
+        second.replica = 2;
+        repeat.instances.push(second);
+        let port = &mut repeat.instances[1].metrics.ports[0];
+        (port.connections, port.drops) = (connections, 2);
+    }
+    let report = report(&raw(&folder, head, None));
+
+    let flags = report.flags.iter();
+    let hits: Vec<&Flag> = flags
+        .filter(|flag| matches!(flag, Flag::NetworkLimitHit { .. }))
+        .collect();
+    let hit = Flag::NetworkLimitHit {
+        repeat: 2,
+        target: "api:3000".to_owned(),
+        drops: 2,
+    };
+    assert_eq!(hits, [&hit]);
+}
+
+#[test]
+fn a_run_without_a_profiled_service_is_unprofiled() {
+    let folder = Folder::new();
+    let plain = report(&raw(&folder, repeats(&folder, "a", &[100]), None));
+    assert!(plain.flags.contains(&Flag::Unprofiled));
+    let json = serde_json::to_value(&Flag::Unprofiled).unwrap();
+    assert_eq!(json, json!({"kind": "unprofiled"}));
+    assert_eq!(
+        serde_json::from_value::<Flag>(json).unwrap(),
+        Flag::Unprofiled
+    );
+
+    let mut head = repeats(&folder, "b", &[100]);
+    head[0].instances[0].profile = Some(read(Vec::new()));
+    let profiled = report(&raw(&folder, head, None));
+    assert!(!profiled.flags.contains(&Flag::Unprofiled));
+}
+
+#[test]
+fn previous_unreadable_and_recipe_changed_come_from_the_context() {
+    let folder = Folder::new();
+    let mut head = repeats(&folder, "head", &[100]);
+    head[0].instances[0].stopped = killed();
+    let raw = raw(&folder, head, None);
+    let unreadable = report_of(&raw, &context(&raw, Previous::Unreadable, &[]), &[]);
+    // Found after the facts of `Raw`, listed in the order of the kinds.
+    let expected = [
+        Flag::LowRepeats { samples: 1 },
+        Flag::Unprofiled,
+        Flag::PreviousUnreadable,
+        Flag::KilledAtStop {
+            service: "api".to_owned(),
+            side: "head".to_owned(),
+            repeat: 1,
+        },
+    ];
+    assert_eq!(unreadable.flags, expected);
+
+    let mut other = raw_of(&folder, "other");
+    other.digest = "0".repeat(64);
+    let changed = report(&other);
+    let flagged = report_of(&raw, &context(&raw, Previous::Read(&changed), &[]), &[]);
+    assert!(flagged.flags.contains(&Flag::RecipeChanged));
+    let same = report(&raw_of(&folder, "same"));
+    let calm = report_of(&raw, &context(&raw, Previous::Read(&same), &[]), &[]);
+    assert!(!calm.flags.contains(&Flag::RecipeChanged));
+}
+
+fn raw_of(folder: &Folder, name: &str) -> Raw {
+    raw(folder, repeats(folder, name, &[100]), None)
+}
+
+#[test]
+fn a_kill_at_the_stop_of_a_fault_repeat_is_no_flag() {
+    let folder = Folder::new();
+    let mut raw = raw(&folder, repeats(&folder, "head", &[100, 100, 100]), None);
+    let held_log = folder.log("fault-db", "", "");
+    let mut held = instance("db", Role::LongRunning, metrics(10, 10 << 20), held_log);
+    held.stopped = killed();
+    raw.fault = Some(FaultOutcome {
+        target: "db:5432".to_owned(),
+        mode: "down".to_owned(),
+        head: vec![FaultRepeat {
+            repeat: 1,
+            workload: Some(0),
+            exited: Vec::new(),
+            failure: None,
+            instances: vec![held],
+        }],
+        before: None,
+    });
+    let report = report(&raw);
+
+    let mut flags = report.flags.iter();
+    assert!(!flags.any(|flag| matches!(flag, Flag::KilledAtStop { .. })));
+}
+
+#[test]
+fn a_wide_spread_is_high_noise_and_a_far_first_repeat_an_outlier() {
+    let folder = Folder::new();
+    let wall = || "stand.wall".to_owned();
+    let noisy = report(&raw(&folder, repeats(&folder, "a", &[100, 125, 80]), None));
+    assert!(noisy.flags.contains(&Flag::HighNoise { measure: wall() }));
+    assert!(
+        !noisy
+            .flags
+            .contains(&Flag::FirstRepeatOutlier { measure: wall() })
+    );
+
+    // The others lie within 1% of 100.5; the first is 19% above them, and the spread stays
+    // under 20%.
+    let warm = report(&raw(&folder, repeats(&folder, "b", &[120, 100, 101]), None));
+    assert!(
+        warm.flags
+            .contains(&Flag::FirstRepeatOutlier { measure: wall() })
+    );
+    assert!(!warm.flags.contains(&Flag::HighNoise { measure: wall() }));
+}
+
+#[test]
+fn low_repeats_counts_the_pooled_samples() {
+    let folder = Folder::new();
+    let alone = report(&raw(&folder, repeats(&folder, "a", &[100]), None));
+    assert!(alone.flags.contains(&Flag::LowRepeats { samples: 1 }));
+
+    let pool = vec![
+        report(&raw(&folder, repeats(&folder, "b", &[100]), None)),
+        report(&raw(&folder, repeats(&folder, "c", &[100]), None)),
+    ];
+    let raw = raw(&folder, repeats(&folder, "head", &[100]), None);
+    let pooled = report_of(&raw, &context(&raw, Previous::None, &pool), &[]);
+    let mut flags = pooled.flags.iter();
+    assert!(!flags.any(|flag| matches!(flag, Flag::LowRepeats { .. })));
+}
+
+#[test]
+fn a_failed_before_is_a_flag_with_its_stage() {
+    let folder = Folder::new();
+    let mut raw = raw(&folder, repeats(&folder, "head", &[100, 100, 100]), None);
+    raw.setup.before = Some(setup_side(&folder, "before", &[]));
+    raw.before = Some(BeforeOutcome::Failed(Failure {
+        phase: Phase::Workload,
+        service: Some("load".to_owned()),
+        repeat: Some(2),
+        cause: Cause::Timeout,
+        logs: None,
+        probes: Vec::new(),
+    }));
+    let report = report(&raw);
+
+    let flag = Flag::BeforeFailed {
+        stage: Phase::Workload,
+    };
+    assert!(report.flags.contains(&flag));
+    let json = serde_json::to_value(&flag).unwrap();
+    assert_eq!(json, json!({"kind": "before-failed", "stage": "workload"}));
+    assert_eq!(serde_json::from_value::<Flag>(json).unwrap(), flag);
+}
+
+// --- hot functions and coverage ----------------------------------------------------------------
+
+/// Each repeat profiles `api` with these (file, name, line, column, self ms).
+fn profiled(
+    folder: &Folder,
+    side: &str,
+    functions: &[(&str, &str, u32, u32, f64)],
+) -> Vec<RepeatOutput> {
+    let mut repeats = repeats(folder, side, &[100, 100, 100]);
+    for repeat in &mut repeats {
+        let functions = functions.iter();
+        let sampled = functions.map(|(file, name, line, column, self_ms)| Sampled {
+            column: *column,
+            ..sampled(file, name, *line, *self_ms)
+        });
+        repeat.instances[0].profile = Some(read(sampled.collect()));
+    }
+    repeats
+}
+
+fn called(file: &str, line: u32, column: u32, calls: u64) -> Called {
+    Called {
+        file: file.into(),
+        line,
+        column,
+        name: String::new(),
+        calls,
+    }
+}
+
+#[test]
+fn a_hot_function_keeps_its_key_when_its_lines_shift() {
+    let folder = Folder::new();
+    let build = |line, self_ms| [("src/orders.ts", "buildReport", line, 21, self_ms)];
+    let earlier = raw(
+        &folder,
+        profiled(&folder, "previous", &build(41, 900.0)),
+        None,
+    );
+    let previous = report(&earlier);
+    let mut head = profiled(&folder, "head", &build(40, 800.0));
+    // A second replica adds its time; `rare`, sampled in one repeat of three, has a median of 0.
+    for repeat in &mut head {
+        let log = folder.log(&format!("api-2-{}", repeat.repeat), "", "");
+        let mut second = instance("api", Role::LongRunning, metrics(1000, 100 << 20), log);
+        second.replica = 2;
+        let mut functions = vec![sampled("src/orders.ts", "buildReport", 40, 100.0)];
+        if repeat.repeat == 1 {
+            functions.push(sampled("src/orders.ts", "rare", 90, 900.0));
+        }
+        second.profile = Some(read(functions));
+        repeat.instances.push(second);
+    }
+    let before = profiled(&folder, "before", &build(38, 500.0));
+    let raw = raw(&folder, head, Some(before));
+    let report = report_of(&raw, &context(&raw, Previous::Read(&previous), &[]), &[]);
+
+    assert_eq!(report.hot.len(), 1, "{:?}", report.hot);
+    let hot = &report.hot[0];
+    let key = (hot.service.as_str(), hot.file.as_str(), hot.name.as_str());
+    assert_eq!(key, ("api", "src/orders.ts", "buildReport"));
+    assert_eq!((hot.line, hot.column), (40, 21));
+    assert_eq!((hot.self_ms, hot.total_ms), (900.0, 1800.0));
+    let before = hot.before.as_ref().map(|before| before.verdict);
+    assert_eq!(before, Some(Verdict::Regressed));
+    assert_eq!(hot.previous.verdict, Verdict::WithinNoise);
+}
+
+#[test]
+fn of_equal_names_the_nearest_line_wins_and_under_one_ms_is_left_out() {
+    let folder = Folder::new();
+    let head = profiled(
+        &folder,
+        "head",
+        &[
+            ("src/a.ts", "", 10, 21, 50.0),
+            ("src/a.ts", "", 50, 21, 100.0),
+            ("src/a.ts", "tiny", 70, 21, 0.5),
+            ("src/b.ts", "", 30, 21, 100.0),
+            ("src/c.ts", "", 5, 10, 100.0),
+            ("src/d.ts", "", 8, 10, 100.0),
+        ],
+    );
+    let before = profiled(
+        &folder,
+        "before",
+        &[
+            ("src/a.ts", "", 12, 21, 50.0),
+            ("src/a.ts", "", 49, 21, 200.0),
+            // Two lines either way: the earlier line wins.
+            ("src/b.ts", "", 28, 21, 100.0),
+            ("src/b.ts", "", 32, 21, 200.0),
+            // The nearest line wins over the nearest column.
+            ("src/c.ts", "", 5, 40, 100.0),
+            ("src/c.ts", "", 6, 10, 200.0),
+            // On one line, the nearest column.
+            ("src/d.ts", "", 8, 4, 100.0),
+            ("src/d.ts", "", 8, 30, 200.0),
+        ],
+    );
+    let report = report(&raw(&folder, head, Some(before)));
+
+    let found: Vec<(&str, u32, f64, Option<Verdict>)> = report
+        .hot
+        .iter()
+        .map(|hot| {
+            let before = hot.before.as_ref().map(|before| before.verdict);
+            (hot.file.as_str(), hot.line, hot.self_ms, before)
+        })
+        .collect();
+    let within = Some(Verdict::WithinNoise);
+    let expected = [
+        ("src/a.ts", 50, 100.0, Some(Verdict::Improved)),
+        ("src/b.ts", 30, 100.0, within),
+        ("src/c.ts", 5, 100.0, within),
+        ("src/d.ts", 8, 100.0, within),
+        ("src/a.ts", 10, 50.0, within),
+    ];
+    assert_eq!(found, expected);
+}
+
+#[test]
+fn coverage_adds_up_its_services_and_a_failed_repeat_has_none() {
+    let folder = Folder::new();
+    let mut raw = raw(&folder, repeats(&folder, "head", &[100]), None);
+    let api = vec![called("src/f.ts", 1, 1, 2)];
+    let worker = vec![
+        called("src/f.ts", 1, 1, 3),
+        called("src/f.ts", 1, 9, 4),
+        called("src/g.ts", 5, 1, 1),
+    ];
+    raw.coverage = Some(CoverageOutcome::Read(BTreeMap::from([
+        ("api".to_owned(), Coverage { called: api }),
+        ("worker".to_owned(), Coverage { called: worker }),
+    ])));
+    let coverage = report(&raw).coverage.expect("coverage");
+
+    assert_eq!(coverage.services, ["api", "worker"]);
+    let called = coverage.called.iter();
+    let calls: Vec<(&str, u32, u32, u64)> = called
+        .map(|called| {
+            (
+                called.file.as_str(),
+                called.line,
+                called.column,
+                called.calls,
+            )
+        })
+        .collect();
+    let expected = [
+        ("src/f.ts", 1, 1, 5),
+        ("src/f.ts", 1, 9, 4),
+        ("src/g.ts", 5, 1, 1),
+    ];
+    assert_eq!(calls, expected);
+    let json = serde_json::to_value(&coverage).unwrap();
+    let first = json!({"file": "src/f.ts", "line": 1, "column": 1, "calls": 5});
+    assert_eq!(json["called"][0], first);
+
+    raw.coverage = Some(CoverageOutcome::Failed(Failure {
+        phase: Phase::Workload,
+        service: Some("load".to_owned()),
+        repeat: None,
+        cause: Cause::Timeout,
+        logs: None,
+        probes: Vec::new(),
+    }));
+    let failed = report(&raw);
+    assert!(failed.coverage.is_none());
+    let unknown = Flag::CoverageUnknown {
+        stage: Some(Phase::Workload),
+        service: None,
+    };
+    assert_eq!(unknowns(&failed), [&unknown]);
+    let json = serde_json::to_value(&unknown).unwrap();
+    let expected = json!({"kind": "coverage-unknown", "stage": "workload", "service": null});
+    assert_eq!(json, expected);
+    assert_eq!(serde_json::from_value::<Flag>(json).unwrap(), unknown);
+}
+
+fn unknowns(report: &Report) -> Vec<&Flag> {
+    let flags = report.flags.iter();
+    let unknown = |flag: &&Flag| matches!(flag, Flag::CoverageUnknown { .. });
+    flags.filter(unknown).collect()
+}
+
+#[test]
+fn a_service_with_no_call_and_no_profile_leaves_the_coverage_unknown() {
+    let folder = Folder::new();
+    let mut head = repeats(&folder, "head", &[100, 100]);
+    head[0].instances[0].profile = Some(read(Vec::new()));
+    head[1].instances[0].profile = Some(ProfileOutcome::NoProfile);
+    let mut raw = raw(&folder, head, None);
+    let worker = Coverage {
+        called: vec![called("src/w.ts", 3, 1, 7)],
+    };
+    raw.coverage = Some(CoverageOutcome::Read(BTreeMap::from([
+        ("api".to_owned(), Coverage::default()),
+        ("worker".to_owned(), worker),
+    ])));
+    // `api` may have written no chunk: `stop-slop hot` must not read its files as never run.
+    let unseen = report(&raw);
+    assert!(unseen.coverage.is_none());
+    let unknown = Flag::CoverageUnknown {
+        stage: None,
+        service: Some("api".to_owned()),
+    };
+    assert_eq!(unknowns(&unseen), [&unknown]);
+    let json = serde_json::to_value(&unknown).unwrap();
+    let expected = json!({"kind": "coverage-unknown", "stage": null, "service": "api"});
+    assert_eq!(json, expected);
+
+    // A call shows the coverage of `api` was read, whatever its measured repeats wrote.
+    if let Some(CoverageOutcome::Read(services)) = &mut raw.coverage {
+        let api = services.get_mut("api").expect("api");
+        api.called.push(called("src/a.ts", 1, 1, 1));
+    }
+    let called_once = report(&raw);
+    assert!(called_once.coverage.is_some());
+    assert!(unknowns(&called_once).is_empty());
+
+    // With a profile in every measured repeat, no call is a fact: no function of `api` ran.
+    raw.head[1].instances[0].profile = Some(read(Vec::new()));
+    if let Some(CoverageOutcome::Read(services)) = &mut raw.coverage {
+        services.insert("api".to_owned(), Coverage::default());
+    }
+    let report = report(&raw);
+    let coverage = report.coverage.as_ref().expect("coverage");
+    assert_eq!(coverage.services, ["api", "worker"]);
+    assert_eq!(coverage.called.len(), 1);
+    assert!(unknowns(&report).is_empty());
+}
+
+#[test]
+fn a_coverage_repeat_of_no_service_leaves_the_coverage_unknown() {
+    let folder = Folder::new();
+    let mut head = repeats(&folder, "head", &[100]);
+    head[0].instances[0].profile = Some(read(Vec::new()));
+    let mut raw = raw(&folder, head, None);
+    raw.coverage = Some(CoverageOutcome::Read(BTreeMap::new()));
+    let report = report(&raw);
+
+    assert!(report.coverage.is_none());
+    let unknown = Flag::CoverageUnknown {
+        stage: None,
+        service: None,
+    };
+    assert_eq!(unknowns(&report), [&unknown]);
+}
+
+// --- behaviour, records, write and load --------------------------------------------------------
+
+#[test]
+fn fields_that_differ_between_repeats_of_before_are_noise() {
+    let folder = Folder::new();
+    let head: &[&[(&str, &str)]] = &[
+        &[("out.jsonl", "{\"t\":11,\"total\":11}\n")],
+        &[("out.jsonl", "{\"t\":12,\"total\":11}\n")],
+    ];
+    let before: &[&[(&str, &str)]] = &[
+        &[("out.jsonl", "{\"t\":1,\"total\":10}\n")],
+        &[("out.jsonl", "{\"t\":2,\"total\":10}\n")],
+    ];
+    let head = with_files(&folder, "head", head);
+    let before = with_files(&folder, "before", before);
+    let report = report(&raw(&folder, head, Some(before)));
+
+    let file = behaviour(&report, "out.jsonl");
+    assert_eq!((file.src, file.key.as_deref()), (Src::Workload, None));
+    assert!(file.noise_known);
+    assert_eq!(file.noise, ["/t"]);
+    // `/t` changes on the head too, and it is noise there as well.
+    assert!(file.head_only_noise.is_empty());
+    let diffs: Vec<(&At, &str, &Value, &Value)> = file
+        .diffs
+        .iter()
+        .map(|diff| (&diff.at, diff.path.as_str(), &diff.before, &diff.head))
+        .collect();
+    let total = (&At::Record { record: 1 }, "/total", &json!(10), &json!(11));
+    assert_eq!(diffs, [total]);
+}
+
+#[test]
+fn one_repeat_of_before_leaves_the_noise_unknown() {
+    let folder = Folder::new();
+    let head = with_files(&folder, "head", &[&[("out.jsonl", "{\"t\":11}\n")]]);
+    let before = with_files(&folder, "before", &[&[("out.jsonl", "{\"t\":1}\n")]]);
+    let report = report(&raw(&folder, head, Some(before)));
+
+    let file = behaviour(&report, "out.jsonl");
+    assert!(!file.noise_known);
+    assert!(file.noise.is_empty());
+    assert_eq!(file.diffs.len(), 1);
+}
+
+fn no_results(report: &Report) -> Vec<&Flag> {
+    let flags = report.flags.iter();
+    flags
+        .filter(|flag| matches!(flag, Flag::NoResults { .. }))
+        .collect()
+}
+
+#[test]
+fn a_file_on_one_side_or_no_file_at_all_is_no_results() {
+    let folder = Folder::new();
+    let files = [("out.jsonl", "{}\n"), ("extra.jsonl", "{}\n")];
+    let head = with_files(&folder, "head", &[&files]);
+    let before = with_files(&folder, "before", &[&[("out.jsonl", "{}\n")]]);
+    let one = report(&raw(&folder, head, Some(before)));
+    let extra = Flag::NoResults {
+        file: Some("extra.jsonl".to_owned()),
+    };
+    assert_eq!(no_results(&one), [&extra]);
+    // Its records still show, each as a record of one side.
+    let diff = &behaviour(&one, "extra.jsonl").diffs[0];
+    assert_eq!((diff.path.as_str(), &diff.before), ("", &Value::Null));
+
+    let head = repeats(&folder, "a", &[100]);
+    let empty = report(&raw(&folder, head, Some(repeats(&folder, "b", &[100]))));
+    assert_eq!(no_results(&empty), [&Flag::NoResults { file: None }]);
+    assert_eq!(empty.behaviour.as_ref().map(Vec::len), Some(0));
+
+    // Without `--before` nothing is compared, so no file is missing.
+    let alone = report(&raw(&folder, repeats(&folder, "c", &[100]), None));
+    assert!(no_results(&alone).is_empty());
+    assert!(alone.behaviour.is_none());
+}
+
+#[test]
+fn a_broken_line_of_a_workload_file_is_flagged_and_left_out() {
+    let folder = Folder::new();
+    let broken = "{\"a\":1}\n\nnot json\nnor this\n";
+    let head = with_files(&folder, "head", &[&[("out.jsonl", broken)]]);
+    let before = with_files(&folder, "before", &[&[("out.jsonl", "{\"a\":1}\n")]]);
+    let report = report(&raw(&folder, head, Some(before)));
+
+    // The first broken line, the blank line counted.
+    let bad = Flag::BadResultLine {
+        file: "out.jsonl".to_owned(),
+        line: 3,
+    };
+    assert!(report.flags.contains(&bad), "{:?}", report.flags);
+    assert!(behaviour(&report, "out.jsonl").diffs.is_empty());
+}
+
+/// Repeats that run `probe` after the workload, one output each.
+fn probing(folder: &Folder, side: &str, outputs: &[&str], probe: &str) -> Vec<RepeatOutput> {
+    let file = format!("probe.{probe}.jsonl");
+    let lists: Vec<[(&str, &str); 1]> = outputs
+        .iter()
+        .map(|text| [(file.as_str(), *text)])
+        .collect();
+    let lists: Vec<&[(&str, &str)]> = lists.iter().map(|list| list.as_slice()).collect();
+    let mut repeats = with_files(folder, side, &lists);
+    for repeat in &mut repeats {
+        let out = repeat.out_dir.clone();
+        let ran = probe_ran(probe, ExecOutcome::Exited(0), &out);
+        repeat.probes.push(ran);
+    }
+    repeats
+}
+
+fn probe_rule(raw: &mut Raw, probe: &str, key: Option<&str>, ignore: &[&str]) {
+    let rule = ProbeRule {
+        key: key.map(str::to_owned),
+        ignore: ignore.iter().map(|path| (*path).to_owned()).collect(),
+    };
+    raw.probes.insert(format!("probe.{probe}.jsonl"), rule);
+}
+
+#[test]
+fn a_probe_line_that_is_not_json_compares_as_a_line_record() {
+    let folder = Folder::new();
+    let head = probing(&folder, "head", &["load 2\n"], "top");
+    let before = probing(&folder, "before", &["load 1\n"], "top");
+    let mut raw = raw(&folder, head, Some(before));
+    probe_rule(&mut raw, "top", None, &[]);
+    let report = report(&raw);
+
+    let file = behaviour(&report, "probe.top.jsonl");
+    assert_eq!(file.src, Src::Probe);
+    let diff = &file.diffs[0];
+    let found = (diff.path.as_str(), &diff.before, &diff.head);
+    assert_eq!(found, ("/line", &json!("load 1"), &json!("load 2")));
+    let mut flags = report.flags.iter();
+    assert!(!flags.any(|flag| matches!(flag, Flag::BadResultLine { .. })));
+}
+
+#[test]
+fn a_keyed_probe_pairs_records_by_its_key_and_shows_a_record_of_one_side() {
+    let folder = Folder::new();
+    let before =
+        "{\"id\":7,\"status\":\"paid\",\"updated_at\":\"a\"}\n{\"id\":8,\"status\":\"paid\"}\n";
+    let head = "{\"id\":8,\"status\":\"paid\"}\n{\"id\":7,\"status\":\"pending\",\"updated_at\":\"b\"}\n{\"id\":9}\n";
+    let head = probing(&folder, "head", &[head], "orders");
+    let before = probing(&folder, "before", &[before], "orders");
+    let mut raw = raw(&folder, head, Some(before));
+    probe_rule(&mut raw, "orders", Some("/id"), &["/updated_at"]);
+    let report = report(&raw);
+
+    let file = behaviour(&report, "probe.orders.jsonl");
+    assert_eq!(file.key.as_deref(), Some("/id"));
+    let diffs: Vec<(&At, &str)> = file
+        .diffs
+        .iter()
+        .map(|diff| (&diff.at, diff.path.as_str()))
+        .collect();
+    let expected = [
+        (&At::Key { key: json!(7) }, "/status"),
+        (&At::Key { key: json!(9) }, ""),
+    ];
+    assert_eq!(diffs, expected);
+    assert_eq!(file.diffs[1].before, Value::Null);
+}
+
+#[test]
+fn a_probe_without_records_or_with_every_field_ignored_is_dead() {
+    let folder = Folder::new();
+    let mut head = probing(&folder, "head", &[""], "empty");
+    let ignored = probing(&folder, "clock", &["{\"at\":1}\n"], "clock");
+    head[0].probes.extend(ignored[0].probes.clone());
+    let clock = "probe.clock.jsonl";
+    let copied = fs::copy(ignored[0].out_dir.join(clock), head[0].out_dir.join(clock));
+    copied.expect("copy the output of clock");
+    let mut raw = raw(&folder, head, None);
+    probe_rule(&mut raw, "empty", None, &[]);
+    probe_rule(&mut raw, "clock", None, &["/at"]);
+    // A probe of the recipe that never ran, as an `on-failure` one of a passed run.
+    probe_rule(&mut raw, "rescue", None, &[]);
+    let report = report(&raw);
+
+    let flags = report.flags.iter();
+    let dead: Vec<&Flag> = flags
+        .filter(|flag| matches!(flag, Flag::DeadProbe { .. }))
+        .collect();
+    let expected = [
+        &Flag::DeadProbe {
+            probe: "clock".to_owned(),
+            reason: DeadReason::AllIgnored,
+        },
+        &Flag::DeadProbe {
+            probe: "empty".to_owned(),
+            reason: DeadReason::NoRecords,
+        },
+    ];
+    assert_eq!(dead, expected);
+}
+
+#[test]
+fn noise_only_on_the_head_is_flagged_and_stays_in_the_diff() {
+    let folder = Folder::new();
+    let head: &[&[(&str, &str)]] = &[
+        &[("out.jsonl", "{\"x\":1,\"y\":2}\n")],
+        &[("out.jsonl", "{\"x\":1,\"y\":3}\n")],
+    ];
+    let before: &[&[(&str, &str)]] = &[
+        &[("out.jsonl", "{\"x\":1,\"y\":1}\n")],
+        &[("out.jsonl", "{\"x\":1,\"y\":1}\n")],
+    ];
+    let head = with_files(&folder, "head", head);
+    let before = with_files(&folder, "before", before);
+    let report = report(&raw(&folder, head, Some(before)));
+
+    let flag = Flag::HeadOnlyNoise {
+        file: "out.jsonl".to_owned(),
+        path: "/y".to_owned(),
+    };
+    assert!(report.flags.contains(&flag));
+    let file = behaviour(&report, "out.jsonl");
+    assert_eq!(file.head_only_noise, ["/y"]);
+    assert_eq!(file.diffs[0].path, "/y");
+}
+
+/// A run whose `/seed` holds through the two repeats of each version, its values (before, head).
+fn seeded(folder: &Folder, name: &str, (before, head): (u32, u32)) -> Raw {
+    let side = |side: &str, seed: u32| {
+        let line = format!("{{\"seed\":{seed}}}\n");
+        let files = [("out.jsonl", line.as_str())];
+        with_files(folder, &format!("{name}-{side}"), &[&files, &files])
+    };
+    raw(folder, side("head", head), Some(side("before", before)))
+}
+
+#[test]
+fn the_pool_teaches_the_noise_mask_through_records_json() {
+    let folder = Folder::new();
+    let earlier = seeded(&folder, "a", (1, 2));
+    let mut earlier_context = context(&earlier, Previous::None, &[]);
+    earlier_context.run = PREVIOUS.to_owned();
+    let (pooled, dir) = written(&folder, "run-a", &earlier, &earlier_context);
+    let raw = seeded(&folder, "b", (3, 4));
+
+    let alone = report(&raw);
+    assert_eq!(behaviour(&alone, "out.jsonl").diffs[0].path, "/seed");
+    let pool = [pooled];
+    let dirs = [dir.clone()];
+    let together = report_of(&raw, &context(&raw, Previous::None, &pool), &dirs);
+    let file = behaviour(&together, "out.jsonl");
+    assert_eq!(file.noise, ["/seed"]);
+    assert!(file.diffs.is_empty());
+
+    // A pooled run whose `records.json` does not read teaches nothing and stops nothing.
+    fs::write(dir.join("records.json"), "{").expect("break the records");
+    let unread = report_of(&raw, &context(&raw, Previous::None, &pool), &dirs);
+    assert_eq!(behaviour(&unread, "out.jsonl").diffs[0].path, "/seed");
+}
+
+#[test]
+fn after_setup_records_of_one_setup_origin_count_once() {
+    let folder = Folder::new();
+    let run = |name: &str, value: u32, origin: &str, id: &str| {
+        let head = repeats(&folder, &format!("{name}-head"), &[100]);
+        let before = repeats(&folder, &format!("{name}-before"), &[100]);
+        let mut raw = raw(&folder, head, Some(before));
+        let text = format!("{{\"v\":{value}}}\n");
+        let files = [("probe.seed.jsonl", text.as_str())];
+        raw.setup.before = Some(setup_side(&folder, &format!("{name}-before"), &files));
+        let files = [("probe.seed.jsonl", "{\"v\":9}\n")];
+        raw.setup.head = setup_side(&folder, &format!("{name}-head"), &files);
+        probe_rule(&mut raw, "seed", None, &[]);
+        let mut context = context(&raw, Previous::None, &[]);
+        context.run = id.to_owned();
+        context.setup_from.before = Some(origin.to_owned());
+        (raw, context)
+    };
+    let pool_of = |origins: [&str; 2]| {
+        let runs = [
+            run("a", 1, origins[0], "20261022-090000"),
+            run("b", 2, origins[1], "20261022-091000"),
+        ];
+        let written = runs
+            .iter()
+            .map(|(raw, context)| written(&folder, &context.run, raw, context));
+        written.unzip::<_, _, Vec<Report>, Vec<Utf8PathBuf>>()
+    };
+    let (raw, mut this) = run("c", 3, "x", RUN);
+
+    // Every "before" restored the setup that one run built: one list of its records.
+    let (one, dirs) = pool_of(["x", "x"]);
+    this.pool = &one;
+    let same = behaviour(&report_of(&raw, &this, &dirs), "probe.seed.jsonl").clone();
+    assert!(!same.noise_known);
+    assert!(same.noise.is_empty());
+    assert_eq!(same.diffs.len(), 1);
+
+    let (two, dirs) = pool_of(["x", "y"]);
+    this.pool = &two;
+    let apart = behaviour(&report_of(&raw, &this, &dirs), "probe.seed.jsonl").clone();
+    assert!(apart.noise_known);
+    assert_eq!(apart.noise, ["/v"]);
+    assert!(apart.diffs.is_empty());
+}
+
+#[test]
+fn read_outputs_takes_only_the_jsonl_files_of_each_out_folder() {
+    let folder = Folder::new();
+    let files: &[(&str, &str)] = &[
+        ("out.jsonl", "{}\n"),
+        ("probe.orders.jsonl", "{}\n"),
+        ("probe.orders.jsonl.err", "psql: warning\n"),
+        (
+            "probe.orders.jsonl.status",
+            "{\"code\":0,\"timedOut\":false}\n",
+        ),
+        ("notes.txt", "a note of a person\n"),
+    ];
+    let head = with_files(&folder, "head", &[files]);
+    let nested = head[0].out_dir.join("nested");
+    fs::create_dir(&nested).expect("a folder in out");
+    fs::write(nested.join("deep.jsonl"), "{}\n").expect("a file below out");
+    let before = with_files(&folder, "before", &[files]);
+    let mut raw = raw(&folder, head, Some(before));
+    probe_rule(&mut raw, "orders", None, &[]);
+    let report = report(&raw);
+
+    let behaviour = report.behaviour.iter().flatten();
+    let files: Vec<&str> = behaviour.map(|file| file.file.as_str()).collect();
+    assert_eq!(files, ["out.jsonl", "probe.orders.jsonl"]);
+    let mut flags = report.flags.iter();
+    assert!(!flags.any(|flag| matches!(flag, Flag::BadResultLine { .. })));
+}
+
+#[test]
+fn a_folder_named_jsonl_in_out_is_no_input() {
+    let folder = Folder::new();
+    let head = with_files(&folder, "head", &[&[("out.jsonl", "{}\n")]]);
+    let odd = head[0].out_dir.join("odd.jsonl");
+    fs::create_dir(&odd).expect("a folder in out");
+    let raw = raw(&folder, head, None);
+
+    let error = read_outputs(&raw, &[]).expect_err("a folder is no result file");
+    assert!(
+        matches!(&error, ReportError::Bad { path, .. } if *path == odd),
+        "{error}"
+    );
+}
+
+/// The guest writes `/stand/out`: a link there would read the host. Windows here gives no right
+/// to make links, so Linux CI runs this.
+#[cfg(unix)]
+#[test]
+fn a_link_in_out_is_never_followed() {
+    let folder = Folder::new();
+    let secret = folder.path().join("secret.jsonl");
+    fs::write(&secret, "{\"token\":\"of the host\"}\n").expect("a file of the host");
+    let head = with_files(&folder, "head", &[&[("out.jsonl", "{}\n")]]);
+    let out = head[0].out_dir.clone();
+    // A link of another name is no result file: it is never opened.
+    std::os::unix::fs::symlink(&secret, out.join("leak")).expect("a link");
+    let raw = raw(&folder, head, None);
+    assert!(read_outputs(&raw, &[]).is_ok());
+
+    let link = out.join("leak.jsonl");
+    std::os::unix::fs::symlink(&secret, &link).expect("a link");
+    let error = read_outputs(&raw, &[]).expect_err("a link is no result file");
+    assert!(
+        matches!(&error, ReportError::Bad { path, .. } if *path == link),
+        "{error}"
+    );
+}
+
+#[test]
+fn the_on_failure_probes_of_a_failed_before_are_its_failure_not_a_side() {
+    let folder = Folder::new();
+    let head = probing(&folder, "head", &["{\"n\":1}\n", "{\"n\":1}\n"], "orders");
+    let mut raw = raw(&folder, head, None);
+    probe_rule(&mut raw, "orders", None, &[]);
+    probe_rule(&mut raw, "rescue", None, &[]);
+    let output = [("probe.rescue.jsonl", "{\"state\":\"stuck\"}\n")];
+    let mut setup = setup_side(&folder, "before", &output);
+    let rescue = probe_ran("rescue", ExecOutcome::Exited(3), &setup.out_dir);
+    setup.probes.push(rescue.clone());
+    raw.setup.before = Some(setup);
+    raw.before = Some(BeforeOutcome::Failed(Failure {
+        phase: Phase::Setup,
+        service: Some("db".to_owned()),
+        repeat: None,
+        cause: Cause::Unhealthy,
+        logs: None,
+        probes: vec![rescue.out],
+    }));
+    let context = context(&raw, Previous::None, &[]);
+    let (report, dir) = written(&folder, "run", &raw, &context);
+
+    assert!(report.behaviour.is_none());
+    let rescued = |flag: &Flag| match flag {
+        Flag::DeadProbe { probe, .. } | Flag::ProbeFailed { probe, .. } => probe == "rescue",
+        _ => false,
+    };
+    assert!(!report.flags.iter().any(rescued), "{:?}", report.flags);
+    // Nor do the later runs of the pool learn from it.
+    let records = fs::read_to_string(dir.join("records.json")).expect("records.json");
+    assert!(!records.contains("stuck"), "{records}");
+    assert!(records.contains("\"n\":1"), "{records}");
+}
+
+#[test]
+fn write_puts_the_report_its_diffs_and_records_and_load_reads_the_report_back() {
+    let folder = Folder::new();
+    let orders = |status: &str| format!("{{\"id\":7,\"status\":\"{status}\"}}\n");
+    let (paid, pending) = (orders("paid"), orders("pending"));
+    let head = [
+        ("out.jsonl", "{\"total\":11}\n"),
+        ("probe.orders.jsonl", pending.as_str()),
+    ];
+    let before = [
+        ("out.jsonl", "{\"total\":10}\n"),
+        ("probe.orders.jsonl", paid.as_str()),
+    ];
+    let head = with_files(&folder, "head", &[&head]);
+    let before = with_files(&folder, "before", &[&before]);
+    let mut raw = raw(&folder, head, Some(before));
+    probe_rule(&mut raw, "orders", Some("/id"), &[]);
+    let context = context(&raw, Previous::None, &[]);
+    let (written, dir) = written(&folder, "run", &raw, &context);
+
+    let files = [
+        "report.json",
+        "records.json",
+        "diff/out.jsonl.json",
+        "diff/probe.orders.jsonl.json",
+    ];
+    for file in files {
+        assert!(dir.join(file).is_file(), "{file}");
+    }
+    assert!(!dir.join("report.json.tmp").exists());
+    let read = |file: &str| -> Value {
+        let text = fs::read_to_string(dir.join(file)).expect("a written file");
+        serde_json::from_str(&text).expect("JSON")
+    };
+    let total = json!([{"record": 1, "path": "/total", "before": 10, "head": 11}]);
+    assert_eq!(read("diff/out.jsonl.json"), total);
+    let status = json!([{"key": 7, "path": "/status", "before": "paid", "head": "pending"}]);
+    assert_eq!(read("diff/probe.orders.jsonl.json"), status);
+    let records = fs::read_to_string(dir.join("records.json")).expect("records.json");
+    assert!(!records.contains('\n'), "compact: {records}");
+
+    let loaded = load(&dir).expect("the report loads");
+    let json = |report: &Report| serde_json::to_value(report).expect("a report serializes");
+    assert_eq!(json(&loaded), json(&written));
+    let keyed = &behaviour(&loaded, "probe.orders.jsonl").diffs[0];
+    assert_eq!(keyed.at, At::Key { key: json!(7) });
+}
+
+#[test]
+fn load_refuses_another_schema_version_and_a_broken_report() {
+    let folder = Folder::new();
+    let raw = raw(&folder, repeats(&folder, "head", &[100]), None);
+    let (_, dir) = written(&folder, "run", &raw, &context(&raw, Previous::None, &[]));
+    let path = dir.join("report.json");
+    let text = fs::read_to_string(&path).expect("report.json");
+
+    let other = text.replacen("\"schemaVersion\": 1", "\"schemaVersion\": 2", 1);
+    fs::write(&path, other).expect("write another version");
+    let refused = load(&dir);
+    assert!(
+        matches!(refused, Err(ReportError::Schema { found: 2, .. })),
+        "{refused:?}"
+    );
+    fs::write(&path, "{\"schemaVersion\": 1, \"run\": ").expect("break the report");
+    assert!(matches!(load(&dir), Err(ReportError::Bad { .. })));
+    let missing = load(&folder.path().join("nowhere"));
+    assert!(matches!(missing, Err(ReportError::Io { .. })));
+}
+
+// --- the line and the summary ------------------------------------------------------------------
+
+fn line_files(line: &Line) -> Vec<(&str, u32, usize)> {
+    let files = line.behaviour.iter().flatten();
+    let files = files.map(|file| (file.file.as_str(), file.diffs, file.sample.len()));
+    files.collect()
+}
+
+/// A path as the report and the line print it.
+fn slashed(path: &Utf8Path) -> String {
+    path.as_str().replace('\\', "/")
+}
+
+fn first_line(report: &Report) -> String {
+    let summary = report.summary().to_string();
+    summary.lines().next().unwrap_or_default().to_owned()
+}
+
+#[test]
+fn the_quiet_line_holds_only_the_exceptions_and_reads_no_file() {
+    let folder = Folder::new();
+    let many: String = (1..=5)
+        .map(|total| format!("{{\"total\":{total}}}\n"))
+        .collect();
+    let none: String = (1..=5).map(|_| "{\"total\":0}\n").collect();
+    // `broken.jsonl` has no diff, but a flag names it.
+    let head = [
+        ("out.jsonl", many.as_str()),
+        ("same.jsonl", "{}\n"),
+        ("broken.jsonl", "{}\nnot json\n"),
+    ];
+    let before = [
+        ("out.jsonl", none.as_str()),
+        ("same.jsonl", "{}\n"),
+        ("broken.jsonl", "{}\n"),
+    ];
+    let head = with_files(&folder, "head", &[&head]);
+    let before = with_files(&folder, "before", &[&before]);
+    let mut raw = raw(&folder, head, Some(before));
+    raw.head[0].wall = Duration::from_millis(2000);
+    let report = report(&raw);
+    let dir = Utf8Path::new("nowhere").join("run");
+    let line = report.line(&dir);
+
+    let names: Vec<&str> = line
+        .measures
+        .iter()
+        .map(|measure| measure.name.as_str())
+        .collect();
+    assert_eq!(names, ["stand.wall"]);
+    assert_eq!(
+        line_files(&line),
+        [("broken.jsonl", 0, 0), ("out.jsonl", 5, 3)]
+    );
+    let out = &line.behaviour.as_ref().expect("files")[1];
+    assert_eq!(out.sample, behaviour(&report, "out.jsonl").diffs[..3]);
+    assert_eq!(out.path, dir.join("diff").join("out.jsonl.json"));
+    // Every measure but `stand.wall`, and `same.jsonl`.
+    assert_eq!(line.quiet as usize, report.measures.len() - 1 + 1);
+    assert_eq!(line.run.as_deref(), Some(RUN));
+    assert_eq!(line.report, Some(dir.join("report.json")));
+    assert_eq!(line.flags, report.flags);
+    assert!(line.failure.is_none() && line.next.is_empty());
+    let json = serde_json::to_value(&line).unwrap();
+    assert!(
+        json.get("next").is_none(),
+        "cli prints `next`, not the line"
+    );
+    assert_eq!(json["report"], "nowhere/run/report.json");
+    assert_eq!(
+        json["behaviour"][1]["path"],
+        "nowhere/run/diff/out.jsonl.json"
+    );
+    assert_eq!(json["unmeasurable"], 0);
+    assert!(json["measures"][0].get("samples").is_none());
+}
+
+#[test]
+fn without_before_a_shift_against_the_previous_run_is_an_exception() {
+    let folder = Folder::new();
+    let previous = report(&raw(
+        &folder,
+        repeats(&folder, "previous", &[100, 100, 100]),
+        None,
+    ));
+    let raw = raw(&folder, repeats(&folder, "head", &[200, 200, 200]), None);
+    let report = report_of(&raw, &context(&raw, Previous::Read(&previous), &[]), &[]);
+
+    let line = report.line(Utf8Path::new("run"));
+    let names: Vec<&str> = line
+        .measures
+        .iter()
+        .map(|measure| measure.name.as_str())
+        .collect();
+    assert_eq!(names, ["stand.wall"]);
+    assert_eq!(line.measures[0].previous.verdict, Verdict::Regressed);
+    assert!(line.measures[0].before.is_none() && line.behaviour.is_none());
+    assert_eq!(line.quiet as usize, report.measures.len() - 1);
+}
+
+#[test]
+fn a_failed_line_carries_the_facts_so_far_and_its_next_steps() {
+    // The head fails in its second repeat: `schema` after setup and `orders` after the first
+    // workload exited with a code, and `rescue` ran on the failure.
+    let folder = Folder::new();
+    let mut head = repeats(&folder, "head", &[100, 100]);
+    let first = head[0].out_dir.clone();
+    head[0]
+        .probes
+        .push(probe_ran("orders", ExecOutcome::Exited(2), &first));
+    let failed = head[1].out_dir.clone();
+    let rescue = probe_ran("rescue", ExecOutcome::Exited(3), &failed);
+    head[1].probes.push(rescue.clone());
+    head[1].instances[0].metrics.unexposed.push(Unexposed {
+        name: "cache".to_owned(),
+        attempts: 2,
+    });
+    let mut raw = raw(&folder, head, None);
+    let setup_out = raw.setup.head.out_dir.clone();
+    let schema = probe_ran("schema", ExecOutcome::Exited(1), &setup_out);
+    raw.setup.head.probes.push(schema);
+    let logs = folder.path().join("repeat-2-head");
+    let failure = Failure {
+        phase: Phase::Workload,
+        service: Some("load".to_owned()),
+        repeat: Some(2),
+        cause: Cause::Exit(1),
+        logs: Some(logs.clone()),
+        probes: vec![rescue.out.clone()],
+    };
+    let next = vec![Next::Inspect {
+        run: RUN.to_owned(),
+        service: "db".to_owned(),
+    }];
+    let line = Line::failed(failure.clone(), Some(&raw), next.clone());
+
+    let probe_failed = |probe: &str, repeat, code| Flag::ProbeFailed {
+        probe: probe.to_owned(),
+        side: "head".to_owned(),
+        repeat,
+        code,
+    };
+    // The failed second repeat gave no sample.
+    let expected = [
+        Flag::LowRepeats { samples: 1 },
+        Flag::Unprofiled,
+        Flag::MissingExpose {
+            name: "cache".to_owned(),
+            attempts: 2,
+        },
+        probe_failed("schema", None, Some(1)),
+        probe_failed("orders", Some(1), Some(2)),
+    ];
+    assert_eq!(line.flags, expected);
+    assert_eq!(line.failure.as_ref(), Some(&failure));
+    assert_eq!(line.next, next);
+    assert!(line.measures.is_empty() && line.behaviour.is_none());
+    assert!(line.run.is_none() && line.report.is_none());
+    let json = serde_json::to_value(&line).unwrap();
+    assert_eq!(json["failure"]["logs"], slashed(&logs));
+    assert!(json["run"].is_null() && json["report"].is_null());
+    let text = line.summary().to_string();
+    assert!(
+        text.starts_with("failure workload load repeat 2: exit-1\n"),
+        "{text}"
+    );
+    assert!(
+        text.contains(&format!("\nlogs {}\n", slashed(&logs))),
+        "{text}"
+    );
+    assert!(
+        text.contains(&format!("\nprobes {}\n", slashed(&rescue.out))),
+        "{text}"
+    );
+
+    // A step after `run` failed: both repeats passed, no probe ran on the failure, and `schema`
+    // keeps its flag although the failure has no repeat either.
+    raw.head[1].probes.clear();
+    let after_run = Failure {
+        phase: Phase::Report,
+        service: None,
+        repeat: None,
+        cause: Cause::Error("repeat-1-head/out/out.jsonl: not a plain file".to_owned()),
+        logs: None,
+        probes: Vec::new(),
+    };
+    let line = Line::failed(after_run, Some(&raw), Vec::new());
+    let mut expected = expected.to_vec();
+    expected[0] = Flag::LowRepeats { samples: 2 };
+    assert_eq!(line.flags, expected);
+
+    // A failed setup: its probes ran on the failure too, and no repeat ran.
+    raw.head.clear();
+    let rescue = probe_ran("rescue", ExecOutcome::Exited(3), &setup_out);
+    raw.setup.head.probes = vec![rescue.clone()];
+    let failure = Failure {
+        phase: Phase::Setup,
+        service: Some("db".to_owned()),
+        repeat: None,
+        cause: Cause::Unhealthy,
+        logs: Some(folder.path().join("setup-head")),
+        probes: vec![rescue.out],
+    };
+    let line = Line::failed(failure.clone(), Some(&raw), Vec::new());
+    assert!(line.flags.is_empty(), "{:?}", line.flags);
+
+    let refused = Line::failed(failure, None, vec![Next::Init]);
+    assert!(refused.flags.is_empty());
+    assert_eq!(refused.next, [Next::Init]);
+}
+
+#[test]
+fn the_line_and_the_summary_print_the_same_tokens() {
+    let folder = Folder::new();
+    let mut head = repeats(&folder, "head", &[200, 200, 200]);
+    head[0].instances[0].metrics.unexposed.push(Unexposed {
+        name: "cache".to_owned(),
+        attempts: 2,
+    });
+    let before = repeats(&folder, "before", &[100, 100, 100]);
+    let raw = raw(&folder, head, Some(before));
+    let report = report(&raw);
+    let line = report.line(Utf8Path::new("run"));
+    let texts = [report.summary().to_string(), line.summary().to_string()];
+
+    let json = serde_json::to_value(&line).unwrap();
+    let mut tokens = vec![
+        "stand.wall 200 ms before 100 regressed",
+        "missing-expose attempts 2 name cache",
+    ];
+    let kinds = json["flags"].as_array().unwrap().iter();
+    tokens.extend(kinds.map(|flag| flag["kind"].as_str().unwrap()));
+    let quiet = format!("\nquiet {}\n", line.quiet);
+    tokens.push(&quiet);
+    for text in &texts {
+        for token in &tokens {
+            assert!(text.contains(token), "{token} not in\n{text}");
+        }
+    }
+    assert!(
+        texts[1].ends_with("\nreport run/report.json\n"),
+        "{}",
+        texts[1]
+    );
+    assert!(!texts[0].contains("report.json"), "{}", texts[0]);
+}
+
+#[test]
+fn the_summary_opens_with_no_comparison_and_coverage_unknown() {
+    let folder = Folder::new();
+    // Without a profiled service there is no coverage to miss: `unprofiled` stays a flag line.
+    let plain = report(&raw(&folder, repeats(&folder, "plain", &[100]), None));
+    assert_eq!(first_line(&plain), format!("run {RUN}"));
+    let summary = plain.summary().to_string();
+    assert!(
+        summary.lines().any(|line| line == "unprofiled"),
+        "{summary}"
+    );
+
+    let failed = |phase: Phase| Failure {
+        phase,
+        service: None,
+        repeat: None,
+        cause: Cause::Timeout,
+        logs: None,
+        probes: Vec::new(),
+    };
+    let mut raw = raw(&folder, repeats(&folder, "head", &[100, 100, 100]), None);
+    raw.setup.before = Some(setup_side(&folder, "before", &[]));
+    raw.before = Some(BeforeOutcome::Failed(failed(Phase::Setup)));
+    raw.coverage = Some(CoverageOutcome::Failed(failed(Phase::Workload)));
+    let summary = report(&raw).summary().to_string();
+    let first: Vec<&str> = summary.lines().take(3).collect();
+    let opening = [
+        "NO COMPARISON: before failed at setup",
+        "coverage unknown: repeat failed at workload",
+    ];
+    let run = format!("run {RUN}");
+    assert_eq!(first, [opening[0], opening[1], run.as_str()]);
+    let line = Line::failed(failed(Phase::Workload), Some(&raw), Vec::new());
+    let text = line.summary().to_string();
+    let opened = format!("{}\n{}\n", opening[0], opening[1]);
+    assert!(text.starts_with(&opened), "{text}");
+
+    // `api` wrote no profile in a measured repeat, and the coverage repeat saw no call of it.
+    raw.before = None;
+    raw.setup.before = None;
+    raw.head[0].instances[0].profile = Some(ProfileOutcome::NoProfile);
+    let services = BTreeMap::from([("api".to_owned(), Coverage::default())]);
+    raw.coverage = Some(CoverageOutcome::Read(services));
+    let unseen = "coverage unknown: api left no coverage";
+    assert_eq!(first_line(&report(&raw)), unseen);
+    raw.coverage = Some(CoverageOutcome::Read(BTreeMap::new()));
+    let empty = "coverage unknown: no service in the coverage repeat";
+    assert_eq!(first_line(&report(&raw)), empty);
+}
+
+#[test]
+fn the_summary_names_the_setup_origin_and_the_line_does_not() {
+    let folder = Folder::new();
+    let raw = raw(
+        &folder,
+        repeats(&folder, "head", &[100]),
+        Some(repeats(&folder, "before", &[100])),
+    );
+    let mut context = context(&raw, Previous::None, &[]);
+    context.setup_from.before = Some(PREVIOUS.to_owned());
+    let report = report_of(&raw, &context, &[]);
+
+    let summary = report.summary().to_string();
+    let setup = format!("setup head built  before cached {PREVIOUS}");
+    assert!(summary.lines().any(|line| line == setup), "{summary}");
+    let line = serde_json::to_string(&report.line(Utf8Path::new("run"))).unwrap();
+    assert!(
+        !line.contains("cached") && !line.contains("setup"),
+        "{line}"
+    );
+}
+
+// --- the fixture -------------------------------------------------------------------------------
+
+/// The run of the fixture: `db` with the volume `pgdata` and the probe `orders`, `api` profiled,
+/// the workload `load` calling `api:3000`; three repeats per version, `--before session`.
+fn fixture_repeat(folder: &Folder, side: &str, repeat: u32, wall: u64) -> RepeatOutput {
+    let dir = format!("fixture-{side}-{repeat}");
+    let head = side == "head";
+    let (second, order) = if head { (11, "pending") } else { (10, "paid") };
+    let id = &side[..1];
+    let record = format!(
+        "{{\"order\":1,\"requestId\":\"{id}{repeat}a\",\"total\":10}}\n{{\"order\":2,\"requestId\":\"{id}{repeat}b\",\"total\":{second}}}\n"
+    );
+    let orders = format!(
+        "{{\"id\":7,\"status\":\"{order}\",\"updated_at\":\"{side}-{repeat}\"}}\n{{\"id\":8,\"status\":\"paid\",\"updated_at\":\"{side}-{repeat}\"}}\n"
+    );
+    let files = [
+        ("out.jsonl", record.as_str()),
+        ("probe.orders.jsonl", orders.as_str()),
+        ("probe.orders.jsonl.err", ""),
+    ];
+    let out = folder.out(&dir, &files);
+
+    let mut api = metrics(if head { 6000 } else { 5000 }, 300 << 20);
+    api.ports.push(PortStats {
+        bytes_out: 20_000,
+        bytes_in: 80_000,
+        ..port("db:5432", 4)
+    });
+    let api_log = folder.log(
+        &format!("{dir}-api"),
+        "listening on 3000\nERROR: boom\n",
+        "ERROR: late\n",
+    );
+    let mut api = instance("api", Role::LongRunning, api, api_log);
+    api.stopped = Some(Stopped {
+        after: Duration::from_millis(120),
+        killed: false,
+    });
+    let (build_line, build_self, money_self) = if head {
+        (40, 812.0, 120.0)
+    } else {
+        (38, 500.0, 118.0)
+    };
+    let mut functions = vec![
+        Sampled {
+            total_ms: 2100.0,
+            column: 21,
+            ..sampled(
+                "src/orders/orders.service.ts",
+                "buildReport",
+                build_line,
+                build_self,
+            )
+        },
+        Sampled {
+            total_ms: money_self + 10.0,
+            column: 28,
+            ..sampled("src/util/money.ts", "formatMoney", 3, money_self)
+        },
+    ];
+    // Under 1 ms: left out of `hot`.
+    if head {
+        functions.push(Sampled {
+            column: 5,
+            ..sampled("src/util/money.ts", "round", 10, 0.5)
+        });
+    }
+    api.profile = Some(read(functions));
+
+    let db_log = folder.log(&format!("{dir}-db"), "ready\n", "");
+    let mut db = instance("db", Role::LongRunning, metrics(3000, 200 << 20), db_log);
+    db.stopped = Some(Stopped {
+        after: Duration::from_millis(300),
+        killed: false,
+    });
+
+    let mut load = metrics(1000, 50 << 20);
+    load.memory_limit = 512 << 20;
+    load.ports.push(PortStats {
+        bytes_out: 150_000,
+        bytes_in: 600_000,
+        http: Some([0, 3000, 0, 0, 0]),
+        drops: if head && repeat == 2 { 14 } else { 0 },
+        ..port("api:3000", 300)
+    });
+    let load = instance(
+        "load",
+        Role::Workload,
+        load,
+        folder.log(&format!("{dir}-load"), "", ""),
+    );
+
+    RepeatOutput {
+        repeat,
+        wall: Duration::from_millis(wall),
+        instances: vec![api, db, load],
+        probes: vec![probe_ran("orders", ExecOutcome::Exited(0), &out)],
+        out_dir: out,
+    }
+}
+
+fn fixture_raw(folder: &Folder, head_walls: &[u64], before_walls: Option<&[u64]>) -> Raw {
+    let side = |name: &str, walls: &[u64]| -> Vec<RepeatOutput> {
+        let numbered = walls.iter().zip(1..);
+        numbered
+            .map(|(wall, repeat)| fixture_repeat(folder, name, repeat, *wall))
+            .collect()
+    };
+    let mut raw = raw(
+        folder,
+        side("head", head_walls),
+        before_walls.map(|walls| side("before", walls)),
+    );
+    raw.setup.head.sizes.insert("pgdata".to_owned(), 8_388_608);
+    if let Some(setup) = &mut raw.setup.before {
+        setup.sizes.insert("pgdata".to_owned(), 8_126_464);
+    }
+    probe_rule(&mut raw, "orders", Some("/id"), &["/updated_at"]);
+    let coverage = Coverage {
+        called: vec![
+            called("src/orders/orders.service.ts", 40, 21, 1200),
+            called("src/util/money.ts", 3, 28, 5000),
+        ],
+    };
+    let services = BTreeMap::from([("api".to_owned(), coverage)]);
+    raw.coverage = Some(CoverageOutcome::Read(services));
+    raw
+}
+
+#[test]
+fn make_on_the_raw_outputs_and_context_of_the_fixture_gives_the_fixture() {
+    let folder = Folder::new();
+    let earlier = fixture_raw(&folder, &[41900, 41800, 42000], None);
+    let mut earlier_context = context(&earlier, Previous::None, &[]);
+    earlier_context.run = PREVIOUS.to_owned();
+    earlier_context.created_at = at("2026-10-22T09:45:00Z");
+    let previous = report_of(&earlier, &earlier_context, &[]);
+    let raw = fixture_raw(
+        &folder,
+        &[42210, 41877, 42502],
+        Some(&[41010, 40870, 41502]),
+    );
+    let mut context = context(&raw, Previous::Read(&previous), &[]);
+    context.setup_from.before = Some(PREVIOUS.to_owned());
+    let report = report_of(&raw, &context, &[]);
+
+    let expected: Value = serde_json::from_str(FIXTURE).expect("the fixture is JSON");
+    let made = serde_json::to_value(&report).expect("the report serializes");
+    assert_eq!(
+        made,
+        expected,
+        "made:\n{}",
+        serde_json::to_string_pretty(&made).unwrap()
+    );
+}

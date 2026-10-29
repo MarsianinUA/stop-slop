@@ -104,18 +104,29 @@ fn read(entry: &Utf8Path) -> Result<Option<EntryFile>, StandFault> {
 }
 
 /// The whole of `/stand/out` of setup: `.err` and `.status` lie beside each probe output, and a
-/// service with a probe may write there too. Only folders and plain files: a link a service left
-/// would read the host.
+/// service with a probe may write there too. Only folders and plain files are copied; anything
+/// else is skipped and never followed, as a link would read the host, unless it is a top-level
+/// `*.jsonl`, which the report refuses: refused here too, on a build and on a hit alike.
 fn copy_dir(from: &Utf8Path, to: &Utf8Path) -> Result<(), StandFault> {
+    copy_tree(from, to, true)
+}
+
+fn copy_tree(from: &Utf8Path, to: &Utf8Path, top: bool) -> Result<(), StandFault> {
     fs::create_dir_all(to).map_err(StandFault::io(to))?;
     for entry in from.read_dir_utf8().map_err(StandFault::io(from))? {
         let entry = entry.map_err(StandFault::io(from))?;
         let target = to.join(entry.file_name());
         let kind = entry.file_type().map_err(StandFault::io(entry.path()))?;
         if kind.is_dir() {
-            copy_dir(entry.path(), &target)?;
+            copy_tree(entry.path(), &target, false)?;
         } else if kind.is_file() {
             fs::copy(entry.path(), &target).map_err(StandFault::io(&target))?;
+        } else if top && entry.file_name().ends_with(".jsonl") {
+            return Err(StandFault::bad(
+                entry.path(),
+                "not a plain file: the stand reads the results in /stand/out only as plain \
+                 files, never through a link",
+            ));
         }
     }
     Ok(())

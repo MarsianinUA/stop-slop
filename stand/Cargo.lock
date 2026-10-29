@@ -3543,10 +3543,13 @@ name = "report"
 version = "0.1.0"
 dependencies = [
  "camino",
+ "humantime",
  "profile",
  "sandbox",
  "serde",
  "serde_json",
+ "tempfile",
+ "thiserror",
 ]
 
 [[package]]

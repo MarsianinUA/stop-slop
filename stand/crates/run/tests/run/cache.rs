@@ -110,22 +110,83 @@ fn a_build_writes_out_and_entry_json_after_the_whole_setup_and_nothing_else() {
     assert_clean(&fake, &case.left());
 }
 
-/// A link a service leaves in `/stand/out` stays out of the entry: a copy would read what it
-/// points at on the host.
+/// A link a service leaves in `/stand/out` is never followed: a copy would read what it points at
+/// on the host. One with another name, or below the top, stays out of an entry and out of a hit,
+/// as the report never reads it; a top-level `*.jsonl` one, which the report refuses, is a stand
+/// fault in a build and on a hit alike.
 #[cfg(unix)]
 #[test]
-fn a_build_copies_no_link_into_the_entry() {
+fn a_link_in_the_setup_outputs_is_skipped_unless_it_is_named_as_a_result() {
+    use std::os::unix::fs::symlink;
+
+    let refused = |result: &Result<_, RunError>, link: &Utf8Path| {
+        matches!(
+            result,
+            Err(RunError::Stand {
+                phase: Phase::Setup,
+                fault: StandFault::Io { path, .. },
+            }) if *path == link
+        )
+    };
+    // Links with another name or in a folder: the build copies the rest, and so does a hit.
+    let first = Case::new(EXAMPLE);
+    let out = first.run_dir().join("setup-head/out");
+    fs::create_dir_all(out.join("logs")).unwrap();
+    let secret = first.root.join("secret");
+    fs::write(&secret, b"host").unwrap();
+    symlink(&secret, out.join("leak")).unwrap();
+    symlink(&secret, out.join("logs/leak.jsonl")).unwrap();
+    let fake = fake(example_rules());
+    first.run(&fake, &first.versions(false)).unwrap();
+    let entry_out = first.entry(Side::Head).join("out");
+    let copied = ["logs", "probe.schema.jsonl", "probe.schema.jsonl.err"];
+    assert_eq!(names_in(&entry_out), copied);
+    assert!(names_in(&entry_out.join("logs")).is_empty());
+    assert_clean(&fake, &first.left());
+    symlink(&secret, entry_out.join("leak")).unwrap();
+    let second = Case::new(EXAMPLE);
+    let versions = Versions {
+        head: hit(&second, &first, Side::Head),
+        before: None,
+    };
+    second.run(&fake, &versions).unwrap();
+    assert_eq!(names_in(&second.run_dir().join("setup-head/out")), copied);
+    let mut left = first.left();
+    left.extend(second.kept());
+    assert_clean(&fake, &left);
+
+    // A top-level `*.jsonl` link in a build: its setup passes, no entry is written, no repeat
+    // starts, its snapshots go.
     let case = Case::new(EXAMPLE);
     let out = case.run_dir().join("setup-head/out");
     fs::create_dir_all(&out).unwrap();
-    let secret = case.root.join("secret");
-    fs::write(&secret, b"host").unwrap();
-    std::os::unix::fs::symlink(&secret, out.join("leak")).unwrap();
-    let fake = fake(example_rules());
-    case.run(&fake, &case.versions(false)).unwrap();
-    let copied = names_in(&case.entry(Side::Head).join("out"));
-    assert_eq!(copied, ["probe.schema.jsonl", "probe.schema.jsonl.err"]);
-    assert_clean(&fake, &case.left());
+    symlink(&secret, out.join("leak.jsonl")).unwrap();
+    let fake = crate::fake(example_rules());
+    let result = case.run(&fake, &case.versions(false));
+    assert!(refused(&result, &out.join("leak.jsonl")), "{result:?}");
+    assert_eq!(run::cached_ids(&case.entry(Side::Head)).unwrap(), None);
+    assert_eq!(
+        services(&fake.journal()),
+        ["db-1", "prepare-1", "migrate-1"]
+    );
+    assert_clean(&fake, &[]);
+
+    // A hit on an entry that holds one: nothing starts.
+    let first = Case::new(EXAMPLE);
+    let fake = crate::fake(example_rules());
+    first.run(&fake, &first.versions(false)).unwrap();
+    let built = fake.journal().len();
+    let link = first.entry(Side::Head).join("out/leak.jsonl");
+    symlink(&secret, &link).unwrap();
+    let second = Case::new(EXAMPLE);
+    let versions = Versions {
+        head: hit(&second, &first, Side::Head),
+        before: None,
+    };
+    let result = second.run(&fake, &versions);
+    assert!(refused(&result, &link), "{result:?}");
+    assert_eq!(fake.journal().len(), built);
+    assert_clean(&fake, &first.left());
 }
 
 #[test]
