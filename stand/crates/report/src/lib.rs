@@ -9,9 +9,11 @@ use camino::Utf8Path;
 mod behaviour;
 mod context;
 mod flags;
+mod grade;
 mod hot;
 mod line;
 mod measures;
+mod modes;
 mod next;
 mod outputs;
 mod raw;
@@ -19,7 +21,9 @@ mod schema;
 mod stats;
 mod summary;
 
-pub use context::{BeforeInfo, Context, Intent, SetupFrom};
+pub use context::{
+    BeforeInfo, Bound, Context, Declared, Intent, Journal, PastRun, PostHoc, SealInfo, SetupFrom,
+};
 pub use flags::{DeadReason, Flag};
 pub use next::{Next, Topic};
 pub use outputs::{Outputs, read_outputs};
@@ -29,9 +33,11 @@ pub use raw::{
     Role, SecondPassOutcome, Setup, SetupSide,
 };
 pub use schema::{
-    At, BeforeJson, Behaviour, CalledJson, Compared, CoverageJson, Diff, Direction, Head, Hot,
-    HotVersus, IntentJson, Line, LineFile, LineMeasure, Measure, RecipeJson, Report, SetupJson,
-    Src, Unit, Verdict, VersusBefore, VersusPrevious,
+    At, BeforeJson, Behaviour, CalledJson, Categories, CategoryChange, CategoryJson, Compared,
+    CoverageJson, Diff, Direction, ExpectJson, FaultJson, Grade, Head, Hot, HotVersus, IntentJson,
+    JournalJson, Line, LineFault, LineFile, LineMeasure, LinePass, Measure, Need, PassFile,
+    PassOpen, PassState, RecipeJson, Report, SealJson, SecondPassJson, SetupJson, Src, Unit,
+    Verdict, VersusBefore, VersusPrevious,
 };
 pub use summary::Summary;
 
@@ -57,6 +63,7 @@ impl<'r> Previous<'r> {
 pub fn make(raw: &Raw, outputs: &Outputs, context: &Context<'_>) -> Report {
     let before = Before::of(raw);
     let (measures, mut flags) = measures::of(raw, outputs, context, before);
+    flags.extend(grade::unknown_expect(&measures, context));
     flags.extend(flags::facts(raw));
     flags.extend(flags::of_context(raw, context));
     flags.extend(flags::bad_lines(outputs));
@@ -69,6 +76,9 @@ pub fn make(raw: &Raw, outputs: &Outputs, context: &Context<'_>) -> Report {
         }
         Before::Absent | Before::Failed(_) => None,
     };
+    let (second_pass, failed) = modes::second_pass(raw, outputs, context);
+    flags.extend(failed);
+    flags.extend(modes::grown(second_pass.as_ref()));
     flags::order(&mut flags);
     let previous = context.previous.report();
     Report {
@@ -78,10 +88,13 @@ pub fn make(raw: &Raw, outputs: &Outputs, context: &Context<'_>) -> Report {
         recipe: RecipeJson {
             digest: raw.digest.clone(),
         },
+        seal: context.sealed().map(schema::seal_json),
         created_at: schema::time(context.created_at),
         repeat: raw.repeat,
         setup_timeout: schema::duration(raw.setup_timeout),
         timeout: schema::duration(raw.timeout),
+        attempts: u32::try_from(context.pool.len() + 1).unwrap_or(u32::MAX),
+        comparisons: context.comparisons(),
         harness: raw.harness.clone(),
         head: Head {
             tree: context.head_tree.clone(),
@@ -94,11 +107,14 @@ pub fn make(raw: &Raw, outputs: &Outputs, context: &Context<'_>) -> Report {
             .as_ref()
             .map(|info| schema::before_json(info, before, &context.setup_from)),
         previous_run: previous.map(|report| report.run.clone()),
+        needs: grade::needs(&measures),
         measures,
         flags,
         hot: hot::of(raw, before, previous),
-        coverage: hot::coverage(raw),
+        coverage: modes::coverage(raw, context),
         behaviour,
+        fault: modes::fault(raw, context),
+        second_pass,
         records: Arc::clone(&outputs.records),
     }
 }
@@ -206,6 +222,22 @@ impl Report {
 }
 
 impl Context<'_> {
+    /// The seal of a run with `--before`: a plain run is free exploration (plan, row 65).
+    fn sealed(&self) -> Option<&SealInfo> {
+        self.before.as_ref().and(self.seal.as_ref())
+    }
+
+    /// This run and the passed runs with `--before` from the last seal on: a failed run compared
+    /// nothing, and a reseal starts the count again.
+    fn comparisons(&self) -> Option<u32> {
+        self.before.as_ref()?;
+        let since = self.sealed().map(|seal| seal.sealed_at);
+        let earlier = self.history.iter().filter(|run| {
+            run.compared && run.passed && since.is_none_or(|since| run.created_at >= since)
+        });
+        Some(u32::try_from(earlier.count() + 1).unwrap_or(u32::MAX))
+    }
+
     fn origin(&self, side: Side) -> &str {
         let cached = match side {
             Side::Head => self.setup_from.head.as_deref(),

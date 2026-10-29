@@ -5,11 +5,13 @@ use std::fmt;
 
 use camino::Utf8Path;
 use serde::Serialize;
-use serde_json::Value;
+use serde_json::{Map, Value};
 
 use crate::flags::Flag;
 use crate::raw::Failure;
-use crate::schema::{IntentJson, Line, LineFile, LineMeasure, Report, slashed};
+use crate::schema::{
+    IntentJson, Line, LineFault, LineFile, LineMeasure, LinePass, Need, Report, SealJson, slashed,
+};
 
 /// The hot functions the summary prints; the report has all of them.
 const TOP: usize = 10;
@@ -64,8 +66,16 @@ impl Report {
         if let Some(previous) = &self.previous_run {
             lines.push(format!("previousRun {previous}"));
         }
+        lines.extend(seal_text(
+            self.seal.as_ref(),
+            self.attempts,
+            self.comparisons,
+        ));
         lines.extend(line.measures.iter().map(measure_text));
+        lines.extend(self.needs.iter().map(need_text));
         lines.extend(line.behaviour.iter().flatten().map(file_text));
+        lines.extend(line.fault.iter().flat_map(fault_text));
+        lines.extend(line.second_pass.iter().flatten().map(pass_text));
         lines.extend(self.flags.iter().map(flag_text));
         for hot in self.hot.iter().take(TOP) {
             let mut text = format!(
@@ -79,11 +89,13 @@ impl Report {
             lines.push(text);
         }
         if let Some(coverage) = &self.coverage {
-            lines.push(format!(
+            let mut text = format!(
                 "coverage {} called in {}",
                 coverage.called.len(),
                 coverage.services.join(" ")
-            ));
+            );
+            text.push_str(&from_text(coverage.from.as_ref()));
+            lines.push(text);
         }
         lines.push(format!("quiet {}", line.quiet));
         Summary { lines }
@@ -99,9 +111,19 @@ impl Line {
         if let Some(run) = &self.run {
             lines.push(format!("run {run}"));
         }
+        lines.extend(seal_text(
+            self.seal.as_ref(),
+            self.attempts,
+            self.comparisons,
+        ));
         lines.extend(self.measures.iter().map(measure_text));
+        lines.extend(self.needs.iter().map(need_text));
         for file in self.behaviour.iter().flatten() {
             lines.push(format!("{}  {}", file_text(file), slashed(&file.path)));
+        }
+        lines.extend(self.fault.iter().flat_map(fault_text));
+        for file in self.second_pass.iter().flatten() {
+            lines.push(format!("{}  {}", pass_text(file), slashed(&file.path)));
         }
         lines.extend(self.flags.iter().map(flag_text));
         lines.push(format!("quiet {}", self.quiet));
@@ -137,6 +159,27 @@ fn headlines(flags: &[Flag]) -> Vec<String> {
     head.collect()
 }
 
+/// A failed line has no report, so no attempts to print.
+fn seal_text(seal: Option<&SealJson>, attempts: u32, comparisons: Option<u32>) -> Vec<String> {
+    let mut lines = Vec::new();
+    if let Some(seal) = seal {
+        lines.push(format!(
+            "seal {}  maxTolerance {}",
+            seal.sealed_at, seal.max_tolerance
+        ));
+        let journal = seal.journal.iter();
+        lines.extend(journal.map(|entry| format!("journal{}", pairs(&fields(entry)))));
+    }
+    if attempts > 0 {
+        let mut text = format!("attempts {attempts}");
+        if let Some(comparisons) = comparisons {
+            text.push_str(&format!("  comparisons {comparisons}"));
+        }
+        lines.push(text);
+    }
+    lines
+}
+
 fn failure_text(failure: &Failure) -> Vec<String> {
     let service = failure.service.as_deref().unwrap_or("-");
     let repeat = failure
@@ -165,6 +208,34 @@ fn file_text(file: &LineFile) -> String {
     )
 }
 
+fn fault_text(fault: &LineFault) -> Vec<String> {
+    let from = from_text(fault.from.as_ref());
+    let mut lines = vec![format!("fault {} {}{from}", fault.target, fault.mode)];
+    for change in &fault.changed {
+        lines.push(format!(
+            "fault {} before {} head {}",
+            change.category, change.before, change.head
+        ));
+    }
+    let unknown = fault.unknown.iter();
+    lines.extend(unknown.map(|category| format!("fault {category} unknown")));
+    lines
+}
+
+fn pass_text(file: &LinePass) -> String {
+    format!(
+        "secondPass {} before {} diffs {}{}",
+        file.file,
+        token(&file.before),
+        file.diffs,
+        from_text(file.from.as_ref())
+    )
+}
+
+fn from_text(from: Option<&String>) -> String {
+    from.map(|run| format!(" from {run}")).unwrap_or_default()
+}
+
 fn measure_text(measure: &LineMeasure) -> String {
     let mut text = format!(
         "{} {} {}",
@@ -179,19 +250,50 @@ fn measure_text(measure: &LineMeasure) -> String {
     let previous = &measure.previous;
     let verdict = token(&previous.verdict);
     text.push_str(&format!(" previous {} {verdict}", number(previous.median)));
+    if let Some(expect) = &measure.expect {
+        let grade = token(&expect.grade);
+        text.push_str(&format!(" expect {} {grade}", expect.change));
+        if expect.post_hoc {
+            text.push_str(" postHoc");
+        }
+        if expect.stale {
+            text.push_str(" stale");
+        }
+        if expect.acceptances > 0 {
+            text.push_str(&format!(" acceptances {}", expect.acceptances));
+        }
+    }
     text
+}
+
+fn need_text(need: &Need) -> String {
+    format!("needs {}: {}", need.measure, need.reason)
 }
 
 /// `<kind>`, then each fact of the flag as `<key> <value>`.
 fn flag_text(flag: &Flag) -> String {
-    let Ok(Value::Object(fields)) = serde_json::to_value(flag) else {
-        return String::new();
-    };
-    let mut text = fields.get("kind").map(plain).unwrap_or_default();
-    for (key, value) in fields.iter().filter(|(key, _)| *key != "kind") {
-        text.push_str(&format!(" {key} {}", plain(value)));
-    }
+    let mut fields = fields(flag);
+    let mut text = fields
+        .remove("kind")
+        .as_ref()
+        .map(plain)
+        .unwrap_or_default();
+    text.push_str(&pairs(&fields));
     text
+}
+
+fn fields(value: &impl Serialize) -> Map<String, Value> {
+    match serde_json::to_value(value) {
+        Ok(Value::Object(fields)) => fields,
+        _ => Map::new(),
+    }
+}
+
+fn pairs(fields: &Map<String, Value>) -> String {
+    let pairs = fields.iter();
+    pairs
+        .map(|(key, value)| format!(" {key} {}", plain(value)))
+        .collect()
 }
 
 fn number(value: Option<f64>) -> String {

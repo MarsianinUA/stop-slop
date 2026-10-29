@@ -4,8 +4,9 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use report::{
-    At, Cause, Compared, DeadReason, Diff, Failure, Flag, Line, LineFile, LineMeasure, Phase, Src,
-    Unit, Verdict, VersusPrevious,
+    At, CategoryChange, Cause, Compared, DeadReason, Diff, ExpectJson, Failure, Flag, Grade,
+    JournalJson, Line, LineFault, LineFile, LineMeasure, LinePass, Need, PassState, Phase,
+    SealJson, Src, Unit, Verdict, VersusPrevious,
 };
 use serde_json::{Value, json};
 
@@ -162,6 +163,23 @@ fn every_flag() -> Vec<Flag> {
             side: text(),
             repeat: 1,
         },
+        Flag::SecondPassFailed {
+            side: text(),
+            stage: Phase::Workload,
+        },
+        Flag::ConnectionsGrow {
+            target: text(),
+            side: text(),
+            first: 1,
+            second: 2,
+        },
+        Flag::UnknownExpect { measure: text() },
+        Flag::BeforeAfterSession {
+            taken_at: text(),
+            started_at: text(),
+        },
+        Flag::MeasuredBeforeSeal { run: text() },
+        Flag::WideTolerance { max_tolerance: 40 },
     ];
     for flag in &flags {
         match flag {
@@ -184,7 +202,13 @@ fn every_flag() -> Vec<Flag> {
             | Flag::DeadProbe { .. }
             | Flag::ProbeFailed { .. }
             | Flag::HeadOnlyNoise { .. }
-            | Flag::KilledAtStop { .. } => {}
+            | Flag::KilledAtStop { .. }
+            | Flag::SecondPassFailed { .. }
+            | Flag::ConnectionsGrow { .. }
+            | Flag::UnknownExpect { .. }
+            | Flag::BeforeAfterSession { .. }
+            | Flag::MeasuredBeforeSeal { .. }
+            | Flag::WideTolerance { .. } => {}
         }
     }
     flags
@@ -207,6 +231,29 @@ fn the_topic_line_names_every_field_of_the_line() {
     assert_eq!(fields, owned(listed("- The line has")));
     assert_eq!(keys(&line["failure"]), owned(listed("- `failure` has")));
 
+    let time = || "2026-10-22T09:40:00Z".to_owned();
+    let seal = SealJson {
+        sealed_at: time(),
+        max_tolerance: 25,
+        journal: vec![
+            JournalJson::Sealed {
+                sealed_at: time(),
+                digest: String::new(),
+            },
+            JournalJson::Resealed {
+                resealed_at: time(),
+                digest: String::new(),
+                reason: String::new(),
+            },
+            JournalJson::Cleaned { cleaned_at: time() },
+        ],
+    };
+    let seal = serde_json::to_value(seal).unwrap();
+    assert_eq!(keys(&seal), owned(listed("- `seal` has")));
+    let entries = seal["journal"].as_array().expect("a journal").iter();
+    let journal = entries.flat_map(keys).collect::<BTreeSet<_>>();
+    assert_eq!(journal, owned(listed("- A journal entry has")));
+
     let measure = LineMeasure {
         name: "stand.wall".to_owned(),
         unit: Unit::Ms,
@@ -220,9 +267,25 @@ fn the_topic_line_names_every_field_of_the_line() {
             median: None,
             verdict: Verdict::NoBaseline,
         },
+        expect: Some(ExpectJson {
+            change: "+10%".to_owned(),
+            reason: Some(String::new()),
+            grade: Some(Grade::Exceeded),
+            post_hoc: false,
+            stale: false,
+            acceptances: 0,
+        }),
     };
     let measure = serde_json::to_value(measure).unwrap();
     assert_eq!(keys(&measure), owned(listed("- A measure has")));
+    let expect = listed("- `expect` of a measure has");
+    assert_eq!(keys(&measure["expect"]), owned(expect));
+    let need = Need {
+        measure: String::new(),
+        reason: String::new(),
+    };
+    let need = serde_json::to_value(need).unwrap();
+    assert_eq!(keys(&need), owned(listed("- A need has")));
     let against = &keys(&measure["before"]) | &keys(&measure["previous"]);
     let documented = listed("- `before` and `previous` of a measure have");
     assert_eq!(against, owned(documented));
@@ -248,6 +311,33 @@ fn the_topic_line_names_every_field_of_the_line() {
     assert_eq!(keys(&file), owned(listed("- A behaviour file has")));
     let diffs = &keys(&file["sample"][0]) | &keys(&file["sample"][1]);
     assert_eq!(diffs, owned(listed("- A diff has")));
+
+    let change = CategoryChange {
+        category: "workload".to_owned(),
+        before: "exit-0".to_owned(),
+        head: "exit-1".to_owned(),
+    };
+    let fault = LineFault {
+        target: "db:5432".to_owned(),
+        mode: "down".to_owned(),
+        changed: vec![change],
+        unknown: Vec::new(),
+        from: None,
+    };
+    let fault = serde_json::to_value(fault).unwrap();
+    assert_eq!(keys(&fault), owned(listed("- `fault` has")));
+    let change = listed("- A category change has");
+    assert_eq!(keys(&fault["changed"][0]), owned(change));
+    let pass = LinePass {
+        file: "probe.orders.jsonl".to_owned(),
+        before: Some(PassState::Same),
+        diffs: 1,
+        sample: Vec::new(),
+        path: "runs/1/diff/pass2/probe.orders.jsonl.json".into(),
+        from: None,
+    };
+    let pass = serde_json::to_value(pass).unwrap();
+    assert_eq!(keys(&pass), owned(listed("- A second-pass file has")));
 }
 
 #[test]

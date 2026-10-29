@@ -10,6 +10,8 @@ use profile::{Coverage, Samples};
 use sandbox::{ExecOutcome, Metrics, PortStats, Stopped};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
+use crate::Side;
+
 #[derive(Debug)]
 pub struct Raw {
     /// From `Stand`: what the run ran.
@@ -156,6 +158,16 @@ pub struct SecondPassOutcome {
     pub before: Option<PassPair>,
 }
 
+impl SecondPassOutcome {
+    /// The head first, as `open` of the report lists them.
+    pub(crate) fn sides(&self) -> [(Side, Option<&PassPair>); 2] {
+        [
+            (Side::Head, Some(&self.head)),
+            (Side::Before, self.before.as_ref()),
+        ]
+    }
+}
+
 #[derive(Debug)]
 pub enum PassPair {
     Passed {
@@ -172,8 +184,10 @@ pub struct Pass {
     /// the probes after it.
     pub out_dir: Utf8PathBuf,
     pub probes: Vec<ProbeRan>,
-    /// Of every instance at the cut after this pass, the workload's included; a long-running
-    /// service counts from its start, so the second pass holds the first.
+    /// Of the long-running services at the cut after this pass; a service counts from its start,
+    /// so the second pass holds the first. The workload's are not here (T-13b, orchestrator): it
+    /// is a client, and the relay closes its connections up to 0.5 s after its exit, so they would
+    /// read as a leak in `connections-grow`.
     pub ports: Vec<PortStats>,
 }
 

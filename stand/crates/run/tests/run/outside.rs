@@ -516,14 +516,15 @@ fn holding(target: &str, open: u64) -> Metrics {
     }
 }
 
-/// `example_rules` where `api` holds connections to `db` and the workload's are closed.
+/// `example_rules` where `api` holds connections to `db` and the workload still holds its own to
+/// `api` at the cut, as the relay closes them up to 0.5 s after its exit.
 fn pass_rules() -> Vec<Rule> {
     let api = Script {
         metrics: holding("db:5432", 2),
         ..stops(100 * Duration::from_millis(1))
     };
     let load = Script {
-        metrics: holding("api:3000", 0),
+        metrics: holding("api:3000", 3),
         writes: vec![(
             "/stand/out/orders.jsonl".into(),
             b"{\"ok\":true}\n".to_vec(),
@@ -602,17 +603,14 @@ fn the_second_pass_runs_the_workload_twice_on_one_state() {
             assert_eq!(ran(&pass.probes), ["orders"]);
             assert_eq!(pass.probes[0].out, out.join("probe.orders.jsonl"));
             assert!(pass.probes[0].out.is_file() && out.join("orders.jsonl").is_file());
-            // After the pass, of every instance: the database, both replicas, that workload.
+            // After the pass, of the long-running services only: the workload's open connections
+            // to `api` stay out.
             let ports: Vec<(&str, u64)> = pass
                 .ports
                 .iter()
                 .map(|port| (port.target.as_str(), port.open))
                 .collect();
-            assert_eq!(
-                ports,
-                [("db:5432", 2), ("db:5432", 2), ("api:3000", 0)],
-                "{side} {n}"
-            );
+            assert_eq!(ports, [("db:5432", 2), ("db:5432", 2)], "{side} {n}");
         }
         // The cut and the probe of the first pass come at its exit, and its workload is gone
         // before the second starts; the database and the replicas stay, with no restore.

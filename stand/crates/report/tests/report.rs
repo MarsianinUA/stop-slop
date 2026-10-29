@@ -1,17 +1,20 @@
 //! `read_outputs` and `make` on values of `Raw` and `Context` (blueprint, Tests `report.rs`). No
 //! VM: a temporary folder stands in for the run folder that `run` leaves.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::time::{Duration, SystemTime};
 
 use camino::{Utf8Path, Utf8PathBuf};
 use profile::{Called, Coverage, ModuleTime, Sampled, Samples};
 use report::{
-    At, BeforeInfo, BeforeOutcome, Behaviour, Cause, Context, CoverageOutcome, DeadReason, Failure,
-    FaultOutcome, FaultRepeat, Flag, InstanceOutput, Intent, Line, Measure, Next, Phase, Previous,
-    ProbeRan, ProbeRule, ProfileOutcome, Raw, RepeatOutput, Report, ReportError, Role, Setup,
-    SetupFrom, SetupSide, Src, Verdict, load, make, read_outputs,
+    At, BeforeInfo, BeforeOutcome, Behaviour, Bound, CategoryChange, Cause, Context,
+    CoverageOutcome, DeadReason, Declared, Diff, Direction, ExpectJson, Extra, Failure, FaultJson,
+    FaultOutcome, FaultRepeat, Flag, Grade, InstanceOutput, Intent, Journal, Line, Measure, Need,
+    Next, Pass, PassFile, PassPair, PassState, PastRun, Phase, PostHoc, Previous, ProbeRan,
+    ProbeRule, ProfileOutcome, Raw, RepeatOutput, Report, ReportError, Role, SealInfo,
+    SecondPassOutcome, Setup, SetupFrom, SetupSide, Src, Topic, Unit, Verdict, load, make,
+    read_outputs,
 };
 use sandbox::{ExecOutcome, Metrics, PortStats, Stopped, Unexposed};
 use serde_json::{Value, json};
@@ -196,10 +199,16 @@ fn context<'r>(raw: &Raw, previous: Previous<'r>, pool: &'r [Report]) -> Context
         created_at: at("2026-10-22T10:00:00Z"),
         root: "E:/work/app".into(),
         head_tree: HEAD_TREE.to_owned(),
+        changed: None,
         before,
+        seal: None,
+        history: Vec::new(),
+        declared: Vec::new(),
+        accepted: Vec::new(),
         previous,
         pool,
         setup_from: SetupFrom::default(),
+        reused: BTreeSet::new(),
     }
 }
 
@@ -1864,18 +1873,10 @@ fn the_summary_opens_with_no_comparison_and_coverage_unknown() {
         "{summary}"
     );
 
-    let failed = |phase: Phase| Failure {
-        phase,
-        service: None,
-        repeat: None,
-        cause: Cause::Timeout,
-        logs: None,
-        probes: Vec::new(),
-    };
     let mut raw = raw(&folder, repeats(&folder, "head", &[100, 100, 100]), None);
     raw.setup.before = Some(setup_side(&folder, "before", &[]));
-    raw.before = Some(BeforeOutcome::Failed(failed(Phase::Setup)));
-    raw.coverage = Some(CoverageOutcome::Failed(failed(Phase::Workload)));
+    raw.before = Some(BeforeOutcome::Failed(failure_of(Phase::Setup)));
+    raw.coverage = Some(CoverageOutcome::Failed(failure_of(Phase::Workload)));
     let summary = report(&raw).summary().to_string();
     let first: Vec<&str> = summary.lines().take(3).collect();
     let opening = [
@@ -1884,7 +1885,7 @@ fn the_summary_opens_with_no_comparison_and_coverage_unknown() {
     ];
     let run = format!("run {RUN}");
     assert_eq!(first, [opening[0], opening[1], run.as_str()]);
-    let line = Line::failed(failed(Phase::Workload), Some(&raw), Vec::new());
+    let line = Line::failed(failure_of(Phase::Workload), Some(&raw), Vec::new());
     let text = line.summary().to_string();
     let opened = format!("{}\n{}\n", opening[0], opening[1]);
     assert!(text.starts_with(&opened), "{text}");
@@ -1922,6 +1923,1379 @@ fn the_summary_names_the_setup_origin_and_the_line_does_not() {
         !line.contains("cached") && !line.contains("setup"),
         "{line}"
     );
+}
+
+#[test]
+fn the_self_time_of_changed_files_is_the_own_cost_and_the_rest_collateral() {
+    let folder = Folder::new();
+    let changed_head = [
+        ("src/orders.ts", "build", 10, 21, 300.0),
+        ("src/orders.ts", "total", 30, 5, 20.5),
+        ("src/util.ts", "format", 3, 5, 50.0),
+    ];
+    let changed_before = [
+        ("src/orders.ts", "build", 10, 21, 100.0),
+        ("src/util.ts", "format", 3, 5, 50.0),
+    ];
+    let mut head = profiled(&folder, "head", &changed_head);
+    // A second replica adds to the repeat; a repeat where one of them lost its profile has no
+    // sample.
+    let replica = |name: &str, profile| {
+        let log = folder.log(name, "", "");
+        let mut replica = instance("api", Role::LongRunning, metrics(1000, 100 << 20), log);
+        replica.replica = 2;
+        replica.profile = Some(profile);
+        replica
+    };
+    let read_two = read(vec![sampled("src/orders.ts", "build", 10, 10.0)]);
+    head[0].instances.push(replica("api-2", read_two));
+    head[1]
+        .instances
+        .push(replica("api-2-lost", ProfileOutcome::NoProfile));
+    let raw = raw(
+        &folder,
+        head,
+        Some(profiled(&folder, "before", &changed_before)),
+    );
+    let mut compared = context(&raw, Previous::None, &[]);
+    compared.changed = Some(["src/orders.ts".to_owned()].into());
+    let report = report_of(&raw, &compared, &[]);
+
+    let owned = measure(&report, "stand.hot-owned");
+    assert_eq!(owned.samples, [330.5, 320.5]);
+    let before = owned.before.as_ref().expect("a before");
+    assert_eq!(before.samples, [100.0, 100.0, 100.0]);
+    assert_eq!((owned.unit, owned.direction), (Unit::Ms, Direction::Lower));
+    assert_eq!(verdicts(owned).0, Some(Verdict::Regressed));
+    let collateral = measure(&report, "stand.hot-collateral");
+    assert_eq!(collateral.samples, [50.0, 50.0]);
+    assert_eq!(verdicts(collateral).0, Some(Verdict::WithinNoise));
+    assert_eq!(
+        &names(&report)[..3],
+        ["stand.wall", "stand.hot-owned", "stand.hot-collateral"]
+    );
+
+    // Neither without `--before`, nor without a profile.
+    let plain = self::raw(&folder, profiled(&folder, "plain", &changed_head), None);
+    let mut explored = context(&plain, Previous::None, &[]);
+    explored.changed = compared.changed.clone();
+    let unprofiled = self::raw(
+        &folder,
+        repeats(&folder, "bare", &[100]),
+        Some(repeats(&folder, "bare-before", &[100])),
+    );
+    let mut bare = context(&unprofiled, Previous::None, &[]);
+    bare.changed = compared.changed.clone();
+    // Nor when no repeat of the head read a profile: there is nothing to compare, not a 0.
+    let mut lost = profiled(&folder, "lost", &changed_head);
+    for repeat in &mut lost {
+        repeat.instances[0].profile = Some(ProfileOutcome::NoProfile);
+    }
+    let lost = self::raw(
+        &folder,
+        lost,
+        Some(profiled(&folder, "lost-before", &changed_before)),
+    );
+    let mut unseen = context(&lost, Previous::None, &[]);
+    unseen.changed = compared.changed.clone();
+    for report in [
+        report_of(&plain, &explored, &[]),
+        report_of(&unprofiled, &bare, &[]),
+        report_of(&lost, &unseen, &[]),
+    ] {
+        let names = names(&report);
+        assert!(
+            !names.iter().any(|name| name.starts_with("stand.hot")),
+            "{names:?}"
+        );
+    }
+}
+
+// --- the grades against the declared cost ------------------------------------------------------
+
+fn declared(measure: &str, bound: Bound) -> Declared {
+    Declared {
+        measure: measure.to_owned(),
+        bound,
+        reason: format!("the cost of {measure}"),
+        post_hoc: None,
+    }
+}
+
+fn accepted(measure: &str, bound: Bound, head_tree: &str, time: &str) -> Declared {
+    Declared {
+        post_hoc: Some(PostHoc {
+            head_tree: head_tree.to_owned(),
+            accepted_at: at(time),
+        }),
+        reason: format!("accepted {bound}"),
+        ..declared(measure, bound)
+    }
+}
+
+/// Three repeats of each version; `stand.wall` of "before" is 1000 ms, without noise, so the
+/// threshold of the verdict is the larger of 5% and the head's spread.
+fn compared_wall(head: &[u64], context: impl FnOnce(&mut Context<'_>)) -> Report {
+    let folder = Folder::new();
+    let before = Some(repeats(&folder, "before", &[1000, 1000, 1000]));
+    let raw = raw(&folder, repeats(&folder, "head", head), before);
+    let mut compared = self::context(&raw, Previous::None, &[]);
+    compared.seal = Some(sealed("2026-10-22T09:40:00Z", 25));
+    context(&mut compared);
+    report_of(&raw, &compared, &[])
+}
+
+fn expect<'r>(report: &'r Report, name: &str) -> &'r ExpectJson {
+    let expect = measure(report, name).expect.as_ref();
+    expect.unwrap_or_else(|| panic!("{name} has no expect"))
+}
+
+/// The grade of `stand.wall` under `bound`, and that a fixed `api.cpu` is `met` under `none`.
+fn wall_grade(head: &[u64], bound: Bound) -> Option<Grade> {
+    let report = compared_wall(head, |context| {
+        context.declared = vec![declared("stand.wall", bound)];
+    });
+    assert_eq!(expect(&report, "api.cpu").grade, Some(Grade::Met));
+    expect(&report, "stand.wall").grade
+}
+
+#[test]
+fn none_is_met_within_a_noise_of_5_percent_and_any_shift_is_a_surprise() {
+    // +2% within a threshold of 5%; no shift under a spread of 7%; +10% that shows.
+    assert_eq!(
+        wall_grade(&[1020, 1020, 1020], Bound::None),
+        Some(Grade::Met)
+    );
+    let noisy = [970, 1000, 1040];
+    assert_eq!(wall_grade(&noisy, Bound::None), Some(Grade::Unmeasurable));
+    assert_eq!(
+        wall_grade(&[1100, 1100, 1100], Bound::None),
+        Some(Grade::Surprise)
+    );
+    assert_eq!(
+        wall_grade(&[900, 900, 900], Bound::None),
+        Some(Grade::Surprise)
+    );
+}
+
+#[test]
+fn a_rise_up_to_x_is_met_beyond_it_exceeded_and_a_drop_a_surprise() {
+    let up = Bound::UpTo(10);
+    assert_eq!(wall_grade(&[1020, 1020, 1020], up), Some(Grade::Met));
+    // Within a noise of 7%, which +10% can tell apart.
+    assert_eq!(wall_grade(&[970, 1000, 1040], up), Some(Grade::Met));
+    assert_eq!(wall_grade(&[1080, 1080, 1080], up), Some(Grade::Met));
+    assert_eq!(wall_grade(&[1150, 1150, 1150], up), Some(Grade::Exceeded));
+    // +15% under a threshold of 12% still shows, and beyond +10%.
+    assert_eq!(wall_grade(&[1080, 1150, 1218], up), Some(Grade::Exceeded));
+    assert_eq!(wall_grade(&[900, 900, 900], up), Some(Grade::Surprise));
+    // No shift, but a threshold of 12% is wider than +10%.
+    assert_eq!(
+        wall_grade(&[940, 1000, 1060], up),
+        Some(Grade::Unmeasurable)
+    );
+}
+
+#[test]
+fn a_drop_down_to_x_is_met_beyond_it_exceeded_and_a_rise_a_surprise() {
+    let down = Bound::DownTo(10);
+    assert_eq!(wall_grade(&[980, 980, 980], down), Some(Grade::Met));
+    assert_eq!(wall_grade(&[970, 1000, 1040], down), Some(Grade::Met));
+    assert_eq!(wall_grade(&[920, 920, 920], down), Some(Grade::Met));
+    assert_eq!(wall_grade(&[850, 850, 850], down), Some(Grade::Exceeded));
+    assert_eq!(wall_grade(&[782, 850, 884], down), Some(Grade::Exceeded));
+    assert_eq!(wall_grade(&[1100, 1100, 1100], down), Some(Grade::Surprise));
+    assert_eq!(
+        wall_grade(&[940, 1000, 1060], down),
+        Some(Grade::Unmeasurable)
+    );
+}
+
+#[test]
+fn down_is_met_by_a_drop_that_shows_on_a_neutral_measure_too() {
+    assert_eq!(wall_grade(&[900, 900, 900], Bound::Down), Some(Grade::Met));
+    assert_eq!(
+        wall_grade(&[1100, 1100, 1100], Bound::Down),
+        Some(Grade::Surprise)
+    );
+    // No drop shows: a surprise, unless the noise could hide one.
+    assert_eq!(
+        wall_grade(&[1000, 1000, 1000], Bound::Down),
+        Some(Grade::Surprise)
+    );
+    let noisy = [940, 1000, 1060];
+    assert_eq!(wall_grade(&noisy, Bound::Down), Some(Grade::Unmeasurable));
+
+    // 8 calls to `api:3000` instead of 10: a neutral measure only changes, and `down` grades the
+    // sign of the shift.
+    let folder = Folder::new();
+    let mut head = repeats(&folder, "head", &[1000, 1000, 1000]);
+    for repeat in &mut head {
+        repeat.instances[1].metrics.ports[0].connections = 8;
+    }
+    let raw = raw(
+        &folder,
+        head,
+        Some(repeats(&folder, "before", &[1000, 1000, 1000])),
+    );
+    let mut compared = context(&raw, Previous::None, &[]);
+    compared.declared = vec![declared("api:3000.connections", Bound::Down)];
+    let report = report_of(&raw, &compared, &[]);
+    let connections = measure(&report, "api:3000.connections");
+    assert_eq!(verdicts(connections).0, Some(Verdict::Changed));
+    assert_eq!(
+        expect(&report, "api:3000.connections").grade,
+        Some(Grade::Met)
+    );
+}
+
+#[test]
+fn a_rise_from_zero_exceeds_any_bound_and_has_no_template() {
+    let folder = Folder::new();
+    let mut head = repeats(&folder, "head", &[1000, 1000, 1000]);
+    for (index, repeat) in head.iter_mut().enumerate() {
+        let (log, cut) = folder.log(
+            &format!("head-api-{index}"),
+            "ERROR: boom
+",
+            "",
+        );
+        repeat.instances[0].log = log;
+        repeat.instances[0].log_cut = cut;
+    }
+    let raw = raw(
+        &folder,
+        head,
+        Some(repeats(&folder, "before", &[1000, 1000, 1000])),
+    );
+    let mut compared = context(&raw, Previous::None, &[]);
+    compared.seal = Some(sealed("2026-10-22T09:40:00Z", 1000));
+    compared.declared = vec![declared("api.error-lines", Bound::UpTo(100))];
+    let report = report_of(&raw, &compared, &[]);
+
+    let errors = expect(&report, "api.error-lines");
+    assert_eq!(errors.grade, Some(Grade::Exceeded));
+    let next = report.line(Utf8Path::new("run")).next;
+    assert!(next.is_empty(), "{next:?}");
+}
+
+#[test]
+fn the_own_hot_time_of_new_code_is_a_quiet_unmeasurable_and_a_rise_from_more_grades() {
+    let folder = Folder::new();
+    let util = ("src/util.ts", "format", 3, 5, 50.0);
+    let head = [("src/orders.ts", "build", 10, 21, 300.0), util];
+    let graded = |before: &[(&str, &str, u32, u32, f64)], changed: &str, entry: Option<Bound>| {
+        let raw = raw(
+            &folder,
+            profiled(&folder, "head", &head),
+            Some(profiled(&folder, "before", before)),
+        );
+        let mut compared = context(&raw, Previous::None, &[]);
+        compared.seal = Some(sealed("2026-10-22T09:40:00Z", 1000));
+        compared.changed = Some([changed.to_owned()].into());
+        compared.declared = entry
+            .map(|bound| declared("stand.hot-owned", bound))
+            .into_iter()
+            .collect();
+        report_of(&raw, &compared, &[])
+    };
+    let new = graded(&[util], "src/orders.ts", None);
+    let owned = expect(&new, "stand.hot-owned");
+    assert_eq!(
+        (owned.change.as_str(), owned.reason.as_deref(), owned.grade),
+        ("none", Some("new-code"), Some(Grade::Unmeasurable))
+    );
+    assert_eq!(expect(&new, "stand.hot-collateral").grade, Some(Grade::Met));
+    let line = new.line(Utf8Path::new("run"));
+    assert!(names_of(&line).is_empty(), "{:?}", names_of(&line));
+    assert_eq!(line.unmeasurable, 1);
+    assert!(line.next.is_empty(), "{:?}", line.next);
+    // An entry changes the bound, not the grade; `unknown` still asks a person.
+    let bounded = graded(&[util], "src/orders.ts", Some(Bound::UpTo(10)));
+    let owned = expect(&bounded, "stand.hot-owned");
+    assert_eq!(
+        (owned.change.as_str(), owned.reason.as_deref(), owned.grade),
+        ("+10%", Some("new-code"), Some(Grade::Unmeasurable))
+    );
+    assert!(names_of(&bounded.line(Utf8Path::new("run"))).is_empty());
+    let asked = graded(&[util], "src/orders.ts", Some(Bound::Unknown));
+    assert_eq!(expect(&asked, "stand.hot-owned").grade, None);
+    assert_eq!(asked.needs.len(), 1, "{:?}", asked.needs);
+    // From 100 ms the rise shows under `none`; at 0 on both sides nothing moved.
+    let grown = graded(
+        &[("src/orders.ts", "build", 10, 21, 100.0), util],
+        "src/orders.ts",
+        None,
+    );
+    let owned = expect(&grown, "stand.hot-owned");
+    assert_eq!(
+        (owned.reason.as_deref(), owned.grade),
+        (None, Some(Grade::Surprise))
+    );
+    let line = grown.line(Utf8Path::new("run"));
+    assert_eq!(names_of(&line), ["stand.hot-owned"]);
+    let untouched = graded(&[util], "src/other.ts", None);
+    let owned = expect(&untouched, "stand.hot-owned");
+    assert_eq!(
+        (owned.reason.as_deref(), owned.grade),
+        (None, Some(Grade::Met))
+    );
+}
+
+#[test]
+fn unknown_has_no_grade_and_asks_a_person_in_needs() {
+    let report = compared_wall(&[1300, 1300, 1300], |context| {
+        context.declared = vec![declared("stand.wall", Bound::Unknown)];
+    });
+
+    let wall = expect(&report, "stand.wall");
+    assert_eq!((wall.change.as_str(), wall.grade), ("unknown", None));
+    let need = Need {
+        measure: "stand.wall".to_owned(),
+        reason: "the cost of stand.wall".to_owned(),
+    };
+    assert_eq!(report.needs, [need]);
+    let line = report.line(Utf8Path::new("run"));
+    assert_eq!(line.needs, report.needs);
+    assert_eq!(names_of(&line), ["stand.wall"]);
+    assert!(line.next.is_empty(), "{:?}", line.next);
+    let json = serde_json::to_value(&line).unwrap();
+    assert!(json["measures"][0]["expect"]["grade"].is_null());
+    let summary = report.summary().to_string();
+    let asked = "needs stand.wall: the cost of stand.wall";
+    assert!(summary.lines().any(|line| line == asked), "{summary}");
+}
+
+fn names_of(line: &Line) -> Vec<&str> {
+    let names = line.measures.iter();
+    names.map(|measure| measure.name.as_str()).collect()
+}
+
+#[test]
+fn the_accept_template_rounds_the_shift_up_to_5_percent_within_max_tolerance() {
+    let accept = |bound| Next::Accept {
+        measure: "stand.wall".to_owned(),
+        bound,
+    };
+    let next = |head: &[u64], bound: Option<Bound>| {
+        let report = compared_wall(head, |context| {
+            context.declared = bound
+                .map(|bound| declared("stand.wall", bound))
+                .into_iter()
+                .collect();
+        });
+        report.line(Utf8Path::new("run")).next
+    };
+    // `exceeded` at +13.2%, a `surprise` of a 7% drop, `down` within the noise.
+    let exceeded = next(&[1132, 1132, 1132], Some(Bound::UpTo(10)));
+    assert_eq!(exceeded, [accept(Bound::UpTo(15))]);
+    assert_eq!(next(&[930, 930, 930], None), [accept(Bound::DownTo(10))]);
+    let held = next(&[1000, 1000, 1000], Some(Bound::Down));
+    assert_eq!(held, [accept(Bound::None)]);
+    // An exact +15% stays 15, and +40% is wider than `maxTolerance` 25.
+    assert_eq!(next(&[1150, 1150, 1150], None), [accept(Bound::UpTo(15))]);
+    assert!(next(&[1400, 1400, 1400], None).is_empty());
+    // +55% is 11.000000000000002 times 5% as a float, and still 55.
+    let wide = compared_wall(&[1550, 1550, 1550], |context| {
+        context.seal = Some(sealed("2026-10-22T09:40:00Z", 100));
+    });
+    let rounded = wide.line(Utf8Path::new("run")).next;
+    assert_eq!(rounded, [accept(Bound::UpTo(55))]);
+    // An `unmeasurable` entry asks for a wider bound or less noise.
+    let noisy = next(&[940, 1000, 1060], Some(Bound::UpTo(10)));
+    assert_eq!(noisy, [Next::Guide(Some(Topic::Expect))]);
+    // Without a seal there is no `maxTolerance` to keep to.
+    let report = compared_wall(&[930, 930, 930], |context| context.seal = None);
+    assert!(report.line(Utf8Path::new("run")).next.is_empty());
+}
+
+#[test]
+fn an_unmeasurable_measure_without_an_entry_is_quiet_and_counted() {
+    let quiet = compared_wall(&[970, 1000, 1040], |_| {});
+    let line = quiet.line(Utf8Path::new("run"));
+    assert_eq!(
+        expect(&quiet, "stand.wall").grade,
+        Some(Grade::Unmeasurable)
+    );
+    assert_eq!(expect(&quiet, "stand.wall").reason, None);
+    assert!(names_of(&line).is_empty(), "{:?}", names_of(&line));
+    assert_eq!(line.unmeasurable, 1);
+    assert_eq!(line.quiet as usize, quiet.measures.len());
+
+    let declared = compared_wall(&[970, 1000, 1040], |context| {
+        context.declared = vec![declared("stand.wall", Bound::None)];
+    });
+    let line = declared.line(Utf8Path::new("run"));
+    assert_eq!(names_of(&line), ["stand.wall"]);
+    assert_eq!(line.unmeasurable, 0);
+    let json = serde_json::to_value(&line).unwrap();
+    assert_eq!(json["unmeasurable"], 0);
+}
+
+#[test]
+fn the_last_acceptance_of_this_head_replaces_the_bound_and_one_of_another_head_is_stale() {
+    let report = compared_wall(&[1200, 1200, 1200], |context| {
+        context.declared = vec![declared("stand.wall", Bound::UpTo(10))];
+        context.accepted = vec![
+            accepted(
+                "stand.wall",
+                Bound::UpTo(15),
+                "other",
+                "2026-10-22T09:50:00Z",
+            ),
+            accepted(
+                "stand.wall",
+                Bound::UpTo(25),
+                HEAD_TREE,
+                "2026-10-22T09:51:00Z",
+            ),
+            accepted(
+                "stand.wall",
+                Bound::UpTo(20),
+                HEAD_TREE,
+                "2026-10-22T09:52:00Z",
+            ),
+            // Another head only: `api.cpu` is `met` and still in the line.
+            accepted("api.cpu", Bound::UpTo(10), "other", "2026-10-22T09:53:00Z"),
+        ];
+    });
+
+    let wall = expect(&report, "stand.wall");
+    let held = ExpectJson {
+        change: "+20%".to_owned(),
+        reason: Some("accepted +20%".to_owned()),
+        grade: Some(Grade::Met),
+        post_hoc: true,
+        stale: false,
+        acceptances: 3,
+    };
+    assert_eq!(wall, &held);
+    let cpu = expect(&report, "api.cpu");
+    assert_eq!(
+        (cpu.grade, cpu.stale, cpu.post_hoc),
+        (Some(Grade::Met), true, false)
+    );
+    assert_eq!((cpu.change.as_str(), cpu.reason.as_deref()), ("none", None));
+    let line = report.line(Utf8Path::new("run"));
+    assert_eq!(names_of(&line), ["stand.wall", "api.cpu"]);
+    assert!(line.next.is_empty(), "{:?}", line.next);
+    let json = serde_json::to_value(&line).unwrap();
+    assert_eq!(json["measures"][0]["expect"]["postHoc"], true);
+    assert_eq!(json["measures"][1]["expect"]["stale"], true);
+
+    // Only the acceptance of another head: the declared bound holds, and it is exceeded.
+    let report = compared_wall(&[1200, 1200, 1200], |context| {
+        context.declared = vec![declared("stand.wall", Bound::UpTo(10))];
+        context.accepted = vec![accepted(
+            "stand.wall",
+            Bound::UpTo(25),
+            "other",
+            "2026-10-22T09:50:00Z",
+        )];
+    });
+    let wall = expect(&report, "stand.wall");
+    assert_eq!(
+        (wall.change.as_str(), wall.grade),
+        ("+10%", Some(Grade::Exceeded))
+    );
+    assert_eq!(
+        (wall.post_hoc, wall.stale, wall.acceptances),
+        (false, true, 1)
+    );
+    let next = report.line(Utf8Path::new("run")).next;
+    let template = Next::Accept {
+        measure: "stand.wall".to_owned(),
+        bound: Bound::UpTo(20),
+    };
+    assert_eq!(next, [template]);
+}
+
+#[test]
+fn an_entry_of_a_measure_the_report_lacks_is_unknown_expect() {
+    let typo = |context: &mut Context<'_>| {
+        context.declared = vec![
+            declared("stand.wall", Bound::UpTo(10)),
+            declared("api.gpu", Bound::UpTo(10)),
+        ];
+    };
+    let report = compared_wall(&[1000, 1000, 1000], typo);
+    let unknown: Vec<&Flag> = report
+        .flags
+        .iter()
+        .filter(|flag| matches!(flag, Flag::UnknownExpect { .. }))
+        .collect();
+    let flag = Flag::UnknownExpect {
+        measure: "api.gpu".to_owned(),
+    };
+    assert_eq!(unknown, [&flag]);
+    let json = serde_json::to_value(&flag).unwrap();
+    assert_eq!(
+        json,
+        json!({"kind": "unknown-expect", "measure": "api.gpu"})
+    );
+
+    // A plain run grades nothing, so its entries are not looked at.
+    let folder = Folder::new();
+    let plain = raw_of(&folder, "plain");
+    let mut explored = context(&plain, Previous::None, &[]);
+    typo(&mut explored);
+    let report = report_of(&plain, &explored, &[]);
+    assert!(
+        !report
+            .flags
+            .iter()
+            .any(|flag| matches!(flag, Flag::UnknownExpect { .. }))
+    );
+    assert!(
+        report
+            .measures
+            .iter()
+            .all(|measure| measure.expect.is_none())
+    );
+    assert!(report.needs.is_empty());
+}
+
+#[test]
+fn a_failed_before_grades_nothing() {
+    let folder = Folder::new();
+    let mut raw = raw(&folder, repeats(&folder, "head", &[100, 100, 100]), None);
+    raw.setup.before = Some(setup_side(&folder, "before", &[]));
+    raw.before = Some(BeforeOutcome::Failed(failure_of(Phase::Setup)));
+    let mut compared = context(&raw, Previous::None, &[]);
+    compared.declared = vec![declared("stand.wall", Bound::Unknown)];
+    let report = report_of(&raw, &compared, &[]);
+
+    assert!(
+        report
+            .measures
+            .iter()
+            .all(|measure| measure.expect.is_none())
+    );
+    assert!(report.needs.is_empty());
+    let line = report.line(Utf8Path::new("run"));
+    assert!(line.measures.is_empty() && line.next.is_empty());
+}
+
+// --- the fault repeats and the second pass -----------------------------------------------------
+
+/// A fault repeat: the workload's code (or how it ended without one), the services that exited,
+/// the workload's calls to `api:3000` with their HTTP classes, and `api`'s calls to `db:5432`.
+fn faulted(
+    folder: &Folder,
+    repeat: u32,
+    ended: Result<i32, (Phase, Cause)>,
+    exited: &[&str],
+    (calls, classes): (u64, [u64; 5]),
+    db: u64,
+) -> FaultRepeat {
+    let log = || folder.log(&format!("fault-{repeat}"), "", "");
+    let mut api = metrics(1000, 100 << 20);
+    api.ports.push(port("db:5432", db));
+    let mut load = metrics(500, 50 << 20);
+    load.ports.push(PortStats {
+        http: Some(classes),
+        ..port("api:3000", calls)
+    });
+    let failure = |(phase, cause)| Failure {
+        service: Some("load".to_owned()),
+        repeat: Some(repeat),
+        cause,
+        ..failure_of(phase)
+    };
+    let (workload, failure) = match ended {
+        Ok(0) => (Some(0), None),
+        Ok(code) => (
+            Some(code),
+            Some(failure((Phase::Workload, Cause::Exit(code)))),
+        ),
+        Err(ended) => (None, Some(failure(ended))),
+    };
+    FaultRepeat {
+        repeat,
+        workload,
+        exited: exited.iter().map(|service| (*service).to_owned()).collect(),
+        failure,
+        instances: vec![
+            instance("api", Role::LongRunning, api, log()),
+            instance("db", Role::LongRunning, metrics(100, 10 << 20), log()),
+            instance("load", Role::Workload, load, log()),
+        ],
+    }
+}
+
+fn change(category: &str, before: &str, head: &str) -> CategoryChange {
+    CategoryChange {
+        category: category.to_owned(),
+        before: before.to_owned(),
+        head: head.to_owned(),
+    }
+}
+
+#[test]
+fn the_fault_repeats_compare_categories_and_a_disagreeing_before_is_unknown() {
+    let folder = Folder::new();
+    let before = Some(repeats(&folder, "before", &[100, 100, 100]));
+    let mut raw = raw(&folder, repeats(&folder, "head", &[100, 100, 100]), before);
+    let calm = |repeat| faulted(&folder, repeat, Ok(0), &[], (300, [0, 290, 0, 0, 10]), 2);
+    let crashed =
+        |repeat, ended| faulted(&folder, repeat, ended, &["api"], (40, [0, 40, 0, 0, 0]), 12);
+    let timeout = Err((Phase::Workload, Cause::Timeout));
+    raw.fault = Some(FaultOutcome {
+        target: "db:5432".to_owned(),
+        mode: "down".to_owned(),
+        head: vec![crashed(1, Ok(1)), crashed(2, timeout.clone())],
+        before: Some(vec![calm(1), calm(2)]),
+    });
+    let report = report(&raw);
+
+    let fault = report.fault.as_ref().expect("a fault");
+    let json = serde_json::to_value(fault).unwrap();
+    let before = json!([
+        {"category": "workload", "values": ["exit-0", "exit-0"]},
+        {"category": "api state", "values": ["running", "running"]},
+        {"category": "db state", "values": ["running", "running"]},
+        {"category": "api:3000 attempts", "values": [">10", ">10"]},
+        {"category": "db:5432 attempts", "values": ["2-3", "2-3"]},
+        {"category": "api:3000 responses", "values": ["2xx 5xx", "2xx 5xx"]},
+    ]);
+    assert_eq!(json["categories"]["before"], before);
+    assert_eq!(
+        json["categories"]["head"][0]["values"],
+        json!(["exit-1", "timeout"])
+    );
+    let changed = [
+        change("workload", "exit-0", "exit-1"),
+        change("workload", "exit-0", "timeout"),
+        change("api state", "running", "exited"),
+        change("db:5432 attempts", "2-3", ">10"),
+        change("api:3000 responses", "2xx 5xx", "2xx"),
+    ];
+    assert_eq!(fault.changed, changed);
+    assert!(!fault.unknown());
+    let line = report.line(Utf8Path::new("run"));
+    let shown = line.fault.as_ref().expect("a fault in the line");
+    assert_eq!(
+        (shown.target.as_str(), shown.mode.as_str()),
+        ("db:5432", "down")
+    );
+    assert_eq!(shown.changed, changed);
+    assert!(shown.unknown.is_empty());
+    let summary = report.summary().to_string();
+    for text in [
+        "fault db:5432 down",
+        "fault api state before running head exited",
+    ] {
+        assert!(
+            summary.lines().any(|line| line == text),
+            "{text} not in\n{summary}"
+        );
+    }
+
+    // "Before" disagrees on its workload, and the head's second repeat never reached the fault.
+    let fault = raw.fault.as_mut().expect("a fault");
+    let exited = faulted(&folder, 2, Ok(1), &[], (300, [0, 290, 0, 0, 10]), 2);
+    fault.before = Some(vec![calm(1), exited]);
+    let unready = Err((Phase::Ready, Cause::Unhealthy));
+    fault.head[1] = faulted(&folder, 2, unready, &["db"], (0, [0; 5]), 0);
+    let report = self::report(&raw);
+    let fault = report.fault.as_ref().expect("a fault");
+    let head = &fault.categories.head;
+    assert_eq!(head[0].values, ["exit-1", "unknown"]);
+    assert_eq!(head[2].values, ["running", "unknown"], "{head:?}");
+    let changed = [
+        change("api state", "running", "exited"),
+        change("db:5432 attempts", "2-3", ">10"),
+        change("api:3000 responses", "2xx 5xx", "2xx"),
+    ];
+    assert_eq!(fault.changed, changed);
+    assert!(fault.unknown());
+    let line = report.line(Utf8Path::new("run"));
+    assert_eq!(line.fault.as_ref().expect("a fault").unknown, ["workload"]);
+    let summary = report.summary().to_string();
+    assert!(
+        summary.lines().any(|line| line == "fault workload unknown"),
+        "{summary}"
+    );
+    // Neither repeat of "before" reached the fault: nothing compares, nothing changed.
+    let mut unready = raw.fault.take().expect("a fault");
+    let ready = || {
+        faulted(
+            &folder,
+            1,
+            Err((Phase::Ready, Cause::Unhealthy)),
+            &[],
+            (0, [0; 5]),
+            0,
+        )
+    };
+    unready.before = Some(vec![ready(), ready()]);
+    raw.fault = Some(unready);
+    let blind = self::report(&raw);
+    let fault_of = blind.fault.as_ref().expect("a fault");
+    assert!(fault_of.changed.is_empty(), "{:?}", fault_of.changed);
+    let unknown = blind
+        .line(Utf8Path::new("run"))
+        .fault
+        .expect("a fault")
+        .unknown;
+    assert_eq!(unknown.len(), fault_of.categories.head.len());
+    // A loaded report tells it the same: `cli` reads it there for the pool.
+    let loaded: FaultJson = serde_json::from_value(serde_json::to_value(fault).unwrap()).unwrap();
+    assert!(loaded.unknown());
+
+    // Without "before" nothing is compared, and only a head that never reached the fault is unknown.
+    let mut alone = raw_of(&folder, "alone");
+    alone.fault = Some(FaultOutcome {
+        target: "db:5432".to_owned(),
+        mode: "slow 2000ms".to_owned(),
+        head: vec![calm(1), calm(2)],
+        before: None,
+    });
+    let fault = self::report(&alone).fault.expect("a fault");
+    assert!(fault.categories.before.is_none() && fault.changed.is_empty());
+    assert!(!fault.unknown());
+    let unready = || {
+        faulted(
+            &folder,
+            1,
+            Err((Phase::Ready, Cause::Unhealthy)),
+            &[],
+            (0, [0; 5]),
+            0,
+        )
+    };
+    alone.fault.as_mut().expect("a fault").head = vec![unready(), unready()];
+    assert!(self::report(&alone).fault.expect("a fault").unknown());
+}
+
+/// `pass2-<side>/out-<n>` with `files`, and the open connections by target after the pass.
+fn pass(folder: &Folder, side: &str, n: u32, files: &[(&str, &str)], open: &[(&str, u64)]) -> Pass {
+    let dir = folder
+        .path()
+        .join(format!("pass2-{side}"))
+        .join(format!("out-{n}"));
+    for (file, text) in files {
+        let path = dir.join(file);
+        fs::create_dir_all(path.parent().expect("a parent")).expect("create a pass folder");
+        fs::write(path, text).expect("write a pass output");
+    }
+    fs::create_dir_all(&dir).expect("create a pass folder");
+    let ports = open.iter().map(|(target, open)| PortStats {
+        open: *open,
+        ..port(target, 1)
+    });
+    Pass {
+        out_dir: dir,
+        probes: Vec::new(),
+        ports: ports.collect(),
+    }
+}
+
+fn passed(first: Pass, second: Pass) -> PassPair {
+    PassPair::Passed { first, second }
+}
+
+fn pass_file(report: &Report, file: &str) -> PassFile {
+    let pass = report.second_pass.as_ref().expect("a second pass");
+    let found = pass.files.iter().find(|found| found.file == file);
+    found.unwrap_or_else(|| panic!("no file {file}")).clone()
+}
+
+#[test]
+fn an_unchanged_file_that_changed_on_the_head_is_in_the_second_pass_and_open_connections_grow() {
+    let folder = Folder::new();
+    // `at` changes from repeat to repeat on both versions: noise, not a change of the state.
+    let measured = |side: &str, at: [u32; 2]| {
+        let files = at.map(|at| format!("{{\"at\":{at},\"total\":10}}\n"));
+        let files: [&[(&str, &str)]; 2] = [
+            &[("totals.jsonl", files[0].as_str())],
+            &[("totals.jsonl", files[1].as_str())],
+        ];
+        with_files(&folder, side, &files)
+    };
+    let mut raw = raw(
+        &folder,
+        measured("head", [1, 2]),
+        Some(measured("before", [3, 4])),
+    );
+    probe_rule(&mut raw, "orders", Some("/id"), &["/updated_at"]);
+    let one = "{\"id\":1,\"status\":\"paid\",\"updated_at\":1}\n";
+    let two = format!("{one}{{\"id\":2,\"status\":\"paid\",\"updated_at\":2}}\n");
+    let head = passed(
+        pass(
+            &folder,
+            "head",
+            1,
+            &[
+                ("probe.orders.jsonl", one),
+                ("totals.jsonl", "{\"at\":5,\"total\":10}\n"),
+                ("sub/state.jsonl", "{\"n\":1}\n"),
+            ],
+            &[("db:5432", 2), ("api:3000", 0)],
+        ),
+        pass(
+            &folder,
+            "head",
+            2,
+            &[
+                ("probe.orders.jsonl", two.as_str()),
+                ("totals.jsonl", "{\"at\":6,\"total\":10}\n"),
+                ("sub/state.jsonl", "{\"n\":2}\n"),
+            ],
+            &[("db:5432", 4), ("api:3000", 0)],
+        ),
+    );
+    let before = passed(
+        pass(
+            &folder,
+            "before",
+            1,
+            &[
+                ("probe.orders.jsonl", one),
+                ("totals.jsonl", "{\"at\":7,\"total\":10}\n"),
+                ("sub/state.jsonl", "{\"n\":1}\n"),
+            ],
+            &[("db:5432", 2)],
+        ),
+        pass(
+            &folder,
+            "before",
+            2,
+            &[
+                ("probe.orders.jsonl", one),
+                ("totals.jsonl", "{\"at\":8,\"total\":20}\n"),
+                ("sub/state.jsonl", "{\"n\":2}\n"),
+            ],
+            &[("db:5432", 2)],
+        ),
+    );
+    let unchanged = ["probe.orders.jsonl", "totals.jsonl", "sub/state.jsonl"];
+    raw.second_pass = Some(SecondPassOutcome {
+        unchanged: unchanged.map(str::to_owned).to_vec(),
+        head,
+        before: Some(before),
+    });
+    let context = context(&raw, Previous::None, &[]);
+    let (report, dir) = written(&folder, "run", &raw, &context);
+
+    let orders = PassFile {
+        file: "probe.orders.jsonl".to_owned(),
+        before: Some(PassState::Same),
+        head: PassState::Changed,
+        diffs: vec![Diff {
+            at: At::Key { key: json!(2) },
+            path: String::new(),
+            before: Value::Null,
+            head: json!({"id": 2, "status": "paid", "updated_at": 2}),
+        }],
+    };
+    assert_eq!(pass_file(&report, "probe.orders.jsonl"), orders);
+    let totals = pass_file(&report, "totals.jsonl");
+    assert_eq!(
+        (totals.before, totals.head),
+        (Some(PassState::Changed), PassState::Same)
+    );
+    let state = pass_file(&report, "sub/state.jsonl");
+    assert_eq!(
+        (state.before, state.head),
+        (Some(PassState::Changed), PassState::Changed)
+    );
+    let open = serde_json::to_value(&report.second_pass.as_ref().expect("a pass").open).unwrap();
+    let expected = json!([
+        {"target": "api:3000", "side": "head", "first": 0, "second": 0},
+        {"target": "db:5432", "side": "head", "first": 2, "second": 4},
+        {"target": "db:5432", "side": "before", "first": 2, "second": 2},
+    ]);
+    assert_eq!(open, expected);
+    let grown: Vec<&Flag> = report
+        .flags
+        .iter()
+        .filter(|flag| matches!(flag, Flag::ConnectionsGrow { .. }))
+        .collect();
+    let grow = Flag::ConnectionsGrow {
+        target: "db:5432".to_owned(),
+        side: "head".to_owned(),
+        first: 2,
+        second: 4,
+    };
+    assert_eq!(grown, [&grow]);
+
+    let line = report.line(&dir);
+    let passes = line
+        .second_pass
+        .as_ref()
+        .expect("a second pass in the line");
+    let files: Vec<(&str, Option<PassState>, u32)> = passes
+        .iter()
+        .map(|file| (file.file.as_str(), file.before, file.diffs))
+        .collect();
+    let shown = [
+        ("probe.orders.jsonl", Some(PassState::Same), 1),
+        ("sub/state.jsonl", Some(PassState::Changed), 1),
+    ];
+    assert_eq!(files, shown);
+    let pass2 = dir.join("diff").join("pass2");
+    assert_eq!(passes[0].path, pass2.join("probe.orders.jsonl.json"));
+    assert_eq!(passes[0].sample, orders.diffs);
+    // `totals.jsonl` held on the head.
+    let quiet = report.measures.len() + report.behaviour.as_ref().map_or(0, Vec::len) + 1;
+    assert_eq!(
+        line.quiet as usize,
+        quiet - line.measures.len() - line_files(&line).len()
+    );
+    let json = serde_json::to_value(&line).unwrap();
+    assert_eq!(
+        json["secondPass"][1]["path"],
+        format!("{}/sub/state.jsonl.json", slashed(&pass2))
+    );
+    let read = |file: &str| -> Value {
+        let text = fs::read_to_string(pass2.join(file)).expect("a diff of the second pass");
+        serde_json::from_str(&text).expect("JSON")
+    };
+    assert_eq!(
+        read("sub/state.jsonl.json"),
+        json!([{"record": 1, "path": "/n", "before": 1, "head": 2}])
+    );
+    assert_eq!(read("totals.jsonl.json"), json!([]));
+    let loaded = load(&dir).expect("the report loads");
+    assert_eq!(loaded.second_pass, report.second_pass);
+    let summary = report.summary().to_string();
+    let text = "secondPass probe.orders.jsonl before same diffs 1";
+    assert!(summary.lines().any(|line| line == text), "{summary}");
+}
+
+#[test]
+fn a_failed_second_pass_is_a_flag_and_a_failed_head_has_no_second_pass() {
+    let folder = Folder::new();
+    let before = Some(repeats(&folder, "before", &[100]));
+    let mut raw = raw(&folder, repeats(&folder, "head", &[100]), before);
+    let file = [("state.jsonl", "{\"n\":1}\n")];
+    let failed = |phase| PassPair::Failed(failure_of(phase));
+    raw.second_pass = Some(SecondPassOutcome {
+        unchanged: vec!["state.jsonl".to_owned()],
+        head: passed(
+            pass(&folder, "head", 1, &file, &[]),
+            pass(&folder, "head", 2, &file, &[]),
+        ),
+        before: Some(failed(Phase::Ready)),
+    });
+    let report = report(&raw);
+
+    let state = pass_file(&report, "state.jsonl");
+    assert_eq!((state.before, state.head), (None, PassState::Same));
+    let flag = Flag::SecondPassFailed {
+        side: "before".to_owned(),
+        stage: Phase::Ready,
+    };
+    assert!(report.flags.contains(&flag), "{:?}", report.flags);
+    let json = serde_json::to_value(&flag).unwrap();
+    assert_eq!(
+        json,
+        json!({"kind": "second-pass-failed", "side": "before", "stage": "ready"})
+    );
+    let line = report.line(Utf8Path::new("run"));
+    assert_eq!(line.second_pass.as_ref().map(Vec::len), Some(0));
+
+    let second = raw.second_pass.as_mut().expect("a second pass");
+    second.head = failed(Phase::Workload);
+    let report = self::report(&raw);
+    assert!(report.second_pass.is_none());
+    let flags = report.flags.iter();
+    let failed: Vec<&Flag> = flags
+        .filter(|flag| matches!(flag, Flag::SecondPassFailed { .. }))
+        .collect();
+    let head = Flag::SecondPassFailed {
+        side: "head".to_owned(),
+        stage: Phase::Workload,
+    };
+    assert_eq!(failed, [&head, &flag]);
+    assert!(report.line(Utf8Path::new("run")).second_pass.is_none());
+}
+
+#[test]
+fn a_second_pass_file_reads_only_through_plain_folders() {
+    let folder = Folder::new();
+    let mut raw = raw(&folder, repeats(&folder, "head", &[100]), None);
+    let first = pass(&folder, "head", 1, &[("sub", "a file, not a folder")], &[]);
+    let second = pass(&folder, "head", 2, &[], &[]);
+    raw.second_pass = Some(SecondPassOutcome {
+        unchanged: vec!["sub/state.jsonl".to_owned()],
+        head: passed(first, second),
+        before: None,
+    });
+    let refused = read_outputs(&raw, &[]);
+    assert!(
+        matches!(refused, Err(ReportError::Bad { .. })),
+        "{refused:?}"
+    );
+
+    // A pass that wrote no such file has no records of it.
+    let second = raw.second_pass.as_mut().expect("a second pass");
+    second.unchanged = vec!["missing.jsonl".to_owned()];
+    let report = self::report(&raw);
+    let missing = pass_file(&report, "missing.jsonl");
+    assert_eq!((missing.before, missing.head), (None, PassState::Same));
+}
+
+#[test]
+fn a_pooled_rerun_takes_coverage_fault_and_second_pass_from_the_last_run_with_from() {
+    let folder = Folder::new();
+    // The first run makes all three: the fixture's run, with its fault and second pass.
+    let mut first = fixture_raw(&folder, &[1000, 1000, 1000], Some(&[1000, 1000, 1000]));
+    fixture_modes(&folder, &mut first);
+    let mut made = context(&first, Previous::None, &[]);
+    made.run = "20261022-090000".to_owned();
+    let (made, _) = written(&folder, "made", &first, &made);
+    for from in [
+        made.coverage.as_ref().map(|coverage| &coverage.from),
+        made.fault.as_ref().map(|fault| &fault.from),
+        made.second_pass.as_ref().map(|pass| &pass.from),
+    ] {
+        assert_eq!(from, Some(&None), "a result of its own has no `from`");
+    }
+
+    // A rerun of the same trees ran none of them: `run` left them out of `Raw`.
+    let mut rerun = fixture_raw(&folder, &[1000, 1000, 1000], Some(&[1000, 1000, 1000]));
+    rerun.coverage = None;
+    let all = BTreeSet::from([Extra::Coverage, Extra::Fault, Extra::SecondPass]);
+    let pool = [made.clone()];
+    let mut taken = context(&rerun, Previous::None, &pool);
+    taken.run = "20261022-091000".to_owned();
+    taken.reused = all.clone();
+    let (copy, dir) = written(&folder, "copy", &rerun, &taken);
+
+    let from = Some("20261022-090000".to_owned());
+    let coverage = copy.coverage.as_ref().expect("the coverage of the pool");
+    assert_eq!(coverage.from, from);
+    assert_eq!(
+        serde_json::to_value(&coverage.called).unwrap(),
+        serde_json::to_value(&made.coverage.as_ref().unwrap().called).unwrap()
+    );
+    let fault = copy.fault.as_ref().expect("the fault of the pool");
+    assert_eq!(fault.from, from);
+    assert_eq!(fault.changed, made.fault.as_ref().unwrap().changed);
+    let pass = copy
+        .second_pass
+        .as_ref()
+        .expect("the second pass of the pool");
+    assert_eq!(pass.from, from);
+    assert_eq!(pass.files, made.second_pass.as_ref().unwrap().files);
+    // The copied open connections still grow, and `write` put the copied diffs in this run.
+    assert!(
+        copy.flags
+            .iter()
+            .any(|flag| matches!(flag, Flag::ConnectionsGrow { .. }))
+    );
+    let pass2 = dir
+        .join("diff")
+        .join("pass2")
+        .join("probe.orders.jsonl.json");
+    let written: Value =
+        serde_json::from_str(&fs::read_to_string(&pass2).expect("a copied diff")).unwrap();
+    assert_eq!(written, serde_json::to_value(&pass.files[0].diffs).unwrap());
+    let line = copy.line(&dir);
+    assert_eq!(line.fault.as_ref().expect("a fault").from, from);
+    let passes = line.second_pass.as_ref().expect("a second pass");
+    assert!(!passes.is_empty());
+    for file in passes {
+        assert_eq!(file.from, from);
+        assert!(file.path.starts_with(&dir), "{}", file.path);
+    }
+    let summary = copy.summary().to_string();
+    let text = "fault db:5432 down from 20261022-090000";
+    assert!(summary.lines().any(|line| line == text), "{summary}");
+
+    // A copy of the copy keeps where the result came from.
+    let pool = [made, copy];
+    let mut again = context(&rerun, Previous::None, &pool);
+    again.run = "20261022-092000".to_owned();
+    again.reused = all;
+    let twice = report_of(&rerun, &again, &[]);
+    assert_eq!(twice.coverage.expect("a coverage").from, from);
+    assert_eq!(twice.fault.expect("a fault").from, from);
+    assert_eq!(twice.second_pass.expect("a second pass").from, from);
+
+    // The last run of the pool gives the result, not an older one.
+    let [made, copy] = pool;
+    let mut fresh = made;
+    fresh.run = "20261022-093000".to_owned();
+    let pool = [copy, fresh];
+    let mut latest = context(&rerun, Previous::None, &pool);
+    latest.reused = BTreeSet::from([Extra::Fault]);
+    let fault = report_of(&rerun, &latest, &[]).fault.expect("a fault");
+    assert_eq!(fault.from.as_deref(), Some("20261022-093000"));
+
+    // Without `reused` the run's own results count, and it has none here.
+    let own = report_of(&rerun, &context(&rerun, Previous::None, &pool), &[]);
+    assert!(own.coverage.is_none() && own.fault.is_none() && own.second_pass.is_none());
+}
+
+// --- the seal, the attempts and the comparisons -----------------------------------------------
+
+fn past(run: &str, time: &str, head_tree: &str, compared: bool, passed: bool) -> PastRun {
+    PastRun {
+        run: run.to_owned(),
+        created_at: at(time),
+        head_tree: head_tree.to_owned(),
+        compared,
+        passed,
+    }
+}
+
+fn sealed(time: &str, max_tolerance: u16) -> SealInfo {
+    SealInfo {
+        sealed_at: at(time),
+        max_tolerance,
+        journal: vec![Journal::Sealed {
+            sealed_at: at(time),
+            digest: DIGEST.to_owned(),
+        }],
+    }
+}
+
+fn seal_flags(report: &Report) -> Vec<&Flag> {
+    let flags = report.flags.iter().filter(|flag| {
+        matches!(
+            flag,
+            Flag::BeforeAfterSession { .. }
+                | Flag::MeasuredBeforeSeal { .. }
+                | Flag::WideTolerance { .. }
+        )
+    });
+    flags.collect()
+}
+
+fn failure_of(phase: Phase) -> Failure {
+    Failure {
+        phase,
+        service: None,
+        repeat: None,
+        cause: Cause::Timeout,
+        logs: None,
+        probes: Vec::new(),
+    }
+}
+
+#[test]
+fn the_seal_its_journal_and_the_comparisons_since_it_are_in_the_report_and_the_line() {
+    let folder = Folder::new();
+    let before = Some(repeats(&folder, "before", &[100]));
+    let raw = raw(&folder, repeats(&folder, "head", &[100]), before);
+    let mut compared = context(&raw, Previous::None, &[]);
+    let old = "0".repeat(64);
+    compared.seal = Some(SealInfo {
+        journal: vec![
+            Journal::Sealed {
+                sealed_at: at("2026-10-22T08:00:00Z"),
+                digest: old.clone(),
+            },
+            Journal::Cleaned {
+                cleaned_at: at("2026-10-22T08:30:00Z"),
+            },
+            Journal::Resealed {
+                resealed_at: at("2026-10-22T09:40:00Z"),
+                digest: DIGEST.to_owned(),
+                reason: "a new probe".to_owned(),
+            },
+        ],
+        ..sealed("2026-10-22T09:40:00Z", 25)
+    });
+    // Only the passed runs with `--before` since the reseal count: not one before it, a failed
+    // one or a plain one.
+    compared.history = vec![
+        past(
+            "20261022-093000",
+            "2026-10-22T09:30:00Z",
+            "other",
+            true,
+            true,
+        ),
+        past(
+            "20261022-094100",
+            "2026-10-22T09:41:00Z",
+            "other",
+            true,
+            false,
+        ),
+        past(
+            "20261022-094200",
+            "2026-10-22T09:42:00Z",
+            "other",
+            false,
+            true,
+        ),
+        past(
+            "20261022-094500",
+            "2026-10-22T09:45:00Z",
+            "other",
+            true,
+            true,
+        ),
+    ];
+    let report = report_of(&raw, &compared, &[]);
+
+    let json = serde_json::to_value(&report).unwrap();
+    let seal = json!({
+        "sealedAt": "2026-10-22T09:40:00Z",
+        "maxTolerance": 25,
+        "journal": [
+            {"sealedAt": "2026-10-22T08:00:00Z", "digest": old},
+            {"cleanedAt": "2026-10-22T08:30:00Z"},
+            {"resealedAt": "2026-10-22T09:40:00Z", "digest": DIGEST, "reason": "a new probe"},
+        ],
+    });
+    assert_eq!(json["seal"], seal);
+    assert_eq!(
+        (&json["attempts"], &json["comparisons"]),
+        (&json!(1), &json!(2))
+    );
+    let back: Report = serde_json::from_value(json).expect("the report reads back");
+    assert_eq!(back.seal, report.seal);
+    assert!(seal_flags(&report).is_empty(), "{:?}", report.flags);
+    let line = report.line(Utf8Path::new("run"));
+    assert_eq!(line.seal, report.seal);
+    assert_eq!((line.attempts, line.comparisons), (1, Some(2)));
+    let summary = report.summary().to_string();
+    let reseal =
+        format!("journal digest {DIGEST} reason a new probe resealedAt 2026-10-22T09:40:00Z");
+    let printed = [
+        "seal 2026-10-22T09:40:00Z  maxTolerance 25",
+        "journal cleanedAt 2026-10-22T08:30:00Z",
+        reseal.as_str(),
+        "attempts 1  comparisons 2",
+    ];
+    for text in printed {
+        assert!(
+            summary.lines().any(|line| line == text),
+            "{text} not in\n{summary}"
+        );
+    }
+
+    // Without `--before` neither is there, whatever the context holds.
+    let plain = raw_of(&folder, "plain");
+    let mut explored = context(&plain, Previous::None, &[]);
+    explored.seal = Some(sealed("2026-10-22T09:40:00Z", 40));
+    explored.history = compared.history.clone();
+    let report = report_of(&plain, &explored, &[]);
+    let json = serde_json::to_value(&report).unwrap();
+    assert!(
+        json["seal"].is_null() && json["comparisons"].is_null(),
+        "{json}"
+    );
+    assert!(seal_flags(&report).is_empty(), "{:?}", report.flags);
+    let line = Line::failed(failure_of(Phase::Workload), Some(&plain), Vec::new());
+    assert!(line.seal.is_none() && line.attempts == 0 && line.comparisons.is_none());
+}
+
+#[test]
+fn a_wide_tolerance_a_run_before_the_seal_and_a_late_before_are_flags() {
+    let folder = Folder::new();
+    let before = Some(repeats(&folder, "before", &[100]));
+    let raw = raw(&folder, repeats(&folder, "head", &[100]), before);
+    let mut compared = context(&raw, Previous::None, &[]);
+    compared.seal = Some(sealed("2026-10-22T09:40:00Z", 40));
+    // "Before" is from 09:12 and the session began at 09:10 with a run of this head. The failed
+    // run, the run of another head and the one after the seal measured nothing before it.
+    compared.history = vec![
+        past(
+            "20261022-091000",
+            "2026-10-22T09:10:00Z",
+            HEAD_TREE,
+            false,
+            true,
+        ),
+        past(
+            "20261022-092000",
+            "2026-10-22T09:20:00Z",
+            HEAD_TREE,
+            false,
+            true,
+        ),
+        past(
+            "20261022-093000",
+            "2026-10-22T09:30:00Z",
+            HEAD_TREE,
+            false,
+            false,
+        ),
+        past(
+            "20261022-093500",
+            "2026-10-22T09:35:00Z",
+            "other",
+            false,
+            true,
+        ),
+        past(
+            "20261022-094500",
+            "2026-10-22T09:45:00Z",
+            HEAD_TREE,
+            true,
+            true,
+        ),
+    ];
+    let report = report_of(&raw, &compared, &[]);
+
+    let expected = [
+        Flag::BeforeAfterSession {
+            taken_at: "2026-10-22T09:12:00Z".to_owned(),
+            started_at: "2026-10-22T09:10:00Z".to_owned(),
+        },
+        Flag::MeasuredBeforeSeal {
+            run: "20261022-092000".to_owned(),
+        },
+        Flag::WideTolerance { max_tolerance: 40 },
+    ];
+    assert_eq!(seal_flags(&report), expected.iter().collect::<Vec<_>>());
+    let late = json!({
+        "kind": "before-after-session",
+        "takenAt": "2026-10-22T09:12:00Z",
+        "startedAt": "2026-10-22T09:10:00Z",
+    });
+    assert_eq!(serde_json::to_value(&expected[0]).unwrap(), late);
+    let wide = json!({"kind": "wide-tolerance", "maxTolerance": 40});
+    assert_eq!(serde_json::to_value(&expected[2]).unwrap(), wide);
+
+    // At 25, with "before" taken first and no run of this head before the seal: none.
+    compared.seal = Some(sealed("2026-10-22T09:40:00Z", 25));
+    compared.history = vec![past(
+        "20261022-091500",
+        "2026-10-22T09:15:00Z",
+        "other",
+        false,
+        true,
+    )];
+    assert!(seal_flags(&report_of(&raw, &compared, &[])).is_empty());
+    // With no earlier run the seal starts the session.
+    compared.seal = Some(sealed("2026-10-22T09:00:00Z", 25));
+    compared.history.clear();
+    let report = report_of(&raw, &compared, &[]);
+    let started = Flag::BeforeAfterSession {
+        taken_at: "2026-10-22T09:12:00Z".to_owned(),
+        started_at: "2026-10-22T09:00:00Z".to_owned(),
+    };
+    assert_eq!(seal_flags(&report), [&started]);
+}
+
+#[test]
+fn attempts_count_the_pooled_runs_and_an_unreadable_report_is_left_out() {
+    let folder = Folder::new();
+    let dirs: Vec<Utf8PathBuf> = ["a", "b", "c"]
+        .iter()
+        .map(|name| {
+            let raw = raw_of(&folder, name);
+            let context = context(&raw, Previous::None, &[]);
+            written(&folder, name, &raw, &context).1
+        })
+        .collect();
+    fs::write(dirs[1].join("report.json"), "{").expect("break a pooled report");
+    // As `cli` pools: the reports that load.
+    let pool: Vec<Report> = dirs.iter().filter_map(|dir| load(dir).ok()).collect();
+    let raw = raw_of(&folder, "head");
+    let report = report_of(&raw, &context(&raw, Previous::None, &pool), &[]);
+
+    assert_eq!(report.attempts, 3);
+    assert_eq!(report.line(Utf8Path::new("run")).attempts, 3);
+    assert_eq!(self::report(&raw).attempts, 1);
 }
 
 // --- the fixture -------------------------------------------------------------------------------
@@ -2053,6 +3427,51 @@ fn fixture_raw(folder: &Folder, head_walls: &[u64], before_walls: Option<&[u64]>
     raw
 }
 
+/// With `db:5432` down, `api` of the head dies and the workload exits 1, where "before" answered
+/// 503 and finished; the second pass of the head adds order 9 and leaves two more connections to
+/// `db` open.
+fn fixture_modes(folder: &Folder, raw: &mut Raw) {
+    let calm = |repeat| faulted(folder, repeat, Ok(0), &[], (300, [0, 280, 0, 0, 20]), 2);
+    let crashed = |repeat| faulted(folder, repeat, Ok(1), &["api"], (300, [0, 150, 0, 0, 0]), 2);
+    raw.fault = Some(FaultOutcome {
+        target: "db:5432".to_owned(),
+        mode: "down".to_owned(),
+        head: vec![crashed(1), crashed(2)],
+        before: Some(vec![calm(1), calm(2)]),
+    });
+    let orders = |side: &str, n: u32, statuses: &[(u32, &str)]| -> String {
+        let records = statuses.iter().map(|(id, status)| {
+            format!(
+                "{{\"id\":{id},\"status\":\"{status}\",\"updated_at\":\"{side}-pass-{n}\"}}
+"
+            )
+        });
+        records.collect()
+    };
+    let side = |side: &str, statuses: [&[(u32, &str)]; 2], open: [u64; 2]| {
+        let [first, second] = [1, 2].map(|n| {
+            let text = orders(side, n, statuses[n as usize - 1]);
+            let open = [("db:5432", open[n as usize - 1])];
+            pass(
+                folder,
+                side,
+                n,
+                &[("probe.orders.jsonl", text.as_str())],
+                &open,
+            )
+        });
+        passed(first, second)
+    };
+    let head: &[(u32, &str)] = &[(7, "pending"), (8, "paid")];
+    let more: &[(u32, &str)] = &[(7, "pending"), (8, "paid"), (9, "pending")];
+    let paid: &[(u32, &str)] = &[(7, "paid"), (8, "paid")];
+    raw.second_pass = Some(SecondPassOutcome {
+        unchanged: vec!["probe.orders.jsonl".to_owned()],
+        head: side("head", [head, more], [2, 4]),
+        before: Some(side("before", [paid, paid], [2, 2])),
+    });
+}
+
 #[test]
 fn make_on_the_raw_outputs_and_context_of_the_fixture_gives_the_fixture() {
     let folder = Folder::new();
@@ -2061,13 +3480,45 @@ fn make_on_the_raw_outputs_and_context_of_the_fixture_gives_the_fixture() {
     earlier_context.run = PREVIOUS.to_owned();
     earlier_context.created_at = at("2026-10-22T09:45:00Z");
     let previous = report_of(&earlier, &earlier_context, &[]);
-    let raw = fixture_raw(
+    let mut raw = fixture_raw(
         &folder,
         &[42210, 41877, 42502],
         Some(&[41010, 40870, 41502]),
     );
+    fixture_modes(&folder, &mut raw);
     let mut context = context(&raw, Previous::Read(&previous), &[]);
     context.setup_from.before = Some(PREVIOUS.to_owned());
+    context.changed = Some(["src/orders/orders.service.ts".to_owned()].into());
+    // An early plain run of another head, then the previous run, the first comparison.
+    context.seal = Some(sealed("2026-10-22T09:40:00Z", 25));
+    context.history = vec![
+        past(
+            "20261022-091500",
+            "2026-10-22T09:15:00Z",
+            "other",
+            false,
+            true,
+        ),
+        past(PREVIOUS, "2026-10-22T09:45:00Z", "other", true, true),
+    ];
+    let reason = |entry: Declared, reason: &str| Declared {
+        reason: reason.to_owned(),
+        ..entry
+    };
+    context.declared = vec![
+        reason(
+            declared("stand.wall", Bound::UpTo(10)),
+            "one more index lookup per order",
+        ),
+        reason(declared("db.cpu", Bound::Unknown), "a new query plan"),
+    ];
+    let cpu = accepted(
+        "api.cpu",
+        Bound::UpTo(20),
+        HEAD_TREE,
+        "2026-10-22T09:50:00Z",
+    );
+    context.accepted = vec![reason(cpu, "the report formats every order")];
     let report = report_of(&raw, &context, &[]);
 
     let expected: Value = serde_json::from_str(FIXTURE).expect("the fixture is JSON");

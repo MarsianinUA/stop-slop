@@ -1,15 +1,16 @@
-//! The measures of a run (architecture plan, rows 22, 72, 84): `<subject>.<metric>`, the samples of
+//! The measures of a run (architecture plan, rows 22, 69, 72, 84): `<subject>.<metric>`, the samples of
 //! each version pooled with the runs of the pool (row 68), and the verdicts against "before" and the
-//! previous run.
+//! previous run, and the grades against the declared cost.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::time::Duration;
 
 use crate::flags::{self, Flag};
+use crate::grade;
 use crate::outputs::Outputs;
-use crate::raw::{Raw, RepeatOutput, Role};
-use crate::schema::{Direction, Measure, Report, Src, Unit, Verdict, VersusBefore, VersusPrevious};
+use crate::raw::{ProfileOutcome, Raw, RepeatOutput, Role};
+use crate::schema::{Direction, Measure, Src, Unit, Verdict, VersusBefore, VersusPrevious};
 use crate::stats::{self, Sample};
 use crate::{Before, Context, Side};
 
@@ -17,6 +18,8 @@ use crate::{Before, Context, Side};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 enum Metric {
     Wall,
+    HotOwned,
+    HotCollateral,
     Cpu,
     Memory,
     ErrorLines,
@@ -30,6 +33,8 @@ impl Metric {
     fn as_str(self) -> &'static str {
         match self {
             Metric::Wall => "wall",
+            Metric::HotOwned => "hot-owned",
+            Metric::HotCollateral => "hot-collateral",
             Metric::Cpu => "cpu",
             Metric::Memory => "memory",
             Metric::ErrorLines => "error-lines",
@@ -42,7 +47,11 @@ impl Metric {
 
     fn unit(self) -> Unit {
         match self {
-            Metric::Wall | Metric::Cpu | Metric::Shutdown => Unit::Ms,
+            Metric::Wall
+            | Metric::HotOwned
+            | Metric::HotCollateral
+            | Metric::Cpu
+            | Metric::Shutdown => Unit::Ms,
             Metric::Memory | Metric::Bytes => Unit::Bytes,
             Metric::ErrorLines | Metric::Connections => Unit::Count,
             Metric::Http5xxShare => Unit::Share,
@@ -75,6 +84,11 @@ impl Key {
             Key::Volume(_) => Metric::Bytes,
         }
     }
+
+    /// From the profiles: a repeat without one has no sample, not a 0.
+    fn profiled(&self) -> bool {
+        matches!(self, Key::Stand(Metric::HotOwned | Metric::HotCollateral))
+    }
 }
 
 impl fmt::Display for Key {
@@ -95,10 +109,12 @@ pub(crate) fn of(
     context: &Context<'_>,
     before: Before<'_>,
 ) -> (Vec<Measure>, Vec<Flag>) {
+    // Without `--before` nothing changed: the own cost needs a version to differ from.
+    let changed = context.before.as_ref().and(context.changed.as_ref());
     let of_repeats = |repeats: &[RepeatOutput]| -> Vec<BTreeMap<Key, f64>> {
         repeats
             .iter()
-            .map(|repeat| values(repeat, outputs))
+            .map(|repeat| values(repeat, outputs, changed))
             .collect()
     };
     let head = of_repeats(&raw.head);
@@ -116,7 +132,6 @@ pub(crate) fn of(
     let volumes = raw.setup.head.sizes.keys().chain(before_volumes);
     keys.extend(volumes.map(|name| Key::Volume(name.clone())));
 
-    let previous = context.previous.report();
     let mut measures = Vec::with_capacity(keys.len());
     let mut flags = Vec::new();
     let mut counts = None;
@@ -135,11 +150,15 @@ pub(crate) fn of(
         let setup = matches!(key, Key::Volume(_));
         let own_before = own_before.as_deref();
         let attempts = Attempts::of(&name, setup, &own_head, own_before, context);
+        // Without one profile of the head there is no median to compare, not a 0.
+        if key.profiled() && attempts.head.is_empty() {
+            continue;
+        }
         if key == Key::Stand(Metric::Wall) {
             counts = Some(attempts.counts());
         }
         let (measure, noisy) = measure(
-            &key, name, &own_head, own_before, &attempts, before, previous,
+            &key, name, &own_head, own_before, &attempts, before, context,
         );
         flags.extend(noisy);
         measures.push(measure);
@@ -157,7 +176,7 @@ fn measure(
     own_before: Option<&[f64]>,
     attempts: &Attempts<'_>,
     before: Before<'_>,
-    previous: Option<&Report>,
+    context: &Context<'_>,
 ) -> (Measure, Vec<Flag>) {
     let metric = key.metric();
     let direction = metric.direction();
@@ -175,19 +194,25 @@ fn measure(
         });
     }
     let samples = own_before.map(<[f64]>::to_vec).unwrap_or_default();
+    let mut expect = None;
     let versus_before = match (before, base) {
         (Before::Absent, _) => None,
-        (Before::Passed(_), Some(base)) => Some(VersusBefore {
-            samples,
-            median: Some(base.median),
-            verdict: stats::verdict(direction, base, head),
-        }),
+        (Before::Passed(_), Some(base)) => {
+            let verdict = stats::verdict(direction, base, head);
+            expect = Some(grade::expect(&name, verdict, base, head, context));
+            Some(VersusBefore {
+                samples,
+                median: Some(base.median),
+                verdict,
+            })
+        }
         (Before::Failed(_) | Before::Passed(_), _) => Some(VersusBefore {
             samples,
             median: None,
             verdict: Verdict::NoBaseline,
         }),
     };
+    let previous = context.previous.report();
     let last = previous.and_then(|report| find(&report.measures, &name));
     let versus_previous = match last {
         Some(last) => {
@@ -215,6 +240,7 @@ fn measure(
         spread: stats::round(head.spread, 4),
         before: versus_before,
         previous: versus_previous,
+        expect,
     };
     (measure, flags)
 }
@@ -222,9 +248,16 @@ fn measure(
 /// The values of one measured repeat. The instances of a service add up their CPU and counters and
 /// keep the largest memory and stop (Optional Assumptions); the workload is harness, so its own VM
 /// gives no measure, only its connections at their targets.
-fn values(repeat: &RepeatOutput, outputs: &Outputs) -> BTreeMap<Key, f64> {
+fn values(
+    repeat: &RepeatOutput,
+    outputs: &Outputs,
+    changed: Option<&BTreeSet<String>>,
+) -> BTreeMap<Key, f64> {
     let mut values = BTreeMap::new();
     values.insert(Key::Stand(Metric::Wall), millis(repeat.wall));
+    if let Some(changed) = changed {
+        cost(repeat, changed, &mut values);
+    }
     let mut http: BTreeMap<&str, (u64, u64)> = BTreeMap::new();
     for instance in &repeat.instances {
         if instance.role == Role::LongRunning {
@@ -263,9 +296,41 @@ fn values(repeat: &RepeatOutput, outputs: &Outputs) -> BTreeMap<Key, f64> {
     values
 }
 
+/// The self time of the functions in the changed files, and of the others (plan, row 69), over
+/// the instances with a profile. A repeat where one of them lost its profile has no sample: the
+/// part it read would pass for the whole.
+fn cost(repeat: &RepeatOutput, changed: &BTreeSet<String>, values: &mut BTreeMap<Key, f64>) {
+    let mut split = None;
+    for instance in &repeat.instances {
+        let samples = match &instance.profile {
+            Some(ProfileOutcome::Read(samples)) => samples,
+            Some(ProfileOutcome::NoProfile) => return,
+            None => continue,
+        };
+        let (owned, collateral) = split.get_or_insert((0.0, 0.0));
+        for function in &samples.functions {
+            if changed.contains(function.file.as_str()) {
+                *owned += function.self_ms;
+            } else {
+                *collateral += function.self_ms;
+            }
+        }
+    }
+    if let Some((owned, collateral)) = split {
+        values.insert(Key::Stand(Metric::HotOwned), stats::round(owned, 1));
+        values.insert(
+            Key::Stand(Metric::HotCollateral),
+            stats::round(collateral, 1),
+        );
+    }
+}
+
 /// One sample per repeat; a repeat without the measure, such as a target it never called, gives 0.
 fn column(repeats: &[BTreeMap<Key, f64>], key: &Key) -> Vec<f64> {
     let samples = repeats.iter().map(|repeat| repeat.get(key).copied());
+    if key.profiled() {
+        return samples.flatten().collect();
+    }
     samples.map(|sample| sample.unwrap_or(0.0)).collect()
 }
 

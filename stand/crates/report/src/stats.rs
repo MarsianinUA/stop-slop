@@ -81,24 +81,28 @@ pub(crate) fn threshold(base: Sample, now: Sample) -> f64 {
 /// A shift of the medians above `threshold` shows (Optional Assumptions, «Вердикт»): a `lower`
 /// measure improves or regresses, a `neutral` one only changes.
 pub(crate) fn verdict(direction: Direction, base: Sample, now: Sample) -> Verdict {
-    let rise = if base.median == 0.0 {
-        if now.median == 0.0 {
-            return Verdict::WithinNoise;
-        }
-        // From zero every rise shows: `error-lines` and `http-5xx-share` regress whatever the
-        // noise.
-        now.median > 0.0
-    } else {
-        let shift = (now.median - base.median) / base.median.abs();
-        if shift.abs() <= threshold(base, now) {
-            return Verdict::WithinNoise;
-        }
-        shift > 0.0
-    };
-    match (direction, rise) {
+    let shift = shift(base.median, now.median);
+    if shift.abs() <= threshold(base, now) {
+        return Verdict::WithinNoise;
+    }
+    match (direction, shift > 0.0) {
         (Direction::Neutral, _) => Verdict::Changed,
         (Direction::Lower, true) => Verdict::Regressed,
         (Direction::Lower, false) => Verdict::Improved,
+    }
+}
+
+/// `now` against `base`, relative to `base`. From 0 every rise is infinite, so it shows whatever
+/// the noise: `error-lines` and `http-5xx-share` regress.
+pub(crate) fn shift(base: f64, now: f64) -> f64 {
+    if base == 0.0 {
+        if now == 0.0 {
+            0.0
+        } else {
+            f64::INFINITY.copysign(now)
+        }
+    } else {
+        (now - base) / base.abs()
     }
 }
 

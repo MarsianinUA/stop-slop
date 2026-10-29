@@ -1,17 +1,18 @@
 //! What `make` reads of the run folder (architecture plan, `report`): the top-level `*.jsonl` of
-//! each `/stand/out`, the logs of the long-running services up to their cut, and `records.json` of
-//! the pooled runs. A broken line of a workload file is a flag, not an error.
+//! each `/stand/out`, the `unchanged` files after each pass of the second pass, the logs of the
+//! long-running services up to their cut, and `records.json` of the pooled runs. A broken line of a
+//! workload file is a flag, not an error.
 
 use std::collections::BTreeMap;
 use std::fs::{self, File};
-use std::io::Read;
+use std::io::{self, Read};
 use std::sync::Arc;
 
 use camino::{Utf8Path, Utf8PathBuf};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 
-use crate::raw::{Raw, Role};
+use crate::raw::{PassPair, Raw, Role};
 use crate::{Before, ReportError, Side, sides};
 
 pub(crate) const RECORDS: &str = "records.json";
@@ -31,6 +32,9 @@ pub struct Outputs {
     /// `records.json` of each pooled run in the order of `Context.pool`; `None` when it does not
     /// read. Empty unless "before" passed: only the diff reads it.
     pub(crate) pool: Vec<Option<Records>>,
+    /// The records of each `unchanged` file after the first and the second pass, by file and
+    /// version; a version whose second pass failed has none.
+    pub(crate) passes: BTreeMap<String, BTreeMap<Side, [Vec<Value>; 2]>>,
 }
 
 impl Outputs {
@@ -92,7 +96,50 @@ pub fn read_outputs(raw: &Raw, pool: &[Utf8PathBuf]) -> Result<Outputs, ReportEr
         let pooled = pool.iter().map(|dir| read_records(&dir.join(RECORDS)));
         outputs.pool = pooled.collect();
     }
+    if let Some(outcome) = &raw.second_pass {
+        for (side, pair) in outcome.sides() {
+            let Some(PassPair::Passed { first, second }) = pair else {
+                continue;
+            };
+            for file in &outcome.unchanged {
+                let probe = raw.probes.contains_key(file);
+                let texts = [
+                    pass_file(&first.out_dir, file)?,
+                    pass_file(&second.out_dir, file)?,
+                ];
+                let records = texts.map(|text| parse(&text, probe).0);
+                let passes = outputs.passes.entry(file.clone()).or_default();
+                passes.insert(side, records);
+            }
+        }
+    }
     Ok(outputs)
+}
+
+/// `file` of `expect.unchanged` under `dir`, a path with `/`: every folder on the way a plain
+/// folder and the file a plain file, as `plain` asks of a top-level one. A pass that wrote no such
+/// file has no records of it.
+fn pass_file(dir: &Utf8Path, file: &str) -> Result<String, ReportError> {
+    let mut path = dir.to_owned();
+    let parts: Vec<&str> = file.split('/').collect();
+    for (index, part) in parts.iter().enumerate() {
+        path.push(part);
+        let metadata = match fs::symlink_metadata(&path) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(String::new()),
+            Err(error) => return Err(ReportError::io(&path)(error)),
+        };
+        if index + 1 < parts.len() && !metadata.file_type().is_dir() {
+            return Err(ReportError::bad(
+                &path,
+                "not a plain folder: the stand reads the results in /stand/out only through plain \
+                 folders, never through a link",
+            ));
+        }
+    }
+    plain(&path)?;
+    let bytes = fs::read(&path).map_err(ReportError::io(&path))?;
+    Ok(String::from_utf8_lossy(&bytes).into_owned())
 }
 
 impl Outputs {

@@ -2,22 +2,43 @@
 
 `stop-slop-stand run --json` prints one line on every exit code. It holds only the exceptions: what passed is counted in `quiet`, and every number stays in `report.json` for `stop-slop hot` and people.
 
-- The line has `run`, `report`, `measures`, `behaviour`, `flags`, `failure`, `quiet`, `unmeasurable` and `next`.
+- The line has `run`, `report`, `seal`, `attempts`, `comparisons`, `measures`, `behaviour`, `fault`, `secondPass`, `flags`, `needs`, `failure`, `quiet`, `unmeasurable` and `next`.
   - `run` is the id of the run for `inspect`, `null` when the run never started. `report` is the path of `report.json`, `null` when the run failed.
+  - `attempts` counts the runs whose samples this one pools, itself included. `comparisons` counts the passed runs with `--before` since the last seal, this one included. Both come with a report; `comparisons` is `null` without `--before`.
   - `behaviour` is `null` without `--before` or when "before" failed.
-  - `quiet` counts the measures and files with no exception. `unmeasurable` counts the measures without an `expect` entry whose shift the noise could hide; they stay quiet.
+  - `quiet` counts the measures and files with no exception. `unmeasurable` counts, among them, the measures without an `expect` entry graded `unmeasurable`: the noise could hide a shift of 5%.
   - `next` holds the commands to run next, ready to paste. A failure and a refusal always have one.
-- A measure has `name`, `unit`, `src` and `median`, then `before` and `previous`.
+- `seal` has `sealedAt`, `maxTolerance` and `journal`.
+  - The first `run --before` of a session seals the recipe, and the comparisons run on that copy. `sealedAt` is the time of the last seal or reseal, `maxTolerance` is `max_tolerance` of `stand.toml`. `seal` is `null` without `--before` or without a report.
+- A journal entry has `sealedAt` and `digest`, `resealedAt`, `digest` and `reason`, or `cleanedAt`.
+  - `journal` lists every seal, reseal and `clean` of the session, oldest first, and outlives `clean`.
+- A measure has `name`, `unit`, `src` and `median`, then `before`, `previous` and `expect`.
   - `name` is `<subject>.<metric>`: the subject is `stand`, a service, a port `<service>:<port>` or a volume `volume:<name>`. `unit` is `ms`, `bytes`, `count` or `share`. `src` is `stand`: the stand measured it, the harness cannot.
   - `median` is of the samples of every run of the same trees and recipe: running again adds samples instead of starting over.
 - `before` and `previous` of a measure have `median` and `verdict`. `before` is `null` without `--before`; `previous` compares with the last passed run of other trees or recipe.
   - `verdict` is `improved` or `regressed` when a measure where less is better moved beyond its noise, `changed` when a measure with no better side (connections, bytes) moved, `within-noise`, or `no-baseline` when there is nothing to compare with.
+- `expect` of a measure has `change`, `reason`, `grade`, `postHoc`, `stale` and `acceptances`.
+  - `expect` is `null` unless "before" passed. `change` is the cost `x-stand.expect.cost` declared, or the bound of an acceptance that replaced it; a measure without an entry is `none`, with `reason` `null`.
+  - `grade` is `met` when the shift stays within `change`; `exceeded` when it goes further the declared way; `surprise` when it goes the other way, shows under `none`, or does not show under `down`; `unmeasurable` when the noise is wider than `change` allows (5% for `none` and `down`): a shift of that size would not show. `grade` is `null` for `unknown`. `stand.hot-owned` rising from 0, the own time of new functions, is `unmeasurable` with `reason` `new-code`, quiet and counted in `unmeasurable`: `stand.wall` and `stand.hot-collateral` carry the check.
+  - `postHoc` is `true` when an `accept` of this head replaced the declared cost. `stale` is `true` when the measure has acceptances, but only of another head: none of them holds now. `acceptances` counts them all.
+  - A measure is in the line when its grade is not `met`, when `change` is `unknown`, or with `postHoc` or `stale`; an `unmeasurable` one without an entry stays quiet. Without `--before` it is there when `previous` moved. A `surprise` or an `exceeded` gets an `accept` command in `next` when its bound fits `maxTolerance`; an `unmeasurable` entry gets `guide expect`.
+- A need has `measure` and `reason`.
+  - `needs` lists the measures with `change` `unknown`: a person judges their cost.
 - A behaviour file has `file`, `src`, `noiseKnown`, `diffs`, `sample` and `path`.
   - `src` is `workload` for a file the harness wrote into `/stand/out`, `probe` for a probe's output.
   - A field that changes between repeats of "before" is noise and never a diff. `noiseKnown` is `false` with a single repeat of "before": then nothing is known to be noise.
   - `diffs` counts the differences from "before", one per field of a record; `sample` holds the first 3, and the file at `path` all of them.
 - A diff has `record` or `key`, `path`, `before` and `head`.
   - `record` numbers the records of the file from 1; a probe with `key` names the record by its key instead. `path` is the JSON Pointer of the field; a record on one side only has `path` `""` and `null` on the other side.
+- `fault` has `target`, `mode`, `changed`, `unknown` and `from`.
+  - `fault` is `null` without `x-stand.fault`. Two repeats per version run with `target` down or slowed, and the report compares what they ended with, not their times: `workload` (its exit or why it had none), `<service> state` (`running` or `exited`), `<target> attempts` (connections: `0`, `1`, `2-3`, `4-10` or `>10`) and `<target> responses` (the HTTP classes of its answers, `none` without one).
+  - `unknown` lists the categories nothing compares on: the repeats of "before" disagreed, or a repeat ended before the fault went on. A rerun runs the fault repeats again then.
+  - `from` is the run whose repeats made the result when this run took it from an earlier run of the same trees and recipe, instead of repeating them; `null` when this run made it.
+- A category change has `category`, `before` and `head`.
+  - `changed` has one entry per value the head showed and "before" never did.
+- A second-pass file has `file`, `before`, `diffs`, `sample`, `path` and `from`.
+  - The second pass runs the workload twice on one state, without a restore. `secondPass` lists the files of `x-stand.expect.unchanged` that changed on the head from the first pass to the second, `[]` when all held; it is `null` without `x-stand.second_pass` or when the head's second pass failed.
+  - `before` is `changed` when the file changed on "before" too, so the head did not cause it; `null` without "before". In a diff of the file at `path`, `before` is the first pass and `head` the second. `from` is as in `fault`.
 - `failure` has `phase`, `service`, `repeat`, `cause`, `logs` and `probes`.
   - `phase` is where it stopped: `setup`, `ready` or `workload` when the app failed (exit 1), another step on a refusal or a breakage. `cause` is `exit-<code>`, `setup-timeout`, `timeout`, `died`, `unhealthy` or `cancelled`, or the error of a refusal or a breakage.
   - `logs` is the folder with the logs of the failed setup or repeat; `probes` are the outputs of the `on-failure` probes.
@@ -42,3 +63,9 @@
   - `probe-failed` (`probe`, `side`, `repeat`, `code`): the probe exited with `code`, or hit its deadline when `code` is `null`; `repeat` is `null` after setup. An `on-failure` probe gives none: its output is in `failure.probes`.
   - `head-only-noise` (`file`, `path`): the field holds on "before" and changes between repeats of the head; it stays in the diff as a change.
   - `killed-at-stop` (`service`, `side`, `repeat`): the service ignored its stop signal for `stop_grace_period` and was killed.
+  - `second-pass-failed` (`side`, `stage`): the second pass of that version failed at `stage`, so the workload did not run twice on one state. Its logs are in `pass2-<side>/` of the run.
+  - `connections-grow` (`target`, `side`, `first`, `second`): the open connections of the long-running services to `target` grew from `first` after the first pass to `second` after the second: a pool or a client that never closes them. The workload's do not count: they close after it exits.
+  - `unknown-expect` (`measure`): an `expect.cost` entry names a measure this run does not have, so nothing graded it.
+  - `before-after-session` (`takenAt`, `startedAt`): "before" was taken after the session began, so it may hold part of the change. Take the `snapshot` before the first edit.
+  - `measured-before-seal` (`run`): that run measured this head before the recipe was sealed, so the declared cost came after its numbers.
+  - `wide-tolerance` (`maxTolerance`): `max_tolerance` in `stand.toml` is above 25%, so `accept` takes wide bounds.

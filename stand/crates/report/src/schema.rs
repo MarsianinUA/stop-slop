@@ -10,7 +10,7 @@ use camino::{Utf8Path, Utf8PathBuf};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::context::{BeforeInfo, Intent, SetupFrom};
+use crate::context::{BeforeInfo, Intent, Journal, SealInfo, SetupFrom};
 use crate::flags::Flag;
 use crate::next::Next;
 use crate::outputs::{RECORDS, Records};
@@ -32,21 +32,33 @@ pub struct Report {
     pub run: String,
     pub root: String,
     pub recipe: RecipeJson,
+    /// `None` without `--before`.
+    pub seal: Option<SealJson>,
     pub created_at: String,
     pub repeat: u32,
     pub setup_timeout: String,
     pub timeout: String,
+    /// The runs whose samples pool, this one included (plan, row 68).
+    pub attempts: u32,
+    /// The passed runs with `--before` since the seal, this one included; `None` without `--before`.
+    pub comparisons: Option<u32>,
     pub harness: Vec<String>,
     pub head: Head,
     pub before: Option<BeforeJson>,
     pub previous_run: Option<String>,
     pub measures: Vec<Measure>,
+    /// The measures whose cost only a person can judge: `change: unknown` (plan, row 66).
+    pub needs: Vec<Need>,
     pub flags: Vec<Flag>,
     /// By `selfMs`, the hottest first.
     pub hot: Vec<Hot>,
     pub coverage: Option<CoverageJson>,
     /// `None` without `--before` or when "before" failed.
     pub behaviour: Option<Vec<Behaviour>>,
+    /// `None` without the fault repeats.
+    pub fault: Option<FaultJson>,
+    /// `None` without the second pass, or when the head's failed.
+    pub second_pass: Option<SecondPassJson>,
     /// This run's records for `records.json`; a loaded report has none.
     #[serde(skip)]
     pub(crate) records: Arc<Records>,
@@ -55,6 +67,32 @@ pub struct Report {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RecipeJson {
     pub digest: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SealJson {
+    pub sealed_at: String,
+    pub max_tolerance: u16,
+    pub journal: Vec<JournalJson>,
+}
+
+/// One `<verb>At` per entry, as the session's journal writes it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged, rename_all_fields = "camelCase")]
+pub enum JournalJson {
+    Sealed {
+        sealed_at: String,
+        digest: String,
+    },
+    Resealed {
+        resealed_at: String,
+        digest: String,
+        reason: String,
+    },
+    Cleaned {
+        cleaned_at: String,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -108,6 +146,44 @@ pub struct Measure {
     /// `None` without `--before`.
     pub before: Option<VersusBefore>,
     pub previous: VersusPrevious,
+    /// `None` unless "before" passed: there is no shift to grade.
+    pub expect: Option<ExpectJson>,
+}
+
+/// The bound that applies, the last acceptance of this head tree over the declared one, and its
+/// grade.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExpectJson {
+    /// `none`, `+X%`, `-X%`, `down` or `unknown`.
+    pub change: String,
+    /// `None`: no entry names the measure, so it is the implicit `none`. `new-code` for the own hot
+    /// time of new code, whatever the entry says.
+    pub reason: Option<String>,
+    /// `None` for `change: unknown`.
+    pub grade: Option<Grade>,
+    pub post_hoc: bool,
+    /// An acceptance of the measure for another head tree, and none for this one.
+    pub stale: bool,
+    /// Of the measure in the session, on any head tree.
+    pub acceptances: u32,
+}
+
+/// With a shift that shows, a grade is never `unmeasurable` (plan, row 66), but for the own hot time
+/// of new code.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Grade {
+    Met,
+    Exceeded,
+    Surprise,
+    Unmeasurable,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Need {
+    pub measure: String,
+    pub reason: String,
 }
 
 /// `median` is `None` when "before" failed.
@@ -191,6 +267,9 @@ pub struct HotVersus {
 /// unknown (`coverage-unknown`).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CoverageJson {
+    /// The run whose repeat made it, when this run took it from its pool; `None` when this run made
+    /// it (plan, row 89). The same on `FaultJson` and `SecondPassJson`.
+    pub from: Option<String>,
     pub services: Vec<String>,
     /// Functions entered at least once, by file, line and column, the services added up.
     pub called: Vec<CalledJson>,
@@ -240,24 +319,106 @@ pub enum At {
     Key { key: Value },
 }
 
+/// The fault repeats (plan, row 73): categories of what the head and "before" did under the
+/// fault, not times.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FaultJson {
+    pub from: Option<String>,
+    /// `<service>:<port>`.
+    pub target: String,
+    /// `down` or `slow <delay>ms`.
+    pub mode: String,
+    pub categories: Categories,
+    /// One entry per value of the head other than the one "before" agreed on.
+    pub changed: Vec<CategoryChange>,
+}
+
+/// Every category on both versions, in one order; `before` is `None` without "before".
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Categories {
+    pub before: Option<Vec<CategoryJson>>,
+    pub head: Vec<CategoryJson>,
+}
+
+/// `values`: one per fault repeat in order, `unknown` for one that ended before the fault went on.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CategoryJson {
+    pub category: String,
+    pub values: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CategoryChange {
+    pub category: String,
+    pub before: String,
+    pub head: String,
+}
+
+/// The second pass (plan, row 74): the workload twice on one state without restore.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SecondPassJson {
+    pub from: Option<String>,
+    /// The files of `expect.unchanged`.
+    pub files: Vec<PassFile>,
+    /// By version and target.
+    pub open: Vec<PassOpen>,
+}
+
+/// Whether the file changed from the first pass to the second; `before` is `None` without a
+/// passed second pass of "before". `diffs` are the head's, the first pass as `before` and the
+/// second as `head`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PassFile {
+    pub file: String,
+    pub before: Option<PassState>,
+    pub head: PassState,
+    pub diffs: Vec<Diff>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum PassState {
+    Same,
+    Changed,
+}
+
+/// The open connections to `target` after each pass, added up over the long-running services.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PassOpen {
+    pub target: String,
+    pub side: String,
+    pub first: u64,
+    pub second: u64,
+}
+
 /// The quiet `--json` line (plan, row 76): `Report::line` or `Line::failed`. `cli` prints it with
-/// `next` as command strings, and sets `run` of a failed run that has its folder.
-#[derive(Debug, Clone, Serialize)]
+/// `next` as command strings, and sets `run` of a failed run that has its folder. The default is
+/// the empty line of `--dry-run --json`.
+#[derive(Debug, Clone, Default, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Line {
     pub run: Option<String>,
     #[serde(serialize_with = "slash::option")]
     pub report: Option<Utf8PathBuf>,
+    /// As in the report; `None` and 0 without one.
+    pub seal: Option<SealJson>,
+    pub attempts: u32,
+    pub comparisons: Option<u32>,
     /// Only the exceptions.
     pub measures: Vec<LineMeasure>,
     /// Only the files with a diff or a flag that names them; `None` as in the report.
     pub behaviour: Option<Vec<LineFile>>,
+    pub fault: Option<LineFault>,
+    /// The files of `expect.unchanged` that changed on the head; `None` as in the report.
+    pub second_pass: Option<Vec<LinePass>>,
     pub flags: Vec<Flag>,
+    pub needs: Vec<Need>,
     pub failure: Option<Failure>,
     /// The measures and files with no exception.
     pub quiet: u32,
-    /// Measures without an `expect` entry graded `unmeasurable`: they stay quiet (plan, row 66).
-    /// 0 until the grades of T-13b.
+    /// Of the quiet ones, the measures graded `unmeasurable` without an `expect` entry (plan, row
+    /// 66) or as new code.
     pub unmeasurable: u32,
     #[serde(skip)]
     pub next: Vec<Next>,
@@ -273,6 +434,7 @@ pub struct LineMeasure {
     pub median: f64,
     pub before: Option<Compared>,
     pub previous: VersusPrevious,
+    pub expect: Option<ExpectJson>,
 }
 
 /// `median` is `None` when "before" failed, as in `VersusBefore`.
@@ -295,17 +457,48 @@ pub struct LineFile {
     pub path: Utf8PathBuf,
 }
 
+/// `unknown`: the categories nothing compares on.
+#[derive(Debug, Clone, Serialize)]
+pub struct LineFault {
+    pub target: String,
+    pub mode: String,
+    pub changed: Vec<CategoryChange>,
+    pub unknown: Vec<String>,
+    pub from: Option<String>,
+}
+
+/// `sample`: at most 3 records of the head's diffs; `path`: all of them,
+/// `diff/pass2/<file>.json` of the run folder.
+#[derive(Debug, Clone, Serialize)]
+pub struct LinePass {
+    pub file: String,
+    pub before: Option<PassState>,
+    pub diffs: u32,
+    pub sample: Vec<Diff>,
+    #[serde(serialize_with = "slash::path")]
+    pub path: Utf8PathBuf,
+    pub from: Option<String>,
+}
+
+/// In a folder of its own: a behaviour file of the same name has `diff/<file>.json`.
+pub(crate) fn pass_path(dir: &Utf8Path, file: &str) -> Utf8PathBuf {
+    dir.join("diff").join("pass2").join(format!("{file}.json"))
+}
+
 impl Report {
-    /// `<dir>/diff/<file>.json` with all the diffs of each behaviour file and `<dir>/records.json`,
-    /// then `<dir>/report.json` through a temporary file and a rename: a `report.json` is whole and
-    /// says the rest is.
+    /// `<dir>/diff/<file>.json` with all the diffs of each behaviour file, `<dir>/diff/pass2/`
+    /// with those of the second pass, and `<dir>/records.json`, then `<dir>/report.json` through
+    /// a temporary file and a rename: a `report.json` is whole and says the rest is.
     pub fn write(&self, dir: &Utf8Path) -> Result<(), ReportError> {
-        for file in self.behaviour.iter().flatten() {
-            let path = diff_path(dir, &file.file);
+        let behaviour = self.behaviour.iter().flatten();
+        let behaviour = behaviour.map(|file| (diff_path(dir, &file.file), &file.diffs));
+        let passes = self.second_pass.iter().flat_map(|pass| &pass.files);
+        let passes = passes.map(|file| (pass_path(dir, &file.file), &file.diffs));
+        for (path, diffs) in behaviour.chain(passes) {
             if let Some(parent) = path.parent() {
                 fs::create_dir_all(parent).map_err(ReportError::io(parent))?;
             }
-            write_json(&path, &file.diffs, false)?;
+            write_json(&path, diffs, false)?;
         }
         write_json(&dir.join(RECORDS), self.records.as_ref(), false)?;
         let temporary = dir.join(format!("{REPORT}.tmp"));
@@ -368,6 +561,32 @@ pub(crate) fn before_json(
         setup: SetupJson {
             cached: setup_from.before.clone(),
         },
+    }
+}
+
+pub(crate) fn seal_json(seal: &SealInfo) -> SealJson {
+    let journal = seal.journal.iter().map(|entry| match entry {
+        Journal::Sealed { sealed_at, digest } => JournalJson::Sealed {
+            sealed_at: time(*sealed_at),
+            digest: digest.clone(),
+        },
+        Journal::Resealed {
+            resealed_at,
+            digest,
+            reason,
+        } => JournalJson::Resealed {
+            resealed_at: time(*resealed_at),
+            digest: digest.clone(),
+            reason: reason.clone(),
+        },
+        Journal::Cleaned { cleaned_at } => JournalJson::Cleaned {
+            cleaned_at: time(*cleaned_at),
+        },
+    });
+    SealJson {
+        sealed_at: time(seal.sealed_at),
+        max_tolerance: seal.max_tolerance,
+        journal: journal.collect(),
     }
 }
 

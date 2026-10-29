@@ -5,11 +5,11 @@ use std::fs;
 
 use camino::Utf8Path;
 use report::{
-    CoverageOutcome, Extra, FaultOutcome, FaultRepeat, Pass, PassPair, Phase, ProbeRan,
+    CoverageOutcome, Extra, FaultOutcome, FaultRepeat, Pass, PassPair, Phase, ProbeRan, Role,
     SecondPassOutcome,
 };
-use sandbox::{Metrics, Sandbox};
-use spec::Tap;
+use sandbox::{PortStats, Sandbox};
+use spec::{ServiceKind, Tap};
 
 use super::{
     Ctx, Ended, Failing, Kind, Repeated, Stop, end_phase, failure, run_repeat, torn, up_to_exit,
@@ -182,10 +182,15 @@ fn second_pass<S: Sandbox>(ctx: &mut Ctx<S>, side: Side, passed: Passed) -> Resu
             PassPair::Failed(failure(failing, phase, None, &dir, &probes))
         }
         Reached::Second(first, None) => {
-            let metrics = instances.into_iter().map(|instance| instance.metrics);
+            let services = instances
+                .into_iter()
+                .filter(|instance| instance.role == Role::LongRunning);
+            let ports = services
+                .flat_map(|instance| instance.metrics.ports)
+                .collect();
             PassPair::Passed {
                 first,
-                second: pass(out, probes, metrics),
+                second: pass(out, probes, ports),
             }
         }
     })
@@ -202,9 +207,13 @@ fn between_passes<S: Sandbox>(
     out: &Utf8Path,
 ) -> Result<Pass, StandFault> {
     let sandbox = ctx.sandbox;
-    let mut metrics = Vec::new();
+    let mut ports = Vec::new();
+    // The workload's too: every VM's metrics are read before its `destroy`.
     for member in &fleet.members {
-        metrics.push(sandbox.metrics(&member.id).map_err(StandFault::Sandbox)?);
+        let metrics = sandbox.metrics(&member.id).map_err(StandFault::Sandbox)?;
+        if member.kind == ServiceKind::LongRunning {
+            ports.extend(metrics.ports);
+        }
     }
     let tap = Tap::AfterWorkload;
     let probes = probes::run(sandbox, ctx.stand, fleet, tap, out).map_err(StandFault::Sandbox)?;
@@ -213,15 +222,13 @@ fn between_passes<S: Sandbox>(
         .expect("the first pass started its workload");
     let log = drain::log_path(dir, &fleet.members[index]).with_extension("pass-1.log");
     drain::release(sandbox, fleet, index, &log)?;
-    Ok(pass(out, probes, metrics))
+    Ok(pass(out, probes, ports))
 }
 
-/// `metrics` of every instance at the cut after the pass.
-fn pass(out: &Utf8Path, probes: Vec<ProbeRan>, metrics: impl IntoIterator<Item = Metrics>) -> Pass {
-    let ports = metrics.into_iter().flat_map(|metrics| metrics.ports);
+fn pass(out: &Utf8Path, probes: Vec<ProbeRan>, ports: Vec<PortStats>) -> Pass {
     Pass {
         out_dir: out.to_owned(),
         probes,
-        ports: ports.collect(),
+        ports,
     }
 }

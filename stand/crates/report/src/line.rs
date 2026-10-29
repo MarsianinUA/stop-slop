@@ -6,10 +6,12 @@ use std::collections::BTreeSet;
 use camino::Utf8Path;
 
 use crate::flags::{self, Flag};
-use crate::next::Next;
+use crate::grade;
+use crate::next::{Next, Topic};
 use crate::raw::{Failure, Phase, Raw};
 use crate::schema::{
-    Behaviour, Compared, Line, LineFile, LineMeasure, Measure, REPORT, Report, Verdict, diff_path,
+    Behaviour, Compared, Grade, Line, LineFault, LineFile, LineMeasure, LinePass, Measure,
+    PassFile, PassState, REPORT, Report, diff_path, pass_path,
 };
 use crate::{Before, Side};
 
@@ -18,8 +20,14 @@ const SAMPLE: usize = 3;
 
 impl Report {
     pub fn line(&self, dir: &Utf8Path) -> Line {
-        let measures = self.measures.iter().filter(|measure| moved(measure));
-        let measures: Vec<LineMeasure> = measures.map(line_measure).collect();
+        let (shown, quiet): (Vec<&Measure>, Vec<&Measure>) =
+            self.measures.iter().partition(|measure| exception(measure));
+        let unmeasurable = quiet
+            .iter()
+            .filter(|measure| graded(measure) == Some(Grade::Unmeasurable))
+            .count();
+        let next = self.next(&shown);
+        let measures: Vec<LineMeasure> = shown.into_iter().map(line_measure).collect();
         let named = named(&self.flags);
         let files = self.behaviour.as_ref().map(|files| {
             let shown = files
@@ -27,19 +35,65 @@ impl Report {
                 .filter(|file| !file.diffs.is_empty() || named.contains(file.file.as_str()));
             shown.map(|file| line_file(file, dir)).collect::<Vec<_>>()
         });
-        let all = self.measures.len() + self.behaviour.as_ref().map_or(0, Vec::len);
-        let shown = measures.len() + files.as_ref().map_or(0, Vec::len);
+        let passes = self.second_pass.as_ref().map(|pass| {
+            let changed = pass
+                .files
+                .iter()
+                .filter(|file| file.head == PassState::Changed);
+            let passes = changed.map(|file| line_pass(file, dir, pass.from.as_ref()));
+            passes.collect::<Vec<_>>()
+        });
+        let fault = self.fault.as_ref().map(|fault| LineFault {
+            target: fault.target.clone(),
+            mode: fault.mode.clone(),
+            changed: fault.changed.clone(),
+            unknown: fault.unknown_categories(),
+            from: fault.from.clone(),
+        });
+        let all = self.measures.len()
+            + self.behaviour.as_ref().map_or(0, Vec::len)
+            + self.second_pass.as_ref().map_or(0, |pass| pass.files.len());
+        let shown = measures.len()
+            + files.as_ref().map_or(0, Vec::len)
+            + passes.as_ref().map_or(0, Vec::len);
         Line {
             run: Some(self.run.clone()),
             report: Some(dir.join(REPORT)),
+            seal: self.seal.clone(),
+            attempts: self.attempts,
+            comparisons: self.comparisons,
             measures,
             behaviour: files,
+            fault,
+            second_pass: passes,
             flags: self.flags.clone(),
+            needs: self.needs.clone(),
             failure: None,
             quiet: u32::try_from(all - shown).unwrap_or(u32::MAX),
-            unmeasurable: 0,
-            next: Vec::new(),
+            unmeasurable: u32::try_from(unmeasurable).unwrap_or(u32::MAX),
+            next,
         }
+    }
+
+    /// An `accept` template per `surprise` and `exceeded` that fits `maxTolerance`, then
+    /// `guide expect` once for an `unmeasurable` entry: its bound is tighter than the noise.
+    fn next(&self, shown: &[&Measure]) -> Vec<Next> {
+        let max_tolerance = self.seal.as_ref().map(|seal| seal.max_tolerance);
+        let accepts = shown.iter().filter_map(|measure| {
+            let bound = grade::accept(measure, max_tolerance?)?;
+            Some(Next::Accept {
+                measure: measure.name.clone(),
+                bound,
+            })
+        });
+        let mut next: Vec<Next> = accepts.collect();
+        if shown
+            .iter()
+            .any(|measure| graded(measure) == Some(Grade::Unmeasurable))
+        {
+            next.push(Next::Guide(Some(Topic::Expect)));
+        }
+        next
     }
 }
 
@@ -65,15 +119,10 @@ impl Line {
             found
         });
         Line {
-            run: None,
-            report: None,
-            measures: Vec::new(),
-            behaviour: None,
             flags: flags.unwrap_or_default(),
             failure: Some(failure),
-            quiet: 0,
-            unmeasurable: 0,
             next,
+            ..Line::default()
         }
     }
 }
@@ -89,15 +138,24 @@ fn on_failure(flag: &Flag, failure: &Failure) -> bool {
             if side == Side::Head.as_str() && *repeat == failure.repeat)
 }
 
-/// A shift that shows: against "before" with `--before`, else against the previous run. The grades
-/// of T-13b replace this rule.
-fn moved(measure: &Measure) -> bool {
-    let before = measure.before.as_ref();
-    let verdict = before.map_or(measure.previous.verdict, |before| before.verdict);
-    matches!(
-        verdict,
-        Verdict::Improved | Verdict::Regressed | Verdict::Changed
-    )
+/// Optional Assumptions, «Исключение строки». An `unmeasurable` stays quiet without an entry (the
+/// implicit `none`) and for new code; with a failed "before" nothing was graded.
+fn exception(measure: &Measure) -> bool {
+    let Some(expect) = &measure.expect else {
+        return measure.before.is_none() && grade::shows(measure.previous.verdict);
+    };
+    expect.post_hoc
+        || expect.stale
+        || match expect.grade {
+            None => true,
+            Some(Grade::Met) => false,
+            Some(Grade::Unmeasurable) => expect.reason.is_some() && !grade::new_code(measure),
+            Some(Grade::Exceeded | Grade::Surprise) => true,
+        }
+}
+
+fn graded(measure: &Measure) -> Option<Grade> {
+    measure.expect.as_ref()?.grade
 }
 
 /// The files a flag names: they go into the line even without a diff.
@@ -125,6 +183,18 @@ fn line_measure(measure: &Measure) -> LineMeasure {
             verdict: before.verdict,
         }),
         previous: measure.previous.clone(),
+        expect: measure.expect.clone(),
+    }
+}
+
+fn line_pass(file: &PassFile, dir: &Utf8Path, from: Option<&String>) -> LinePass {
+    LinePass {
+        file: file.file.clone(),
+        before: file.before,
+        diffs: u32::try_from(file.diffs.len()).unwrap_or(u32::MAX),
+        sample: file.diffs.iter().take(SAMPLE).cloned().collect(),
+        path: pass_path(dir, &file.file),
+        from: from.cloned(),
     }
 }
 
