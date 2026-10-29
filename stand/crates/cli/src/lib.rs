@@ -3,19 +3,22 @@
 
 use std::io::Write;
 use std::process::ExitCode;
+use std::time::SystemTime;
 
 use budget::{Host, HostError};
 use camino::{Utf8Path, Utf8PathBuf};
 use run::Cancel;
 use sandbox::Sandbox;
-use store::Store;
+use store::{RunLock, Session, Store};
 
+mod accept;
 mod args;
 mod cache;
 mod clean;
 mod context;
 mod error;
 mod guide;
+mod inspect;
 mod lock;
 mod measure;
 mod next;
@@ -65,6 +68,17 @@ pub fn execute(command: Command, sandbox: &impl Sandbox, mut env: Env<'_>) -> Ex
             return measure::dry(before.as_ref(), output, sandbox, &mut env);
         }
         Command::Snapshot => snapshot::run(&mut env),
+        Command::Inspect {
+            run,
+            side,
+            service,
+            argv,
+        } => inspect::run(&run, side, &service, &argv, sandbox, &mut env),
+        Command::Accept {
+            measure,
+            allow,
+            reason,
+        } => accept::run(&measure, &allow, &reason, &mut env),
         Command::Clean(what) => clean::run(what, sandbox, &mut env),
     };
     done.unwrap_or_else(|error| refused(&error, &mut env))
@@ -88,6 +102,51 @@ fn stand_file(cwd: &Utf8Path, worktree: &source::Worktree) -> Utf8PathBuf {
         .join("info")
         .join("stop-slop-stand")
         .join(STAND_FILE)
+}
+
+/// The stand file of the work tree, loaded, for `inspect` and `accept`: the key of their session
+/// is its path and `session()` rewrites the session's images, so it must load, and they wait its
+/// `run::span` (Gate 1, row 65).
+struct Loaded {
+    worktree: source::Worktree,
+    file: Utf8PathBuf,
+    policy: spec::Policy,
+    stand: spec::Stand,
+}
+
+impl Loaded {
+    fn read(env: &Env<'_>) -> Result<Loaded, StandError> {
+        let worktree = source::open(env.cwd)?;
+        let (policy, _) = policy(env.store)?;
+        let file = stand_file(env.cwd, &worktree);
+        let stand = spec::load(&file, &policy)?;
+        Ok(Loaded {
+            worktree,
+            file,
+            policy,
+            stand,
+        })
+    }
+
+    /// The caller keeps the lock while it uses the session.
+    fn session(
+        &self,
+        env: &mut Env<'_>,
+        now: SystemTime,
+    ) -> Result<(RunLock, Session), StandError> {
+        let span = run::span(&self.stand);
+        let lock = lock::wait(env.store, span, env.cancel, &mut *env.err)?;
+        let images = images(&self.stand);
+        let session = env
+            .store
+            .session(&self.file, &self.worktree.root, &images, now)?;
+        Ok((lock, session))
+    }
+}
+
+/// Paths print with `/` on every OS (plan, row 45).
+fn slashed(path: &Utf8Path) -> String {
+    path.as_str().replace('\\', "/")
 }
 
 /// The images of a stand, each once, in the order of their services.

@@ -392,14 +392,16 @@ fn set(ids: &[SnapshotId]) -> BTreeSet<String> {
 
 /// The `Fake` of a case, with the calls it changes: `pull` and `cached` give the digests of
 /// `digests` (a tag that moved), `cached` finds none of `evicted`, a `create` of a batch with the
-/// service `fails_on` fails, one with `cancels_on` sets Ctrl+C first. Everything else goes to the
-/// `Fake` as it is.
+/// service `fails_on` fails, one with `cancels_on` sets Ctrl+C first, and `after_exec` gets the
+/// `stdout` of each `exec` once it is written, as the guest's `argv` could change it. Everything
+/// else goes to the `Fake` as it is.
 struct Wrapped<'f> {
     fake: &'f Fake,
     digests: &'f [(&'f str, &'f str)],
     evicted: &'f [&'f str],
     fails_on: Option<&'f str>,
     cancels_on: Option<(&'f str, &'f Cancel)>,
+    after_exec: Option<&'f dyn Fn(&Utf8Path)>,
 }
 
 impl<'f> Wrapped<'f> {
@@ -410,6 +412,7 @@ impl<'f> Wrapped<'f> {
             evicted: &[],
             fails_on: None,
             cancels_on: None,
+            after_exec: None,
         }
     }
 
@@ -481,7 +484,11 @@ impl Sandbox for Wrapped<'_> {
         deadline: Instant,
         stdout: &Utf8Path,
     ) -> Result<ExecOutcome, SandboxError> {
-        self.fake.exec(id, argv, deadline, stdout)
+        let outcome = self.fake.exec(id, argv, deadline, stdout)?;
+        if let Some(after) = self.after_exec {
+            after(stdout);
+        }
+        Ok(outcome)
     }
     fn stop(&self, id: &SandboxId) -> Result<Stopped, SandboxError> {
         self.fake.stop(id)
@@ -1539,4 +1546,312 @@ fn the_slots_follow_the_last_run_and_a_head_entry_serves_the_next_before() {
     let report = world.report(&missed);
     assert!(report["before"]["setup"]["cached"].is_null());
     assert_eq!(report["head"]["setup"]["cached"], plain["run"]);
+}
+
+/// `db` whose first `inspect` output, `1.out`, is 50 rows with the code 3.
+fn inspected_db() -> Rule {
+    let rows: String = (1..=50).map(|n| format!("row {n}\n")).collect();
+    rule(
+        "db",
+        Script {
+            volume_bytes: 4096,
+            probes: vec![
+                (
+                    "probe.orders.jsonl".into(),
+                    ExecOutcome::Exited(0),
+                    b"{\"id\":1}\n".to_vec(),
+                ),
+                ("1.out".into(), ExecOutcome::Exited(3), rows.into_bytes()),
+            ],
+            ..healthy()
+        },
+    )
+}
+
+/// `<run>/inspect/<n>.out` as `inspect` prints it.
+fn looked(world: &World, run: &str, n: u32) -> String {
+    let out = world.run_dir(run).join("inspect").join(format!("{n}.out"));
+    out.as_str().replace('\\', "/")
+}
+
+#[test]
+fn inspect_prints_the_code_forty_lines_and_the_path_and_refuses_what_is_not_kept() {
+    let world = World::new();
+    let fake = fake(vec![inspected_db()]);
+    let line = world.run(&fake, &["run", "--json"]).line();
+    let run = line["run"].as_str().unwrap();
+    let snapshots = set(&snapshots_left(&fake));
+    let args = ["inspect", run, "head", "db", "--", "psql", "-c", "select 1"];
+    let ran = world.run(&fake, &args);
+    assert_eq!(ran.exit, Exit::Passed, "{}", ran.err);
+    let lines: Vec<&str> = ran.out.lines().collect();
+    assert_eq!(lines.len(), 1 + 40 + 1, "{}", ran.out);
+    assert_eq!(
+        (lines[0], lines[1], lines[40]),
+        ("exit 3", "row 1", "row 40")
+    );
+    assert_eq!(lines[41], format!("full output {}", looked(&world, run, 1)));
+    let argv = fake
+        .journal()
+        .into_iter()
+        .rev()
+        .find_map(|call| match call {
+            Call::Exec { argv, .. } => Some(argv),
+            _ => None,
+        });
+    assert_eq!(argv.unwrap(), ["psql", "-c", "select 1"]);
+    // The copy is gone and the snapshots are as they were.
+    assert!(fake.leftovers().unwrap().sandboxes.is_empty());
+    assert_eq!(set(&snapshots_left(&fake)), snapshots);
+    let again = world.run(&fake, &["inspect", run, "head", "db", "--", "true"]);
+    let said = format!("exit 0\nfull output {}\n", looked(&world, run, 2));
+    assert_eq!(again.out, said);
+    // What `argv` leaves in place of its output is not a regular file: nothing of it is printed.
+    let folder = |stdout: &Utf8Path| {
+        fs::remove_file(stdout).unwrap();
+        fs::create_dir(stdout).unwrap();
+    };
+    let swapped = Wrapped {
+        after_exec: Some(&folder),
+        ..Wrapped::new(&fake)
+    };
+    let ran = world.run(&swapped, &["inspect", run, "head", "db", "--", "true"]);
+    assert_eq!(ran.exit, Exit::Passed, "{}", ran.err);
+    let not_regular = |n| {
+        let path = looked(&world, run, n);
+        format!("exit 0\nthe output {path} is not a regular file; nothing of it is printed\n")
+    };
+    assert_eq!(ran.out, not_regular(3));
+    // Windows makes a link only in developer mode or for an administrator, so Linux CI runs this.
+    #[cfg(unix)]
+    {
+        let secret = world.paths.root.join("secret");
+        fs::write(&secret, "a file of the host\n").unwrap();
+        let link = |stdout: &Utf8Path| {
+            fs::remove_file(stdout).unwrap();
+            std::os::unix::fs::symlink(&secret, stdout).unwrap();
+        };
+        let linked = Wrapped {
+            after_exec: Some(&link),
+            ..Wrapped::new(&fake)
+        };
+        let ran = world.run(&linked, &["inspect", run, "head", "db", "--", "true"]);
+        assert_eq!(ran.out, not_regular(4));
+    }
+    // Another run, a side or a service the kept run has no snapshot of: 2, and no VM.
+    let mark = fake.journal().len();
+    let refusals: [(&[&str], String); 3] = [
+        (
+            &["inspect", "20200101-000000", "head", "db", "--", "true"],
+            format!("which keeps {run}"),
+        ),
+        (
+            &["inspect", run, "before", "db", "--", "true"],
+            "on the before side".to_owned(),
+        ),
+        (
+            &["inspect", run, "head", "api", "--", "true"],
+            "`api`".to_owned(),
+        ),
+    ];
+    for (args, said) in refusals {
+        let ran = world.run(&fake, args);
+        assert_eq!(ran.exit, Exit::Refused, "{args:?}");
+        assert!(ran.err.contains(&said), "{said} in {}", ran.err);
+        assert_eq!(ran.next(), ["stop-slop-stand guide inspect"], "{args:?}");
+    }
+    let created = |from: usize| {
+        let journal = fake.journal();
+        journal[from..]
+            .iter()
+            .any(|call| matches!(call, Call::Create { .. }))
+    };
+    assert!(!created(mark));
+    // Ctrl+C before the copy starts: 130 and no VM.
+    let cancel = Cancel::new();
+    cancel.cancel();
+    let args = ["inspect", run, "head", "db", "--", "true"];
+    let ran = world.run_on(&fake, &args, &roomy, &cancel);
+    assert_eq!(ran.exit, Exit::Cancelled, "{}", ran.err);
+    assert!(ran.next().is_empty(), "{}", ran.err);
+    assert!(!created(mark));
+    // A `kept.json` that does not read breaks the stand.
+    fs::write(world.run_dir(run).join("kept.json"), "[").unwrap();
+    let ran = world.run(&fake, &args);
+    assert_eq!(ran.exit, Exit::Broken, "{}", ran.err);
+    assert_eq!(ran.next(), ["stop-slop-stand guide"]);
+    // The session is the stand file's: without one there is no session to inspect.
+    fs::remove_file(world.recipe().join("compose.yaml")).unwrap();
+    let ran = world.run(&fake, &args);
+    assert_eq!(ran.exit, Exit::Refused, "{}", ran.err);
+    assert_eq!(ran.next(), ["stop-slop-stand init"]);
+}
+
+#[test]
+fn inspect_of_a_service_that_does_not_start_alone_is_2() {
+    // `db` never gets healthy: the head fails and keeps it, and its copy does not start either.
+    let world = World::new();
+    let unhealthy = Script {
+        volume_bytes: 4096,
+        health: vec![Some(1)],
+        ..healthy()
+    };
+    let fake = fake(vec![rule("db", unhealthy)]);
+    let failed = world.run(&fake, &["run", "--json"]);
+    assert_eq!(failed.exit, Exit::AppFailed, "{}", failed.err);
+    let run = failed.line()["run"].as_str().unwrap().to_owned();
+    let ran = world.run(&fake, &["inspect", &run, "head", "db", "--", "true"]);
+    assert_eq!(ran.exit, Exit::Refused, "{}", ran.err);
+    assert!(
+        ran.err
+            .starts_with("db did not start in inspect: it stayed unhealthy"),
+        "{}",
+        ran.err
+    );
+    assert_eq!(ran.next(), ["stop-slop-stand guide inspect"]);
+    assert!(fake.leftovers().unwrap().sandboxes.is_empty());
+}
+
+/// `accepted.json` of the one session of the world (`store`, a law of the blueprint).
+fn acceptances(world: &World) -> Vec<Value> {
+    let session = world.sessions().remove(0);
+    let Ok(text) = fs::read_to_string(session.join("accepted.json")) else {
+        return Vec::new();
+    };
+    serde_json::from_str(&text).unwrap()
+}
+
+#[test]
+fn accept_appends_a_bound_with_its_reason_and_refuses_the_rest() {
+    let world = World::new();
+    let fake = fake(Vec::new());
+    world.run(&fake, &["snapshot"]);
+    let args = ["accept", "stand.wall", "--allow", "+15%", "--reason", "x"];
+    let ran = world.run(&fake, &args);
+    assert_eq!(ran.exit, Exit::Refused, "no run passed yet: {}", ran.err);
+    assert_eq!(ran.next(), ["stop-slop-stand guide expect"]);
+    world.repo.write("main.js", "console.log('v2')\n");
+    let first = world
+        .run(&fake, &["run", "--before", "session", "--json"])
+        .line();
+    let tree = world.report(&first)["head"]["tree"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    // A bound is kept and printed in the grammar of `--allow`, as `next` writes it.
+    let args = [
+        "accept",
+        "stand.wall",
+        "--allow",
+        "+015%",
+        "--reason",
+        "one more lookup",
+    ];
+    let ran = world.run(&fake, &args);
+    assert_eq!(ran.exit, Exit::Passed, "{}", ran.err);
+    assert_eq!(
+        ran.out,
+        format!("accepted stand.wall +15% for head {tree}\n")
+    );
+    let args = [
+        "accept",
+        "stand.wall",
+        "--allow",
+        "-10%",
+        "--reason",
+        "a cache",
+    ];
+    assert_eq!(world.run(&fake, &args).exit, Exit::Passed);
+    let accepted = acceptances(&world);
+    let kept: Vec<(&str, &str, &str, &str)> = accepted
+        .iter()
+        .map(|entry| {
+            let field = |key: &str| entry[key].as_str().unwrap();
+            (
+                field("measure"),
+                field("allow"),
+                field("reason"),
+                field("headTree"),
+            )
+        })
+        .collect();
+    assert_eq!(
+        kept,
+        [
+            ("stand.wall", "+15%", "one more lookup", tree.as_str()),
+            ("stand.wall", "-10%", "a cache", tree.as_str()),
+        ]
+    );
+    assert!(accepted.iter().all(|entry| entry["acceptedAt"].is_string()));
+    // The next run of this head grades by the last acceptance, and counts both.
+    let next = world
+        .run(&fake, &["run", "--before", "session", "--json"])
+        .line();
+    let report = world.report(&next);
+    let wall = report["measures"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|measure| measure["name"] == "stand.wall")
+        .unwrap();
+    let expect = &wall["expect"];
+    assert_eq!(
+        (
+            &expect["change"],
+            &expect["postHoc"],
+            &expect["acceptances"]
+        ),
+        (&Value::from("-10%"), &Value::from(true), &Value::from(2)),
+        "{expect}"
+    );
+    // One flag without the other, a bound wider than `max_tolerance`, `unknown`, a bound out of
+    // the grammar and a measure the last report does not have: 2, and nothing appended.
+    let refusals: [(&[&str], &[&str]); 6] = [
+        (
+            &["accept", "stand.wall", "--allow", "+15%"],
+            &["stop-slop-stand guide"],
+        ),
+        (
+            &["accept", "stand.wall", "--reason", "why"],
+            &["stop-slop-stand guide"],
+        ),
+        (
+            &[
+                "accept",
+                "stand.wall",
+                "--allow",
+                "+40%",
+                "--reason",
+                "wide",
+            ],
+            &[],
+        ),
+        (
+            &[
+                "accept",
+                "stand.wall",
+                "--allow",
+                "unknown",
+                "--reason",
+                "x",
+            ],
+            &["stop-slop-stand guide expect"],
+        ),
+        (
+            &["accept", "stand.wall", "--allow", "15%", "--reason", "x"],
+            &["stop-slop-stand guide expect"],
+        ),
+        (
+            &["accept", "no.such", "--allow", "+15%", "--reason", "x"],
+            &["stop-slop-stand guide expect"],
+        ),
+    ];
+    for (args, next) in refusals {
+        let ran = world.run(&fake, args);
+        assert_eq!(ran.exit, Exit::Refused, "{args:?}");
+        assert_eq!(ran.next(), next, "{args:?}: {}", ran.err);
+    }
+    let wide = world.run(&fake, refusals[2].0);
+    assert!(wide.err.contains("max_tolerance, 25%"), "{}", wide.err);
+    assert_eq!(acceptances(&world).len(), 2);
 }

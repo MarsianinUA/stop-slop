@@ -74,6 +74,22 @@ mod tests {
             Next::Reseal {
                 before: "origin/main".into(),
             },
+            Next::Inspect {
+                run: "20261029-120000".into(),
+                service: "db".into(),
+            },
+            Next::Accept {
+                measure: "api:3000.connections".into(),
+                bound: Bound::UpTo(15),
+            },
+            Next::Accept {
+                measure: "db.memory".into(),
+                bound: Bound::DownTo(10),
+            },
+            Next::Accept {
+                measure: "stand.wall".into(),
+                bound: Bound::None,
+            },
         ]
     }
 

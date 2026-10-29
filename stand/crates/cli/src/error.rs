@@ -8,10 +8,10 @@ use std::time::Duration;
 use budget::{HostError, Refusal};
 use camino::Utf8PathBuf;
 use report::{Next, Phase, ReportError, Topic};
-use run::StandFault;
+use run::{InspectError, StandFault};
 use sandbox::SandboxError;
 use source::SourceError;
-use spec::SpecError;
+use spec::{ChangeError, SpecError};
 use store::{ConfigError, StoreError};
 
 use crate::Exit;
@@ -37,6 +37,9 @@ pub(crate) enum StandError {
     /// A stand fault inside `run`, and the errors of `kept_ids` and `cached_ids`.
     #[error(transparent)]
     Run(#[from] StandFault),
+    /// `cli` also refuses a run id other than the kept run's as `NotKept`.
+    #[error(transparent)]
+    Inspect(#[from] InspectError),
     #[error("{path}: {source}")]
     Io {
         path: Utf8PathBuf,
@@ -53,6 +56,16 @@ pub(crate) enum StandError {
     RecipeChanged { files: Vec<String>, before: String },
     #[error("the before tree is the head tree: there is nothing to compare")]
     NothingToCompare,
+    #[error("this work tree has no passed run to accept a measure of")]
+    NoRun,
+    #[error("`{measure}` is not a measure of the last passed run, {run}")]
+    NotInReport { measure: String, run: String },
+    #[error(transparent)]
+    Change(#[from] ChangeError),
+    #[error("`unknown` bounds nothing: accept none, +X%, -X% or down")]
+    UnknownBound,
+    #[error("{allow} is wider than max_tolerance, {max}%: the measure needs a person")]
+    TooWide { allow: String, max: u16 },
     #[error("cancelled")]
     Cancelled,
 }
@@ -80,11 +93,21 @@ impl StandError {
                 | SandboxError::Guest { .. }
                 | SandboxError::Backend { .. } => Exit::Broken,
             },
+            StandError::Inspect(error) => match error {
+                InspectError::NotKept(_) | InspectError::NotStarted { .. } => Exit::Refused,
+                InspectError::Stand(_) => Exit::Broken,
+                InspectError::Cancelled => Exit::Cancelled,
+            },
             StandError::Config(_)
             | StandError::Budget(_)
             | StandError::LockWait(_)
             | StandError::RecipeChanged { .. }
-            | StandError::NothingToCompare => Exit::Refused,
+            | StandError::NothingToCompare
+            | StandError::NoRun
+            | StandError::NotInReport { .. }
+            | StandError::Change(_)
+            | StandError::UnknownBound
+            | StandError::TooWide { .. } => Exit::Refused,
             StandError::Store(_)
             | StandError::Host(_)
             | StandError::Report(_)
@@ -105,7 +128,19 @@ impl StandError {
             // The rules of the stand file, the image of the prepare service among them, live in
             // the topic `recipe` (plan, row 87).
             StandError::Spec(SpecError::Invalid { .. }) => vec![Next::Guide(Some(Topic::Recipe))],
-            StandError::Cancelled => Vec::new(),
+            // The topic says which run, side and service `inspect` takes, and how its copy starts.
+            StandError::Inspect(InspectError::NotKept(_) | InspectError::NotStarted { .. }) => {
+                vec![Next::Guide(Some(Topic::Inspect))]
+            }
+            // The topic holds the grammar of a bound and when `accept` applies.
+            StandError::NoRun
+            | StandError::NotInReport { .. }
+            | StandError::Change(_)
+            | StandError::UnknownBound => vec![Next::Guide(Some(Topic::Expect))],
+            // A bound wider than the policy is for a person, not a command.
+            StandError::TooWide { .. }
+            | StandError::Cancelled
+            | StandError::Inspect(InspectError::Cancelled) => Vec::new(),
             _ => vec![Next::Guide(None)],
         }
     }

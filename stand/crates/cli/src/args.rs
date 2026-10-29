@@ -1,5 +1,6 @@
 //! `stop-slop-stand run [--before session|<ref> [--reseal --reason <text>]] [--dry-run] [--json
-//! [--pretty]] | snapshot | clean [--all]`. `--help` holds at most 20 lines, the last
+//! [--pretty]] | snapshot | inspect <run> <side> <service> -- <argv>... | accept <measure> --allow
+//! <bound> --reason <text> | clean [--all]`. `--help` holds at most 20 lines, the last
 //! ``agents: run `guide` ``.
 //!
 //! The types say what the flags cannot be: `--reseal` lives only in `Compare`, which only
@@ -10,6 +11,7 @@ use std::io::Write;
 
 use clap::{Args, Parser, Subcommand};
 use report::{Cause, Failure, Line, Phase};
+use run::Side;
 use source::Before;
 
 use crate::{Exit, next};
@@ -25,6 +27,18 @@ pub enum Command {
         output: Output,
     },
     Snapshot,
+    Inspect {
+        run: String,
+        side: Side,
+        service: String,
+        argv: Vec<String>,
+    },
+    /// `clap` requires both `allow` and `reason`: one without the other is exit 2.
+    Accept {
+        measure: String,
+        allow: String,
+        reason: Reason,
+    },
     Clean(store::Clean),
 }
 
@@ -120,6 +134,30 @@ enum Sub {
     Run(RunArgs),
     /// Snapshot the work tree as the before of this session
     Snapshot,
+    /// Run a command in a copy of a kept end-of-run snapshot
+    Inspect {
+        /// The id of the kept run, `run` of the --json line
+        run: String,
+        /// head or before
+        #[arg(value_parser = side)]
+        side: Side,
+        /// A service with a volume
+        service: String,
+        /// The command to run in the copy
+        #[arg(last = true, required = true)]
+        argv: Vec<String>,
+    },
+    /// Accept the shift of a measure after the fact, with a reason
+    Accept {
+        /// A measure of the last passed run, such as stand.wall
+        measure: String,
+        /// none, +X%, -X% or down, X from 5
+        #[arg(long, allow_hyphen_values = true)]
+        allow: String,
+        /// Why the measure moved
+        #[arg(long, value_parser = reason)]
+        reason: Reason,
+    },
     /// Delete what the stand keeps for its sessions
     Clean {
         /// Everything, the journals and the microsandbox runtime too
@@ -155,6 +193,26 @@ impl Sub {
         match self {
             Sub::Run(args) => args.into_command(),
             Sub::Snapshot => Command::Snapshot,
+            Sub::Inspect {
+                run,
+                side,
+                service,
+                argv,
+            } => Command::Inspect {
+                run,
+                side,
+                service,
+                argv,
+            },
+            Sub::Accept {
+                measure,
+                allow,
+                reason,
+            } => Command::Accept {
+                measure,
+                allow,
+                reason,
+            },
             Sub::Clean { all } => Command::Clean(if all {
                 store::Clean::All
             } else {
@@ -191,6 +249,14 @@ fn reason(text: &str) -> Result<Reason, String> {
         Err("the reason is empty".to_owned())
     } else {
         Ok(Reason(text.to_owned()))
+    }
+}
+
+fn side(text: &str) -> Result<Side, String> {
+    match text {
+        "head" => Ok(Side::Head),
+        "before" => Ok(Side::Before),
+        _ => Err("head or before".to_owned()),
     }
 }
 
@@ -274,6 +340,53 @@ mod tests {
             panic!("a run against the session");
         };
         assert!(compare.before == Before::Session && compare.reseal.is_none());
+    }
+
+    #[test]
+    fn inspect_takes_its_argv_after_two_dashes_and_accept_a_falling_bound() {
+        for args in [
+            &["inspect", "20260101-000000", "head", "db", "psql"][..],
+            &["inspect", "20260101-000000", "head", "db", "--"],
+            &["inspect", "20260101-000000", "middle", "db", "--", "psql"],
+            &["accept", "stand.wall", "--allow", "+15%"],
+            &["accept", "stand.wall", "--reason", "why"],
+            &["accept", "stand.wall", "--allow", "+15%", "--reason", ""],
+        ] {
+            assert!(parsed(args).is_err(), "{args:?}");
+        }
+        let args = [
+            "inspect",
+            "20260101-000000",
+            "before",
+            "db",
+            "--",
+            "psql",
+            "-c",
+            "select 1",
+        ];
+        let Ok(Command::Inspect {
+            run,
+            side: Side::Before,
+            service,
+            argv,
+        }) = parsed(&args)
+        else {
+            panic!("an inspect of before");
+        };
+        assert_eq!((run.as_str(), service.as_str()), ("20260101-000000", "db"));
+        assert_eq!(argv, ["psql", "-c", "select 1"]);
+        let args = [
+            "accept",
+            "db.memory",
+            "--allow",
+            "-10%",
+            "--reason",
+            "a cache",
+        ];
+        let Ok(Command::Accept { allow, reason, .. }) = parsed(&args) else {
+            panic!("an accept of a fall");
+        };
+        assert_eq!((allow.as_str(), reason.as_str()), ("-10%", "a cache"));
     }
 
     #[test]

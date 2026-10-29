@@ -18,7 +18,9 @@ use store::{PoolKey, RunPaths, Session, Slot, Store};
 use crate::cache::{self, Planned};
 use crate::context::{self, Known};
 use crate::error::{At, Halt, StandError};
-use crate::{Compare, Env, Exit, Output, images, lock, next, policy, seal, stand_file, sweep};
+use crate::{
+    Compare, Env, Exit, Output, images, lock, next, policy, seal, slashed, stand_file, sweep,
+};
 
 /// How a run ended, for the line or the summary.
 enum Ended {
@@ -571,9 +573,4 @@ fn demand(stand: &Stand) -> budget::Demand {
 
 fn image_refs(stand: &Stand) -> Vec<ImageRef> {
     images(stand).into_iter().map(ImageRef::new).collect()
-}
-
-/// Paths print with `/` on every OS (plan, row 45).
-fn slashed(path: &Utf8Path) -> String {
-    path.as_str().replace('\\', "/")
 }

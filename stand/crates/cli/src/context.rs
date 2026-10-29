@@ -123,7 +123,7 @@ fn journal(entry: &JournalEntry) -> Journal {
     }
 }
 
-fn bound(change: Change) -> Bound {
+pub(crate) fn bound(change: Change) -> Bound {
     match change {
         Change::None => Bound::None,
         Change::UpTo(percent) => Bound::UpTo(percent.get()),
