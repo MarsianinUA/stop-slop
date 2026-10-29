@@ -669,6 +669,32 @@ fn network_limit_hit_takes_drops_and_256_connections_to_the_target_over_all_gues
 }
 
 #[test]
+fn a_target_with_two_replicas_hits_the_limit_from_512_connections() {
+    let folder = Folder::new();
+    let mut head = repeats(&folder, "head", &[100, 100]);
+    for (repeat, connections) in head.iter_mut().zip([511, 512]) {
+        let log = folder.log(&format!("api-2-{}", repeat.repeat), "", "");
+        let mut second = instance("api", Role::LongRunning, metrics(1000, 100 << 20), log);
+        second.replica = 2;
+        repeat.instances.push(second);
+        let port = &mut repeat.instances[1].metrics.ports[0];
+        (port.connections, port.drops) = (connections, 2);
+    }
+    let report = report(&raw(&folder, head, None));
+
+    let flags = report.flags.iter();
+    let hits: Vec<&Flag> = flags
+        .filter(|flag| matches!(flag, Flag::NetworkLimitHit { .. }))
+        .collect();
+    let hit = Flag::NetworkLimitHit {
+        repeat: 2,
+        target: "api:3000".to_owned(),
+        drops: 2,
+    };
+    assert_eq!(hits, [&hit]);
+}
+
+#[test]
 fn a_run_without_a_profiled_service_is_unprofiled() {
     let folder = Folder::new();
     let plain = report(&raw(&folder, repeats(&folder, "a", &[100]), None));

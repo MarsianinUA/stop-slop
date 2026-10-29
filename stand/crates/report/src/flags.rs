@@ -22,8 +22,8 @@ const NEAR_LIMIT: f64 = 0.9;
 /// A tenth of the TypeScript time without a source map: the hot list misses enough to mislead.
 const UNMAPPED: f64 = 0.1;
 
-/// `max_inbound` of microsandbox 0.7.8 (plan, row 79). Below it, drops are a target that failed or
-/// was not ready yet, which its exit and readiness show.
+/// `max_inbound` of microsandbox 0.7.8, per sandbox, so per replica (plan, row 79). Below it, drops
+/// are a target that failed or was not ready yet, which its exit and readiness show.
 const NETWORK_LIMIT: u64 = 256;
 
 /// Fewer pooled samples of a version than this make the verdicts coarse.
@@ -284,8 +284,9 @@ fn memory(sides: &Sides<'_>, flags: &mut Vec<Flag>) {
 
 /// The counters of a target add up over the guests of a repeat; the limit counts the connections
 /// the target took in that repeat of one version, whose drops alone add to the flag (plan T-12,
-/// orchestrator's note to T-11 stage 2). `open` plays no part: a relay closes up to half a second
-/// after its client.
+/// orchestrator's note to T-11 stage 2). `PortStats` names no replica, so a target with `r`
+/// replicas needs `256 r`: from there up, at least one of them took 256. `open` plays no part: a
+/// relay closes up to half a second after its client.
 fn network(sides: &Sides<'_>, flags: &mut Vec<Flag>) {
     let mut hits: BTreeMap<(u32, &str), u64> = BTreeMap::new();
     for (_, _, repeats) in sides {
@@ -298,7 +299,8 @@ fn network(sides: &Sides<'_>, flags: &mut Vec<Flag>) {
                 *connections += port.connections;
             }
             for (target, (drops, connections)) in targets {
-                if drops >= 1 && connections >= NETWORK_LIMIT {
+                let limit = NETWORK_LIMIT.saturating_mul(replicas(repeat, target));
+                if drops >= 1 && connections >= limit {
                     *hits.entry((repeat.repeat, target)).or_default() += drops;
                 }
             }
@@ -311,6 +313,19 @@ fn network(sides: &Sides<'_>, flags: &mut Vec<Flag>) {
             drops,
         });
     }
+}
+
+/// The instances of the service behind `<service>:<port>` in this repeat, one per replica; at
+/// least 1.
+fn replicas(repeat: &RepeatOutput, target: &str) -> u64 {
+    let service = target
+        .rsplit_once(':')
+        .map_or(target, |(service, _)| service);
+    let instances = repeat.instances.iter();
+    let count = instances
+        .filter(|instance| instance.service == service)
+        .count();
+    u64::try_from(count).unwrap_or(u64::MAX).max(1)
 }
 
 fn unexposed(sides: &Sides<'_>, flags: &mut Vec<Flag>) {
