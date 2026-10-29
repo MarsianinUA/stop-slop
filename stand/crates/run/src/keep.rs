@@ -232,7 +232,7 @@ pub(crate) fn write(run_dir: &Utf8Path, kept: &[Kept]) -> Result<(), StandFault>
     if kept.is_empty() {
         return Ok(());
     }
-    crate::write_json(&run_dir.join(KEPT), &kept)
+    crate::write_whole(&run_dir.join(KEPT), &kept)
 }
 
 fn read(run_dir: &Utf8Path) -> Result<Vec<Kept>, StandFault> {

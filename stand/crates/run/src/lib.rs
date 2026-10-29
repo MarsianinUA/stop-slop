@@ -19,6 +19,7 @@ use spec::Stand;
 
 mod cache;
 mod drain;
+mod fault;
 mod keep;
 mod lane;
 mod launch;
@@ -43,13 +44,13 @@ pub fn span(stand: &Stand) -> Duration {
     // repeat of the head (x 1.5), eight for the two fault repeats, eight for the second pass (x 2).
     let mut halves = stand.repeat.get().saturating_mul(4);
     if launch::any_profiled(stand) {
-        halves += 3;
+        halves = halves.saturating_add(3);
     }
     if stand.fault.is_some() {
-        halves += 8;
+        halves = halves.saturating_add(8);
     }
     if stand.second_pass.is_some() {
-        halves += 8;
+        halves = halves.saturating_add(8);
     }
     stand
         .setup_timeout
@@ -194,6 +195,14 @@ fn read_json<T: DeserializeOwned>(path: &Utf8Path) -> Result<Option<T>, StandFau
 fn write_json(path: &Utf8Path, value: &impl Serialize) -> Result<(), StandFault> {
     let bytes = serde_json::to_vec_pretty(value).expect("the files of `run` serialize");
     fs::write(path, bytes).map_err(StandFault::io(path))
+}
+
+/// Through `<path>.tmp` and a rename, for a file whose presence says something (`entry.json`,
+/// `kept.json`): it is whole or not there, also after a crash.
+fn write_whole(path: &Utf8Path, value: &impl Serialize) -> Result<(), StandFault> {
+    let temporary = Utf8PathBuf::from(format!("{path}.tmp"));
+    write_json(&temporary, value)?;
+    fs::rename(&temporary, path).map_err(StandFault::io(path))
 }
 
 #[derive(Debug, thiserror::Error)]

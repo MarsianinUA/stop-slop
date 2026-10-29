@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io;
 use std::num::NonZeroU32;
@@ -169,6 +169,12 @@ impl Stand {
                 }
             })
     }
+
+    /// The services that run in setup: the setup services and all they wait for, directly or
+    /// through others. `after-setup` probes run only in these.
+    pub fn in_setup(&self) -> BTreeSet<&ServiceName> {
+        graph::in_setup(&self.services)
+    }
 }
 
 /// `cli` copies the two numbers into `budget::Demand`: `budget` does not depend on `spec`.
@@ -259,7 +265,8 @@ pub struct Service {
 }
 
 impl Service {
-    fn on_tree(&self) -> bool {
+    /// It mounts `${STAND_REPO}`.
+    pub fn on_tree(&self) -> bool {
         self.mounts.iter().any(|mount| matches!(mount, Mount::Tree))
     }
 }

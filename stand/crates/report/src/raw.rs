@@ -1,5 +1,5 @@
 //! What `run::run` returns (plan, row 85). The port's types come from `sandbox` without features,
-//! so `report` has no copy of `Metrics`, `Stopped` or `ExecOutcome`.
+//! so `report` has no copy of `Metrics`, `PortStats`, `Stopped` or `ExecOutcome`.
 
 use std::collections::BTreeMap;
 use std::fmt;
@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use camino::Utf8PathBuf;
 use profile::{Coverage, Samples};
-use sandbox::{ExecOutcome, Metrics, Stopped};
+use sandbox::{ExecOutcome, Metrics, PortStats, Stopped};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 #[derive(Debug)]
@@ -26,8 +26,13 @@ pub struct Raw {
     pub setup: Setup,
     pub head: Vec<RepeatOutput>,
     pub before: Option<BeforeOutcome>,
-    /// `None` without a profiled service.
+    /// `None` without a profiled service, or without `Extra::Coverage` in the set: `make` then
+    /// copies the pool's.
     pub coverage: Option<CoverageOutcome>,
+    /// `None` without `x-stand.fault`, or without `Extra::Fault`.
+    pub fault: Option<FaultOutcome>,
+    /// `None` without `x-stand.second_pass`, or without `Extra::SecondPass`.
+    pub second_pass: Option<SecondPassOutcome>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -109,6 +114,67 @@ pub enum CoverageOutcome {
     /// By service; the replicas of a service are one.
     Read(BTreeMap<String, Coverage>),
     Failed(Failure),
+}
+
+/// The fault repeats of each version (plan, row 73), in their order.
+#[derive(Debug)]
+pub struct FaultOutcome {
+    /// `<service>:<port>`.
+    pub target: String,
+    /// `down`, or `slow <delay>ms`: `slow 2000ms`, `slow 1.5ms`.
+    pub mode: String,
+    pub head: Vec<FaultRepeat>,
+    /// `None` without `Versions.before`, or when "before" failed.
+    pub before: Option<Vec<FaultRepeat>>,
+}
+
+/// What a repeat under the fault ended with: its categories, never a failure of the run.
+#[derive(Debug)]
+pub struct FaultRepeat {
+    /// From 1.
+    pub repeat: u32,
+    /// `None` when the workload did not end with a code: the repeat hit its timeout, ended before
+    /// the workload started, or the workload was killed; `failure` tells them apart.
+    pub workload: Option<i32>,
+    /// Long-running services that exited during the repeat.
+    pub exited: Vec<String>,
+    /// What ended the repeat short of the workload's exit 0, as in a failed measured repeat. Phase
+    /// `Ready`: before the fault went on, so it says nothing of the fault (a readiness that never
+    /// came); `Workload`: under the fault. No probe runs in a fault repeat, so `probes` is empty.
+    pub failure: Option<Failure>,
+    /// At the cut; no profiler runs in a fault repeat.
+    pub instances: Vec<InstanceOutput>,
+}
+
+/// The second pass of each version (plan, row 74).
+#[derive(Debug)]
+pub struct SecondPassOutcome {
+    /// The files of `expect.unchanged`.
+    pub unchanged: Vec<String>,
+    pub head: PassPair,
+    /// `None` without `Versions.before`, or when "before" failed.
+    pub before: Option<PassPair>,
+}
+
+#[derive(Debug)]
+pub enum PassPair {
+    Passed {
+        first: Pass,
+        second: Pass,
+    },
+    /// `repeat` is `None`; `probes` are the `on-failure` outputs of the pass that failed.
+    Failed(Failure),
+}
+
+#[derive(Debug)]
+pub struct Pass {
+    /// Host folder of the workload's `/stand/out` in this pass, with the `probe.<name>.jsonl` of
+    /// the probes after it.
+    pub out_dir: Utf8PathBuf,
+    pub probes: Vec<ProbeRan>,
+    /// Of every instance at the cut after this pass, the workload's included; a long-running
+    /// service counts from its start, so the second pass holds the first.
+    pub ports: Vec<PortStats>,
 }
 
 /// A failed lane in `Raw`, the `failure` of the `--json` line and `before.failed` of the report.
@@ -201,6 +267,15 @@ impl<'de> Deserialize<'de> for Cause {
         let text = String::deserialize(deserializer)?;
         Ok(Cause::parse(&text))
     }
+}
+
+/// The repeats outside the stats: `run` runs those in its set, `Context.reused` names those
+/// copied from the pool (plan, row 89).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Extra {
+    Coverage,
+    Fault,
+    SecondPass,
 }
 
 #[cfg(test)]

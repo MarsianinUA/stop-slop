@@ -650,6 +650,53 @@ fn a_probe_runs_in_a_long_running_service_and_after_setup_in_one_setup_starts() 
 }
 
 #[test]
+fn setup_runs_the_setup_services_and_all_they_wait_for() {
+    // `migrate` waits for `db`, which waits for `cache`; nothing of setup waits for `api`.
+    let stand = load_text(
+        r#"
+services:
+  cache:
+    image: redis:7
+    deploy: { resources: { limits: { cpus: "1", memory: 256m } } }
+  db:
+    image: postgres:17
+    depends_on: { cache: { condition: service_started } }
+    healthcheck: { test: ["CMD", "pg_isready"] }
+    deploy: { resources: { limits: { cpus: "1", memory: 1g } } }
+  migrate:
+    image: node:22
+    volumes: ["${STAND_REPO}:/w/app"]
+    depends_on: { db: { condition: service_healthy } }
+    deploy: { resources: { limits: { cpus: "1", memory: 512m } } }
+  api:
+    image: node:22
+    volumes: ["${STAND_REPO}:/w/app"]
+    depends_on: { migrate: { condition: service_completed_successfully } }
+    deploy: { resources: { limits: { cpus: "1", memory: 512m } } }
+  load:
+    image: node:22
+    depends_on: { api: { condition: service_started } }
+    deploy: { resources: { limits: { cpus: "1", memory: 512m } } }
+x-stand: { workload: load }
+"#,
+    )
+    .unwrap();
+    let in_setup: Vec<&str> = stand
+        .in_setup()
+        .into_iter()
+        .map(ServiceName::as_str)
+        .collect();
+    assert_eq!(in_setup, ["cache", "db", "migrate"]);
+    let on_tree: Vec<&str> = stand
+        .services
+        .iter()
+        .filter(|(_, service)| service.on_tree())
+        .map(|(name, _)| name.as_str())
+        .collect();
+    assert_eq!(on_tree, ["api", "migrate"]);
+}
+
+#[test]
 fn expect_reads_changes_without_quotes_and_holds_them_to_the_policy() {
     let stand = stand("expect-changes");
     let costs: Vec<(&str, Change)> = stand

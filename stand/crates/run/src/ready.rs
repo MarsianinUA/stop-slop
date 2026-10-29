@@ -5,7 +5,7 @@
 
 use std::time::{Duration, Instant};
 
-use sandbox::{ExecId, Launch, Sandbox, SandboxError, SandboxId, Waitable};
+use sandbox::{ExecId, Exited, Fault, Launch, Sandbox, SandboxError, SandboxId, Waitable};
 use spec::{Healthcheck, ServiceKind};
 
 use crate::Cancel;
@@ -35,11 +35,16 @@ pub(crate) struct Member {
 #[derive(Default)]
 pub(crate) struct Fleet {
     pub(crate) members: Vec<Member>,
+    /// A fault repeat once its fault is on: each member created from then on gets it right after
+    /// its `create`, and a long-running service that ends is one of its categories, noted in its
+    /// `exit`, while the waits go on.
+    fault: Option<Fault>,
 }
 
 /// Why a phase stopped short of its goal.
 pub(crate) enum Halt {
-    /// A member's command ended: a long-running service, or a setup service with another code than 0.
+    /// A member's command ended: a long-running service (not under a fault), or a setup service
+    /// with another code than 0.
     Down(usize),
     Unhealthy(usize),
     /// The phase's deadline, while waiting for this member.
@@ -58,7 +63,8 @@ impl From<SandboxError> for Halt {
 enum Woke {
     /// The healthcheck attempt ended with this code.
     Job(Option<i32>),
-    /// A setup service exited 0, or the workload ended: the caller looks again at what it waits for.
+    /// A setup service exited 0, the workload ended, or a long-running service under a fault: the
+    /// caller looks again at what it waits for.
     Exit,
     Deadline,
 }
@@ -76,6 +82,7 @@ impl Fleet {
             .unzip();
         let ids = sandbox.create(&launches)?;
         let created = sandbox.now();
+        let from = self.members.len();
         for ((launch, (kind, health)), id) in launches.into_iter().zip(waits).zip(ids) {
             self.members.push(Member {
                 kind,
@@ -87,7 +94,36 @@ impl Fleet {
                 healthy: false,
             });
         }
+        self.switch_on(sandbox, from)?;
         Ok(created)
+    }
+
+    /// From now on, on every member and every one created later.
+    pub(crate) fn fault_on(&mut self, sandbox: &impl Sandbox, fault: Fault) -> Result<(), Halt> {
+        self.fault = Some(fault);
+        Ok(self.switch_on(sandbox, 0)?)
+    }
+
+    /// The fault on the members from `from` on, the workload aside: it drives the repeat, and the
+    /// fault is on what the app does.
+    fn switch_on(&self, sandbox: &impl Sandbox, from: usize) -> Result<(), SandboxError> {
+        let Some(fault) = &self.fault else {
+            return Ok(());
+        };
+        let members = self.members[from..].iter();
+        let ids: Vec<SandboxId> = members
+            .filter(|member| member.kind != ServiceKind::Workload)
+            .map(|member| member.id.clone())
+            .collect();
+        if ids.is_empty() {
+            return Ok(());
+        }
+        sandbox.fault(&ids, fault)
+    }
+
+    pub(crate) fn workload(&self) -> Option<usize> {
+        let mut members = self.members.iter();
+        members.position(|member| member.kind == ServiceKind::Workload)
     }
 
     pub(crate) fn find(&self, service: &str, replica: u32) -> Option<usize> {
@@ -176,11 +212,7 @@ impl Fleet {
         deadline: Instant,
         cancel: &Cancel,
     ) -> Result<(Option<i32>, Instant), Halt> {
-        let index = self
-            .members
-            .iter()
-            .position(|member| member.kind == ServiceKind::Workload)
-            .expect("a repeat has started its workload");
+        let index = self.workload().expect("a repeat has started its workload");
         loop {
             if let Some(exit) = self.members[index].exit {
                 return Ok(exit);
@@ -192,7 +224,8 @@ impl Fleet {
     }
 
     /// The first exit among the running members and `job`, or the deadline. A setup service
-    /// that exits 0 and the workload are noted for the caller; any other exit halts the phase.
+    /// that exits 0, the workload and a long-running service under a fault are noted for the
+    /// caller; any other exit halts the phase.
     fn watch(
         &mut self,
         sandbox: &impl Sandbox,
@@ -206,10 +239,7 @@ impl Fleet {
             if now >= deadline {
                 return Ok(Woke::Deadline);
             }
-            let running = self.members.iter().filter(|member| member.exit.is_none());
-            let mut what: Vec<Waitable> = running
-                .map(|member| Waitable::Sandbox(member.id.clone()))
-                .collect();
+            let mut what = self.running();
             what.extend(job.map(|job| Waitable::Exec(job.clone())));
             let Some(exited) = sandbox.wait(&what, deadline.min(now + CHUNK))? else {
                 continue;
@@ -217,19 +247,63 @@ impl Fleet {
             let Waitable::Sandbox(id) = &exited.what else {
                 return Ok(Woke::Job(exited.code));
             };
-            let index = self
-                .members
-                .iter()
-                .position(|member| member.id == *id)
-                .expect("`wait` names a member it was given");
-            let member = &mut self.members[index];
-            member.exit = Some((exited.code, exited.at));
-            return match member.kind {
+            let index = self.note(id, &exited);
+            return match self.members[index].kind {
                 ServiceKind::Setup if exited.code == Some(0) => Ok(Woke::Exit),
                 ServiceKind::Workload => Ok(Woke::Exit),
+                ServiceKind::LongRunning if self.fault.is_some() => Ok(Woke::Exit),
                 _ => Err(Halt::Down(index)),
             };
         }
+    }
+
+    /// Once a wait reached its goal: what ended by now, as `ended` notes it, halts the phase as in
+    /// `watch` when it is a long-running service not under a fault.
+    pub(crate) fn settled(&mut self, sandbox: &impl Sandbox) -> Result<(), Halt> {
+        self.ended(sandbox)?;
+        let mut members = self.members.iter();
+        let down = members
+            .position(|member| member.kind == ServiceKind::LongRunning && member.exit.is_some());
+        match down {
+            Some(index) if self.fault.is_none() => Err(Halt::Down(index)),
+            _ => Ok(()),
+        }
+    }
+
+    /// Notes each member that ended by now, without waiting: a `wait` gives one exit, so a
+    /// service that ended with the workload or just after it has none yet.
+    pub(crate) fn ended(&mut self, sandbox: &impl Sandbox) -> Result<(), SandboxError> {
+        loop {
+            let what = self.running();
+            if what.is_empty() {
+                return Ok(());
+            }
+            let Some(exited) = sandbox.wait(&what, sandbox.now())? else {
+                return Ok(());
+            };
+            // `what` holds only members.
+            let Waitable::Sandbox(id) = &exited.what else {
+                return Ok(());
+            };
+            self.note(id, &exited);
+        }
+    }
+
+    fn running(&self) -> Vec<Waitable> {
+        let running = self.members.iter().filter(|member| member.exit.is_none());
+        running
+            .map(|member| Waitable::Sandbox(member.id.clone()))
+            .collect()
+    }
+
+    fn note(&mut self, id: &SandboxId, exited: &Exited) -> usize {
+        let index = self
+            .members
+            .iter()
+            .position(|member| member.id == *id)
+            .expect("`wait` names a member it was given");
+        self.members[index].exit = Some((exited.code, exited.at));
+        index
     }
 }
 

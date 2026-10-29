@@ -9,14 +9,14 @@ use std::net::{Ipv4Addr, TcpListener};
 use std::ops::Range;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant, SystemTime};
 
 use ::guest::{Command, Entry, FaultSwitch, FaultSwitchMode, Route, Routes, UnexposedName};
 use ::microsandbox as msb;
 use camino::{Utf8Path, Utf8PathBuf};
 use msb::sandbox::FsSetAttrs;
 
-use super::{GUEST_CALL, Live, backend, guest, process, within};
+use super::{GUEST_CALL, Live, POLL, backend, guest, process, within};
 use crate::{Exposed, Fault, FaultMode, Launch, Outbound, SandboxError};
 
 /// Root writes it: `net` its counters, the adapter its fault switch, root's `tar` of `copy_out`.
@@ -31,6 +31,8 @@ const HOSTS_END: &str = "# stop-slop-stand end";
 const MAX_NAMES: usize = 253;
 /// `net` reads the switch every 100 ms and says nothing back.
 const FAULT_SETTLE: Duration = Duration::from_millis(200);
+/// Two rounds of `net`'s counters writer, as `FAULT_SETTLE` is of its switch reader.
+const COUNTERS_SETTLE: Duration = Duration::from_millis(200);
 /// Below the ephemeral ports of Linux (from 32768), Windows and macOS (from 49152), from which the
 /// runtime takes the source port of each connection to a published port: a host port from there
 /// could be held by the stand's own traffic when a VM publishes it.
@@ -44,6 +46,42 @@ pub(super) fn net_dir(folder: &Utf8Path) -> Utf8PathBuf {
 
 pub(super) fn counters(folder: &Utf8Path) -> Utf8PathBuf {
     net_dir(folder).join(COUNTERS)
+}
+
+/// The moment a `metrics` call started, and the counters file as it stood then.
+pub(super) struct Called {
+    counters: Utf8PathBuf,
+    at: Instant,
+    written: Option<SystemTime>,
+}
+
+impl Called {
+    /// The moment before the file's time: a write in between counts as one before the call.
+    pub(super) fn now(folder: &Utf8Path) -> Called {
+        let at = Instant::now();
+        let counters = counters(folder);
+        let written = written(&counters);
+        Called {
+            counters,
+            at,
+            written,
+        }
+    }
+
+    /// Until `net` replaced the file after the call started, so every change before the call is
+    /// in it. `net` writes only on a change, at most every 100 ms: without one no write comes, and
+    /// after `COUNTERS_SETTLE` none was pending.
+    pub(super) async fn settled(&self) {
+        while written(&self.counters) == self.written && self.at.elapsed() < COUNTERS_SETTLE {
+            tokio::time::sleep(POLL).await;
+        }
+    }
+}
+
+/// When the file was last replaced, by the host's clock.
+fn written(counters: &Utf8Path) -> Option<SystemTime> {
+    let metadata = std::fs::metadata(counters).ok()?;
+    metadata.modified().ok()
 }
 
 /// One host port per (service, replica, port) for the adapter's life, so a VM created before its

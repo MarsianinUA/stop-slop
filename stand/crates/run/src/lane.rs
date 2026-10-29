@@ -1,9 +1,9 @@
 //! The lane of each version (architecture plan, row 10) and the steps of one repeat. Each version
 //! is set up or taken from its cache entry, "before" first, then the measured repeats go in turns,
-//! "before" first, then the coverage repeat of the head. A failure of "before" stops its lane
-//! only; a failure of the head ends the run. Only one phase has VMs at a time, so no two live VMs
-//! share a service and a replica: the adapter keeps one host port per (service, replica, port)
-//! (plan T-11, decision 7).
+//! "before" first, then the repeats outside the stats that the set of extras names (row 89). A
+//! failure of "before" stops its lane only; a failure of the head ends the run. Only one phase has
+//! VMs at a time, so no two live VMs share a service and a replica: the adapter keeps one host
+//! port per (service, replica, port) (plan T-11, decision 7).
 
 use std::collections::btree_map::Entry;
 use std::collections::{BTreeMap, BTreeSet};
@@ -13,19 +13,23 @@ use std::time::{Duration, Instant};
 use camino::{Utf8Path, Utf8PathBuf};
 use profile::{Called, Coverage, ProfileMode};
 use report::{
-    BeforeOutcome, Cause, CoverageOutcome, Failure, InstanceOutput, Phase, ProbeRan, ProbeRule,
-    Raw, RepeatOutput, Role, Setup, SetupSide,
+    BeforeOutcome, Cause, Extra, Failure, InstanceOutput, Phase, ProbeRan, ProbeRule, Raw,
+    RepeatOutput, Role, Setup, SetupSide,
 };
-use sandbox::{Sandbox, SnapshotId};
+use sandbox::{Fault, Sandbox, SnapshotId};
 use spec::{Condition, ServiceKind, ServiceName, Stand, Tap};
 
-use crate::drain;
 use crate::keep::{self, Kept};
 use crate::launch::{self, Frame, Seeds};
 use crate::ready::{Fleet, Halt};
 use crate::{
-    Cancel, Failed, RunError, SetupCache, Side, StandFault, Version, Versions, cache, probes, span,
+    Cancel, Failed, RunError, SetupCache, Side, StandFault, Version, Versions, cache, drain, fault,
+    probes, span,
 };
+
+mod outside;
+
+use outside::{Outside, Passed, outside};
 
 /// The run stops in `Phase`: a breakage of the stand, or `Cancel`.
 enum Stop {
@@ -61,6 +65,8 @@ enum Kind {
     Measured(u32),
     /// The coverage repeat of the head, out of every measure (architecture plan, row 38).
     Coverage,
+    /// A repeat under the fault of the stand (row 73), out of every measure.
+    Fault(u32),
 }
 
 struct Repeated {
@@ -68,11 +74,14 @@ struct Repeated {
     failure: Option<Failure>,
     /// By profiled service, its replicas as one: only the coverage repeat that passed reads them.
     calls: BTreeMap<String, Coverage>,
+    /// Of a fault repeat.
+    ends: Option<fault::Ends>,
 }
 
 struct Ctx<'r, S> {
     stand: &'r Stand,
     sandbox: &'r S,
+    extras: &'r BTreeSet<Extra>,
     run_dir: &'r Utf8Path,
     cancel: &'r Cancel,
     span: Duration,
@@ -84,15 +93,19 @@ struct Ctx<'r, S> {
     kept: Vec<Kept>,
 }
 
+/// `Raw`, `Extra` and their types are `report`'s (plan, rows 85, 89); `run` fills them and keeps
+/// no copy. An extra the `Stand` does not ask for does not run even when `extras` lists it.
 pub fn run(
     stand: &Stand,
     sandbox: &impl Sandbox,
     versions: &Versions,
+    extras: &BTreeSet<Extra>,
     run_dir: &Utf8Path,
     cancel: &Cancel,
 ) -> Result<Raw, RunError> {
     // The preload goes before the first setup, in its phase.
-    let mut ctx = Ctx::new(stand, sandbox, run_dir, cancel).map_err(|fault| RunError::Stand {
+    let ctx = Ctx::new(stand, sandbox, extras, run_dir, cancel);
+    let mut ctx = ctx.map_err(|fault| RunError::Stand {
         phase: Phase::Setup,
         fault,
     })?;
@@ -130,11 +143,19 @@ fn lanes<S: Sandbox>(ctx: &mut Ctx<S>, versions: &Versions) -> Result<Raw, RunEr
         }
         measure(ctx, Side::Head, &versions.head, &mut head, repeat)?;
     }
-    let coverage = match &head {
-        Lane::Ready { seeds, .. } if launch::any_profiled(ctx.stand) => {
-            Some(coverage(ctx, &versions.head, seeds)?)
+    let outside = match &head {
+        Lane::Ready { seeds, .. } => {
+            let head = Passed {
+                version: &versions.head,
+                seeds,
+            };
+            let before = match (&versions.before, &before) {
+                (Some(version), Some(Lane::Ready { seeds, .. })) => Some(Passed { version, seeds }),
+                _ => None,
+            };
+            outside(ctx, head, before)?
         }
-        _ => None,
+        Lane::Failed { .. } => Outside::default(),
     };
     let (outputs, failure) = match head {
         Lane::Ready { outputs, .. } => (outputs, None),
@@ -146,7 +167,7 @@ fn lanes<S: Sandbox>(ctx: &mut Ctx<S>, versions: &Versions) -> Result<Raw, RunEr
         outputs,
         before_setup,
         before,
-        coverage,
+        outside,
     );
     match failure {
         None => Ok(raw),
@@ -165,7 +186,7 @@ fn raw(
     head: Vec<RepeatOutput>,
     before_setup: Option<SetupSide>,
     before: Option<Lane>,
-    coverage: Option<CoverageOutcome>,
+    outside: Outside,
 ) -> Raw {
     let harness: BTreeSet<String> = stand
         .services
@@ -203,7 +224,9 @@ fn raw(
             Lane::Ready { outputs, .. } => BeforeOutcome::Passed(outputs),
             Lane::Failed { failure, .. } => BeforeOutcome::Failed(failure),
         }),
-        coverage,
+        coverage: outside.coverage,
+        fault: outside.fault,
+        second_pass: outside.second_pass,
     }
 }
 
@@ -284,14 +307,7 @@ fn build<S: Sandbox>(
             Stop::Fault(Phase::Setup, fault),
         )
     })?;
-    let failure = Failure {
-        phase: Phase::Setup,
-        service,
-        repeat: None,
-        cause,
-        logs: Some(dir.to_owned()),
-        probes: probes.iter().map(|probe| probe.out.clone()).collect(),
-    };
+    let failure = failure((service, cause), Phase::Setup, None, dir, &probes);
     Ok((side(probes, BTreeMap::new()), Err(failure)))
 }
 
@@ -307,7 +323,7 @@ fn start_setup<S: Sandbox>(
     deadline: Instant,
 ) -> Result<(), Halt> {
     let stand = ctx.stand;
-    let in_setup = launch::in_setup(stand);
+    let in_setup = stand.in_setup();
     for level in launch::levels(stand, |name, _| in_setup.contains(name)) {
         for name in &level {
             wait_for(ctx, fleet, name, deadline)?;
@@ -315,6 +331,7 @@ fn start_setup<S: Sandbox>(
         version_snapshot(ctx, fleet, seeds)?;
         let frame = Frame {
             out,
+            second: None,
             tar: &version.tar,
             seeds,
             mode: None,
@@ -328,6 +345,8 @@ fn start_setup<S: Sandbox>(
             fleet.completed(ctx.sandbox, index, deadline, ctx.cancel)?;
         }
     }
+    // A database that ended with the last setup service would go into the snapshots crashed.
+    fleet.settled(ctx.sandbox)?;
     version_snapshot(ctx, fleet, seeds)
 }
 
@@ -447,26 +466,11 @@ fn measure<S: Sandbox>(
     Ok(())
 }
 
-/// After the measured repeats of a head that passed them: its failure is a fact for the report,
-/// not a failure of the run.
-fn coverage<S: Sandbox>(
-    ctx: &mut Ctx<S>,
-    version: &Version,
-    seeds: &Seeds,
-) -> Result<CoverageOutcome, Stop> {
-    let repeated = run_repeat(ctx, Side::Head, version, seeds, Kind::Coverage)?;
-    Ok(match repeated.failure {
-        Some(failure) => CoverageOutcome::Failed(failure),
-        None => CoverageOutcome::Read(repeated.calls),
-    })
-}
-
-/// One repeat (architecture plan, «Тома, снимки и деревья», steps 3 and 4): the services by
-/// levels, the workload to its exit, then the cut, the probes of a measured repeat
-/// (`after-workload`, `on-failure` when it failed), the clean stop, the end-of-run snapshots of
-/// the last or a failed measured repeat, and the drain, then the profiles on the host. Its
-/// deadline runs from its start, readiness included. The phase is `Ready` until the `create`
-/// with the workload returned, `Workload` from then on.
+/// One repeat (architecture plan, «Тома, снимки и деревья», steps 3 to 5): the services by
+/// levels, the fault of a fault repeat once what the workload waits for is ready, the workload to
+/// its exit, then the cut, the probes of a measured repeat (`after-workload`, `on-failure` when it
+/// failed), the clean stop, the end-of-run snapshots of the last or a failed measured repeat, and
+/// the drain, then the profiles on the host. Its deadline runs from its start, readiness included.
 fn run_repeat<S: Sandbox>(
     ctx: &mut Ctx<S>,
     side: Side,
@@ -478,18 +482,27 @@ fn run_repeat<S: Sandbox>(
         return Err(Stop::Cancelled(Phase::Ready));
     }
     let stand = ctx.stand;
-    let (dir, timeout, mode, repeat) = match kind {
+    let (dir, timeout, mode, repeat, switch) = match kind {
         Kind::Measured(repeat) => (
             ctx.run_dir.join(format!("repeat-{repeat}-{side}")),
             stand.timeout.get(),
-            ProfileMode::Cpu,
+            Some(ProfileMode::Cpu),
             Some(repeat),
+            None,
         ),
         Kind::Coverage => (
             ctx.run_dir.join("coverage"),
             stand.timeout.get() * 3 / 2,
-            ProfileMode::Coverage,
+            Some(ProfileMode::Coverage),
             None,
+            None,
+        ),
+        Kind::Fault(repeat) => (
+            ctx.run_dir.join(format!("fault-{repeat}-{side}")),
+            stand.timeout.get(),
+            None,
+            Some(repeat),
+            stand.fault.as_ref().map(fault::switch),
         ),
     };
     let out = dir.join("out");
@@ -500,42 +513,36 @@ fn run_repeat<S: Sandbox>(
     let deadline = ctx.sandbox.now() + timeout;
     let frame = Frame {
         out: &out,
+        second: None,
         tar: &version.tar,
         seeds,
-        mode: Some(mode),
+        mode,
         preload: &ctx.preload,
         span: ctx.span,
     };
-    let mut started = None;
-    let ran = start_repeat(ctx, &mut fleet, &frame, deadline, &mut started)
-        .and_then(|()| fleet.finished(ctx.sandbox, deadline, ctx.cancel));
-    let phase = match started {
-        Some(_) => Phase::Workload,
-        None => Phase::Ready,
-    };
-    let (ended, failing) = match ran {
-        Ok((Some(0), at)) => (at, None),
-        Ok((code, at)) => {
-            let workload = Some(stand.workload.as_str().to_owned());
-            (at, Some((workload, code.map_or(Cause::Died, Cause::Exit))))
-        }
-        Err(halt) => {
-            let fell = fell(&fleet, halt, Cause::Timeout, phase)
-                .map_err(|stop| torn(ctx.sandbox, &mut fleet, &dir, stop))?;
-            (ctx.sandbox.now(), Some(fell))
-        }
-    };
-    let wall = started.map_or(Duration::ZERO, |started| {
-        ended.saturating_duration_since(started)
-    });
+    let Ran {
+        phase,
+        wall,
+        failing,
+    } = up_to_exit(ctx, &mut fleet, &frame, switch, deadline, &dir)?;
     let tap = match (kind, &failing) {
-        (Kind::Coverage, _) => None,
+        (Kind::Coverage | Kind::Fault(_), _) => None,
         (Kind::Measured(_), Some(_)) => Some(Tap::OnFailure),
         (Kind::Measured(_), None) => Some(Tap::AfterWorkload),
     };
     let keeps = match kind {
         Kind::Measured(repeat) if failing.is_some() || repeat == stand.repeat.get() => Some(side),
         _ => None,
+    };
+    let ends = match kind {
+        Kind::Fault(_) => {
+            let ends = fault::ends(ctx.sandbox, &mut fleet).map_err(|error| {
+                let fault = StandFault::Sandbox(error);
+                torn(ctx.sandbox, &mut fleet, &dir, Stop::Fault(phase, fault))
+            });
+            Some(ends?)
+        }
+        Kind::Measured(_) | Kind::Coverage => None,
     };
     let mut ended = end_phase(ctx, &mut fleet, tap, keeps, &dir, &out)
         .map_err(|fault| torn(ctx.sandbox, &mut fleet, &dir, Stop::Fault(phase, fault)))?;
@@ -544,14 +551,7 @@ fn run_repeat<S: Sandbox>(
     let Ended {
         instances, probes, ..
     } = ended;
-    let failure = failing.map(|(service, cause)| Failure {
-        phase,
-        service,
-        repeat,
-        cause,
-        logs: Some(dir.clone()),
-        probes: probes.iter().map(|probe| probe.out.clone()).collect(),
-    });
+    let failure = failing.map(|failing| failure(failing, phase, repeat, &dir, &probes));
     let output = RepeatOutput {
         // 0 only in the coverage repeat, whose output never leaves `run`.
         repeat: repeat.unwrap_or_default(),
@@ -564,14 +564,53 @@ fn run_repeat<S: Sandbox>(
         output,
         failure,
         calls,
+        ends,
     })
 }
 
-/// `started`: when the `create` with the workload returned, the start of `wall`.
+/// How a repeat ran up to the exit of its (first) workload, or to what stopped it first. The phase
+/// is `Ready` until the `create` with the workload returned, `Workload` from then on; `wall` runs
+/// from that return to the workload's exit.
+struct Ran {
+    phase: Phase,
+    wall: Duration,
+    failing: Option<Failing>,
+}
+
+fn up_to_exit<S: Sandbox>(
+    ctx: &Ctx<S>,
+    fleet: &mut Fleet,
+    frame: &Frame,
+    fault: Option<Fault>,
+    deadline: Instant,
+    dir: &Utf8Path,
+) -> Result<Ran, Stop> {
+    let mut started = None;
+    let ran = start_repeat(ctx, fleet, frame, fault, deadline, &mut started)
+        .and_then(|()| fleet.finished(ctx.sandbox, deadline, ctx.cancel));
+    // The workload is a member once its `create` returned, also when the fault after it failed.
+    let phase = match fleet.workload() {
+        Some(_) => Phase::Workload,
+        None => Phase::Ready,
+    };
+    let (ended, failing) = workload_outcome(ctx.sandbox, ctx.stand, fleet, ran, phase, dir)?;
+    let wall = started.map_or(Duration::ZERO, |started| {
+        ended.saturating_duration_since(started)
+    });
+    Ok(Ran {
+        phase,
+        wall,
+        failing,
+    })
+}
+
+/// `started`: when the `create` with the workload returned. `fault` goes on once what the
+/// workload waits for is ready, before its batch.
 fn start_repeat<S: Sandbox>(
     ctx: &Ctx<S>,
     fleet: &mut Fleet,
     frame: &Frame,
+    mut fault: Option<Fault>,
     deadline: Instant,
     started: &mut Option<Instant>,
 ) -> Result<(), Halt> {
@@ -580,12 +619,66 @@ fn start_repeat<S: Sandbox>(
         for name in &level {
             wait_for(ctx, fleet, name, deadline)?;
         }
+        let workload = level.contains(&&stand.workload);
+        if workload && let Some(fault) = fault.take() {
+            fleet.fault_on(ctx.sandbox, fault)?;
+        }
         let created = fleet.start(ctx.sandbox, launch::starts(stand, &level, frame))?;
-        if level.contains(&&stand.workload) {
+        if workload {
             *started = Some(created);
         }
     }
     Ok(())
+}
+
+/// The service and the cause of a failed repeat.
+type Failing = (Option<String>, Cause);
+
+/// When the wait for the workload ended, and what failed if anything did; `Err` when the run
+/// itself stops instead, its members torn down.
+fn workload_outcome(
+    sandbox: &impl Sandbox,
+    stand: &Stand,
+    fleet: &mut Fleet,
+    ran: Result<(Option<i32>, Instant), Halt>,
+    phase: Phase,
+    dir: &Utf8Path,
+) -> Result<(Instant, Option<Failing>), Stop> {
+    // A long-running service that ended with the workload ends the repeat it would have measured;
+    // after another exit of the workload, that exit is the cause.
+    let ran = match ran {
+        Ok((Some(0), at)) => fleet.settled(sandbox).map(|()| (Some(0), at)),
+        ran => ran,
+    };
+    Ok(match ran {
+        Ok((Some(0), at)) => (at, None),
+        Ok((code, at)) => {
+            let workload = Some(stand.workload.as_str().to_owned());
+            (at, Some((workload, code.map_or(Cause::Died, Cause::Exit))))
+        }
+        Err(halt) => {
+            let fell = fell(fleet, halt, Cause::Timeout, phase)
+                .map_err(|stop| torn(sandbox, fleet, dir, stop))?;
+            (sandbox.now(), Some(fell))
+        }
+    })
+}
+
+fn failure(
+    (service, cause): Failing,
+    phase: Phase,
+    repeat: Option<u32>,
+    dir: &Utf8Path,
+    probes: &[ProbeRan],
+) -> Failure {
+    Failure {
+        phase,
+        service,
+        repeat,
+        cause,
+        logs: Some(dir.to_owned()),
+        probes: probes.iter().map(|probe| probe.out.clone()).collect(),
+    }
 }
 
 struct Ended {
@@ -657,7 +750,11 @@ fn profiles(
         let instance = &mut ended.instances[index];
         let (service, replica) = (instance.service.as_str(), instance.replica);
         match kind {
-            Kind::Measured(_) => instance.profile = Some(drain::samples(dir, service, replica)?),
+            Kind::Measured(_) => {
+                instance.profile = Some(drain::samples(dir, service, replica)?);
+            }
+            // No profiler runs in a fault repeat.
+            Kind::Fault(_) => {}
             Kind::Coverage if failed => {}
             Kind::Coverage => {
                 let part = drain::coverage(dir, service, replica)?;
@@ -691,12 +788,7 @@ fn merged(parts: Vec<Coverage>) -> Coverage {
 }
 
 /// What a halt says about the app; `Err` when the run itself stops instead.
-fn fell(
-    fleet: &Fleet,
-    halt: Halt,
-    timeout: Cause,
-    phase: Phase,
-) -> Result<(Option<String>, Cause), Stop> {
+fn fell(fleet: &Fleet, halt: Halt, timeout: Cause, phase: Phase) -> Result<Failing, Stop> {
     let service = |index: usize| Some(fleet.members[index].launch.service.clone());
     match halt {
         Halt::Down(index) => {
@@ -725,6 +817,7 @@ impl<'r, S: Sandbox> Ctx<'r, S> {
     fn new(
         stand: &'r Stand,
         sandbox: &'r S,
+        extras: &'r BTreeSet<Extra>,
         run_dir: &'r Utf8Path,
         cancel: &'r Cancel,
     ) -> Result<Ctx<'r, S>, StandFault> {
@@ -737,6 +830,7 @@ impl<'r, S: Sandbox> Ctx<'r, S> {
         Ok(Ctx {
             stand,
             sandbox,
+            extras,
             run_dir,
             cancel,
             span: span(stand),

@@ -635,10 +635,12 @@ impl Inner {
 
 impl Live {
     async fn metrics(&self) -> Result<Metrics, SandboxError> {
+        let called = network::Called::now(&self.folder);
         let now = within(GUEST_CALL, "read the metrics", self.vm.metrics())
             .await?
             .map_err(backend)?;
         let peak = self.peak.fetch_max(now.memory_bytes, Ordering::Relaxed);
+        called.settled().await;
         let (ports, unexposed) = guest::traffic(&network::counters(&self.folder))?;
         Ok(Metrics {
             cpu: Duration::from_nanos(now.vcpu_time_ns),

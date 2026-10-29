@@ -4,6 +4,7 @@
 mod raw;
 
 pub use raw::{
-    BeforeOutcome, Cause, CoverageOutcome, Failure, InstanceOutput, Phase, ProbeRan, ProbeRule,
-    ProfileOutcome, Raw, RepeatOutput, Role, Setup, SetupSide,
+    BeforeOutcome, Cause, CoverageOutcome, Extra, Failure, FaultOutcome, FaultRepeat,
+    InstanceOutput, Pass, PassPair, Phase, ProbeRan, ProbeRule, ProfileOutcome, Raw, RepeatOutput,
+    Role, SecondPassOutcome, Setup, SetupSide,
 };

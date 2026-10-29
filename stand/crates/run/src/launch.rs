@@ -2,7 +2,7 @@
 //! guest paths in setup, in every repeat and in `inspect`, only the host folders differ: a restore
 //! needs every bind path the snapshot's VM had (plan, row 87).
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::time::Duration;
 
 use camino::Utf8Path;
@@ -13,6 +13,7 @@ use spec::{Profiler, Service, ServiceKind, ServiceName, Stand};
 use crate::ready::Start;
 
 pub(crate) const OUT: &str = "/stand/out";
+const OUT_2: &str = "/stand/out-2";
 const PRELOAD: &str = "/stand/preload";
 pub(crate) const PROFILE: &str = "/stand/profile";
 
@@ -35,30 +36,18 @@ impl Seeds {
 pub(crate) struct Frame<'a> {
     /// The host folder of `/stand/out` for the workload and every service with a probe.
     pub(crate) out: &'a Utf8Path,
+    /// In the second pass, the folder of its second workload: a service with a probe binds it too,
+    /// on `/stand/out-2`, so its probes after each pass write beside that pass's workload. A bind
+    /// of its own, not a folder in `out`: there the guest could swap it for a link, and the second
+    /// `create` would bind wherever the link points.
+    pub(crate) second: Option<&'a Utf8Path>,
     pub(crate) tar: &'a Utf8Path,
     pub(crate) seeds: &'a Seeds,
-    /// `None` in setup: only the repeats are measured.
+    /// `None` in setup, the fault repeats and the second pass: no measure reads a profile of them.
     pub(crate) mode: Option<ProfileMode>,
     /// The host folder of `/stand/preload`.
     pub(crate) preload: &'a Utf8Path,
     pub(crate) span: Duration,
-}
-
-/// The services of setup: the setup services and all they wait for, directly or through others.
-pub(crate) fn in_setup(stand: &Stand) -> BTreeSet<&ServiceName> {
-    let mut found = BTreeSet::new();
-    let mut next: Vec<&ServiceName> = stand
-        .services
-        .iter()
-        .filter(|(_, service)| service.kind == ServiceKind::Setup)
-        .map(|(name, _)| name)
-        .collect();
-    while let Some(name) = next.pop() {
-        if found.insert(name) {
-            next.extend(stand.services[name].depends_on.keys());
-        }
-    }
-    found
 }
 
 /// The levels of `stand` with only the services `keep` takes; empty levels left out.
@@ -138,6 +127,13 @@ pub(crate) fn of(stand: &Stand, name: &ServiceName, replica: u32, frame: &Frame)
             read_only: false,
         });
     }
+    if let Some(second) = frame.second.filter(|_| probed(stand, name)) {
+        mounts.push(Mount::Bind {
+            host: second.to_owned(),
+            guest: OUT_2.to_owned(),
+            read_only: false,
+        });
+    }
     if let (Some(mode), Some(Profiler::Node)) = (frame.mode, profiler(service)) {
         mounts.push(Mount::Bind {
             host: frame.preload.to_owned(),
@@ -184,11 +180,7 @@ pub(crate) fn of(stand: &Stand, name: &ServiceName, replica: u32, frame: &Frame)
 /// when there is no prepare service. A service with a volume starts from its setup snapshot once
 /// setup took one.
 fn seed(name: &ServiceName, service: &Service, frame: &Frame) -> Option<Seed> {
-    if service
-        .mounts
-        .iter()
-        .any(|mount| matches!(mount, spec::Mount::Tree))
-    {
+    if service.on_tree() {
         let fresh = || Seed::Tree {
             tar: frame.tar.to_owned(),
             at: spec::TREE.to_owned(),
