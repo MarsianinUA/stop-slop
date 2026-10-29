@@ -36,7 +36,7 @@ pub(crate) fn expect(
     context: &Context<'_>,
 ) -> ExpectJson {
     let shift = Shift {
-        by: shift(base.median, head.median),
+        by: stats::shift(base.median, head.median),
         shows: shows(verdict),
         threshold: stats::threshold(base, head),
     };
@@ -126,7 +126,7 @@ pub(crate) fn accept(measure: &Measure, max_tolerance: u16) -> Option<Bound> {
     if !shows(before.verdict) {
         return Some(Bound::None);
     }
-    let by = shift(before.median?, measure.median);
+    let by = stats::shift(before.median?, measure.median);
     // Less a hair: +55% is 11.000000000000002 times 5% as a float.
     let percent = ((by.abs() * 100.0 / 5.0) - 1e-9).ceil() * 5.0;
     if percent > f64::from(max_tolerance) {
@@ -186,24 +186,11 @@ fn tree(entry: &Declared) -> Option<&str> {
     entry.post_hoc.as_ref().map(|post| post.head_tree.as_str())
 }
 
-fn shows(verdict: Verdict) -> bool {
+pub(crate) fn shows(verdict: Verdict) -> bool {
     matches!(
         verdict,
         Verdict::Improved | Verdict::Regressed | Verdict::Changed
     )
-}
-
-/// From a median of 0 every rise is infinite, as every rise shows there.
-fn shift(base: f64, head: f64) -> f64 {
-    if base == 0.0 {
-        if head == 0.0 {
-            0.0
-        } else {
-            f64::INFINITY.copysign(head)
-        }
-    } else {
-        (head - base) / base.abs()
-    }
 }
 
 fn fraction(percent: u16) -> f64 {

@@ -383,7 +383,7 @@ pub enum PassState {
     Changed,
 }
 
-/// The open connections to `target` after each pass, added up over the instances.
+/// The open connections to `target` after each pass, added up over the long-running services.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PassOpen {
     pub target: String,

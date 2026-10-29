@@ -11,7 +11,7 @@ use crate::next::{Next, Topic};
 use crate::raw::{Failure, Phase, Raw};
 use crate::schema::{
     Behaviour, Compared, Grade, Line, LineFault, LineFile, LineMeasure, LinePass, Measure,
-    PassFile, PassState, REPORT, Report, Verdict, diff_path, pass_path,
+    PassFile, PassState, REPORT, Report, diff_path, pass_path,
 };
 use crate::{Before, Side};
 
@@ -20,13 +20,12 @@ const SAMPLE: usize = 3;
 
 impl Report {
     pub fn line(&self, dir: &Utf8Path) -> Line {
-        let shown: Vec<&Measure> = self
-            .measures
+        let (shown, quiet): (Vec<&Measure>, Vec<&Measure>) =
+            self.measures.iter().partition(|measure| exception(measure));
+        let unmeasurable = quiet
             .iter()
-            .filter(|measure| exception(measure))
-            .collect();
-        let quiet = self.measures.iter().filter(|measure| !exception(measure));
-        let unmeasurable = quiet.filter(|measure| graded(measure) == Some(Grade::Unmeasurable));
+            .filter(|measure| graded(measure) == Some(Grade::Unmeasurable))
+            .count();
         let next = self.next(&shown);
         let measures: Vec<LineMeasure> = shown.into_iter().map(line_measure).collect();
         let named = named(&self.flags);
@@ -71,7 +70,7 @@ impl Report {
             needs: self.needs.clone(),
             failure: None,
             quiet: u32::try_from(all - shown).unwrap_or(u32::MAX),
-            unmeasurable: u32::try_from(unmeasurable.count()).unwrap_or(u32::MAX),
+            unmeasurable: u32::try_from(unmeasurable).unwrap_or(u32::MAX),
             next,
         }
     }
@@ -139,17 +138,11 @@ fn on_failure(flag: &Flag, failure: &Failure) -> bool {
             if side == Side::Head.as_str() && *repeat == failure.repeat)
 }
 
-/// Optional Assumptions, «Исключение строки»: a grade other than `met`, but the `unmeasurable` of
-/// a measure without an entry or of new code, which stays quiet; `change: unknown`; `postHoc` and
-/// `stale`, always. Without `--before` a shift against the previous run; with a failed "before"
-/// nothing was graded.
+/// Optional Assumptions, «Исключение строки». An `unmeasurable` stays quiet without an entry (the
+/// implicit `none`) and for new code; with a failed "before" nothing was graded.
 fn exception(measure: &Measure) -> bool {
     let Some(expect) = &measure.expect else {
-        let moved = matches!(
-            measure.previous.verdict,
-            Verdict::Improved | Verdict::Regressed | Verdict::Changed
-        );
-        return measure.before.is_none() && moved;
+        return measure.before.is_none() && grade::shows(measure.previous.verdict);
     };
     expect.post_hoc
         || expect.stale

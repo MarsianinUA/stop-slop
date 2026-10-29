@@ -10,6 +10,8 @@ use profile::{Coverage, Samples};
 use sandbox::{ExecOutcome, Metrics, PortStats, Stopped};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
+use crate::Side;
+
 #[derive(Debug)]
 pub struct Raw {
     /// From `Stand`: what the run ran.
@@ -154,6 +156,16 @@ pub struct SecondPassOutcome {
     pub head: PassPair,
     /// `None` without `Versions.before`, or when "before" failed.
     pub before: Option<PassPair>,
+}
+
+impl SecondPassOutcome {
+    /// The head first, as `open` of the report lists them.
+    pub(crate) fn sides(&self) -> [(Side, Option<&PassPair>); 2] {
+        [
+            (Side::Head, Some(&self.head)),
+            (Side::Before, self.before.as_ref()),
+        ]
+    }
 }
 
 #[derive(Debug)]

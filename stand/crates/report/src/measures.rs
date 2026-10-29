@@ -150,6 +150,10 @@ pub(crate) fn of(
         let setup = matches!(key, Key::Volume(_));
         let own_before = own_before.as_deref();
         let attempts = Attempts::of(&name, setup, &own_head, own_before, context);
+        // Without one profile of the head there is no median to compare, not a 0.
+        if key.profiled() && attempts.head.is_empty() {
+            continue;
+        }
         if key == Key::Stand(Metric::Wall) {
             counts = Some(attempts.counts());
         }
@@ -293,12 +297,15 @@ fn values(
 }
 
 /// The self time of the functions in the changed files, and of the others (plan, row 69), over
-/// the instances with a profile.
+/// the instances with a profile. A repeat where one of them lost its profile has no sample: the
+/// part it read would pass for the whole.
 fn cost(repeat: &RepeatOutput, changed: &BTreeSet<String>, values: &mut BTreeMap<Key, f64>) {
     let mut split = None;
     for instance in &repeat.instances {
-        let Some(ProfileOutcome::Read(samples)) = &instance.profile else {
-            continue;
+        let samples = match &instance.profile {
+            Some(ProfileOutcome::Read(samples)) => samples,
+            Some(ProfileOutcome::NoProfile) => return,
+            None => continue,
         };
         let (owned, collateral) = split.get_or_insert((0.0, 0.0));
         for function in &samples.functions {

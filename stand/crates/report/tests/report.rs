@@ -1873,18 +1873,10 @@ fn the_summary_opens_with_no_comparison_and_coverage_unknown() {
         "{summary}"
     );
 
-    let failed = |phase: Phase| Failure {
-        phase,
-        service: None,
-        repeat: None,
-        cause: Cause::Timeout,
-        logs: None,
-        probes: Vec::new(),
-    };
     let mut raw = raw(&folder, repeats(&folder, "head", &[100, 100, 100]), None);
     raw.setup.before = Some(setup_side(&folder, "before", &[]));
-    raw.before = Some(BeforeOutcome::Failed(failed(Phase::Setup)));
-    raw.coverage = Some(CoverageOutcome::Failed(failed(Phase::Workload)));
+    raw.before = Some(BeforeOutcome::Failed(failure_of(Phase::Setup)));
+    raw.coverage = Some(CoverageOutcome::Failed(failure_of(Phase::Workload)));
     let summary = report(&raw).summary().to_string();
     let first: Vec<&str> = summary.lines().take(3).collect();
     let opening = [
@@ -1893,7 +1885,7 @@ fn the_summary_opens_with_no_comparison_and_coverage_unknown() {
     ];
     let run = format!("run {RUN}");
     assert_eq!(first, [opening[0], opening[1], run.as_str()]);
-    let line = Line::failed(failed(Phase::Workload), Some(&raw), Vec::new());
+    let line = Line::failed(failure_of(Phase::Workload), Some(&raw), Vec::new());
     let text = line.summary().to_string();
     let opened = format!("{}\n{}\n", opening[0], opening[1]);
     assert!(text.starts_with(&opened), "{text}");
@@ -1946,13 +1938,20 @@ fn the_self_time_of_changed_files_is_the_own_cost_and_the_rest_collateral() {
         ("src/util.ts", "format", 3, 5, 50.0),
     ];
     let mut head = profiled(&folder, "head", &changed_head);
-    // A second replica adds to the repeat; a repeat without a profile has no sample.
-    let log = folder.log("api-2", "", "");
-    let mut replica = instance("api", Role::LongRunning, metrics(1000, 100 << 20), log);
-    replica.replica = 2;
-    replica.profile = Some(read(vec![sampled("src/orders.ts", "build", 10, 10.0)]));
-    head[0].instances.push(replica);
-    head[1].instances[0].profile = Some(ProfileOutcome::NoProfile);
+    // A second replica adds to the repeat; a repeat where one of them lost its profile has no
+    // sample.
+    let replica = |name: &str, profile| {
+        let log = folder.log(name, "", "");
+        let mut replica = instance("api", Role::LongRunning, metrics(1000, 100 << 20), log);
+        replica.replica = 2;
+        replica.profile = Some(profile);
+        replica
+    };
+    let read_two = read(vec![sampled("src/orders.ts", "build", 10, 10.0)]);
+    head[0].instances.push(replica("api-2", read_two));
+    head[1]
+        .instances
+        .push(replica("api-2-lost", ProfileOutcome::NoProfile));
     let raw = raw(
         &folder,
         head,
@@ -1987,9 +1986,22 @@ fn the_self_time_of_changed_files_is_the_own_cost_and_the_rest_collateral() {
     );
     let mut bare = context(&unprofiled, Previous::None, &[]);
     bare.changed = compared.changed.clone();
+    // Nor when no repeat of the head read a profile: there is nothing to compare, not a 0.
+    let mut lost = profiled(&folder, "lost", &changed_head);
+    for repeat in &mut lost {
+        repeat.instances[0].profile = Some(ProfileOutcome::NoProfile);
+    }
+    let lost = self::raw(
+        &folder,
+        lost,
+        Some(profiled(&folder, "lost-before", &changed_before)),
+    );
+    let mut unseen = context(&lost, Previous::None, &[]);
+    unseen.changed = compared.changed.clone();
     for report in [
         report_of(&plain, &explored, &[]),
         report_of(&unprofiled, &bare, &[]),
+        report_of(&lost, &unseen, &[]),
     ] {
         let names = names(&report);
         assert!(
@@ -2485,12 +2497,10 @@ fn faulted(
         ..port("api:3000", calls)
     });
     let failure = |(phase, cause)| Failure {
-        phase,
         service: Some("load".to_owned()),
         repeat: Some(repeat),
         cause,
-        logs: None,
-        probes: Vec::new(),
+        ..failure_of(phase)
     };
     let (workload, failure) = match ended {
         Ok(0) => (Some(0), None),

@@ -603,8 +603,8 @@ fn the_second_pass_runs_the_workload_twice_on_one_state() {
             assert_eq!(ran(&pass.probes), ["orders"]);
             assert_eq!(pass.probes[0].out, out.join("probe.orders.jsonl"));
             assert!(pass.probes[0].out.is_file() && out.join("orders.jsonl").is_file());
-            // After the pass, of the long-running services only: the workload is a client, so its
-            // open connections never read as a leak.
+            // After the pass, of the long-running services only: the workload's open connections
+            // to `api` stay out.
             let ports: Vec<(&str, u64)> = pass
                 .ports
                 .iter()

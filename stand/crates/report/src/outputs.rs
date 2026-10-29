@@ -97,11 +97,7 @@ pub fn read_outputs(raw: &Raw, pool: &[Utf8PathBuf]) -> Result<Outputs, ReportEr
         outputs.pool = pooled.collect();
     }
     if let Some(outcome) = &raw.second_pass {
-        let sides = [
-            (Side::Head, Some(&outcome.head)),
-            (Side::Before, outcome.before.as_ref()),
-        ];
-        for (side, pair) in sides {
+        for (side, pair) in outcome.sides() {
             let Some(PassPair::Passed { first, second }) = pair else {
                 continue;
             };
@@ -136,7 +132,8 @@ fn pass_file(dir: &Utf8Path, file: &str) -> Result<String, ReportError> {
         if index + 1 < parts.len() && !metadata.file_type().is_dir() {
             return Err(ReportError::bad(
                 &path,
-                "not a plain folder: the stand reads the results in /stand/out only through plain                  folders, never through a link",
+                "not a plain folder: the stand reads the results in /stand/out only through plain \
+                 folders, never through a link",
             ));
         }
     }

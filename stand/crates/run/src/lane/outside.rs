@@ -185,7 +185,9 @@ fn second_pass<S: Sandbox>(ctx: &mut Ctx<S>, side: Side, passed: Passed) -> Resu
             let services = instances
                 .into_iter()
                 .filter(|instance| instance.role == Role::LongRunning);
-            let ports = services.flat_map(|instance| instance.metrics.ports);
+            let ports = services
+                .flat_map(|instance| instance.metrics.ports)
+                .collect();
             PassPair::Passed {
                 first,
                 second: pass(out, probes, ports),
@@ -206,6 +208,7 @@ fn between_passes<S: Sandbox>(
 ) -> Result<Pass, StandFault> {
     let sandbox = ctx.sandbox;
     let mut ports = Vec::new();
+    // The workload's too: every VM's metrics are read before its `destroy`.
     for member in &fleet.members {
         let metrics = sandbox.metrics(&member.id).map_err(StandFault::Sandbox)?;
         if member.kind == ServiceKind::LongRunning {
@@ -222,12 +225,10 @@ fn between_passes<S: Sandbox>(
     Ok(pass(out, probes, ports))
 }
 
-/// `ports` of the long-running services at the cut after the pass, without the workload's
-/// (`Pass.ports`).
-fn pass(out: &Utf8Path, probes: Vec<ProbeRan>, ports: impl IntoIterator<Item = PortStats>) -> Pass {
+fn pass(out: &Utf8Path, probes: Vec<ProbeRan>, ports: Vec<PortStats>) -> Pass {
     Pass {
         out_dir: out.to_owned(),
         probes,
-        ports: ports.into_iter().collect(),
+        ports,
     }
 }

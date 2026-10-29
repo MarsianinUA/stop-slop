@@ -268,13 +268,9 @@ pub(crate) fn second_pass(
     let Some(outcome) = &raw.second_pass else {
         return (None, Vec::new());
     };
-    let pairs = [
-        (Side::Head, Some(&outcome.head)),
-        (Side::Before, outcome.before.as_ref()),
-    ];
     let mut flags = Vec::new();
     let mut open = Vec::new();
-    for (side, pair) in pairs {
+    for (side, pair) in outcome.sides() {
         match pair {
             None => {}
             Some(PassPair::Failed(failure)) => flags.push(Flag::SecondPassFailed {

@@ -5,7 +5,7 @@ use std::fmt;
 
 use camino::Utf8Path;
 use serde::Serialize;
-use serde_json::Value;
+use serde_json::{Map, Value};
 
 use crate::flags::Flag;
 use crate::raw::Failure;
@@ -168,7 +168,7 @@ fn seal_text(seal: Option<&SealJson>, attempts: u32, comparisons: Option<u32>) -
             seal.sealed_at, seal.max_tolerance
         ));
         let journal = seal.journal.iter();
-        lines.extend(journal.map(|entry| format!("journal{}", pairs(entry, &[]))));
+        lines.extend(journal.map(|entry| format!("journal{}", pairs(&fields(entry)))));
     }
     if attempts > 0 {
         let mut text = format!("attempts {attempts}");
@@ -208,7 +208,6 @@ fn file_text(file: &LineFile) -> String {
     )
 }
 
-/// The fault, then a line per change and per category nothing compares on.
 fn fault_text(fault: &LineFault) -> Vec<String> {
     let from = from_text(fault.from.as_ref());
     let mut lines = vec![format!("fault {} {}{from}", fault.target, fault.mode)];
@@ -273,22 +272,26 @@ fn need_text(need: &Need) -> String {
 
 /// `<kind>`, then each fact of the flag as `<key> <value>`.
 fn flag_text(flag: &Flag) -> String {
-    let kind = serde_json::to_value(flag).ok();
-    let kind = kind.as_ref().and_then(|flag| flag.get("kind"));
-    let mut text = kind.map(plain).unwrap_or_default();
-    text.push_str(&pairs(flag, &["kind"]));
+    let mut fields = fields(flag);
+    let mut text = fields
+        .remove("kind")
+        .as_ref()
+        .map(plain)
+        .unwrap_or_default();
+    text.push_str(&pairs(&fields));
     text
 }
 
-/// ` <key> <value>` for each field of an object but `skip`.
-fn pairs(value: &impl Serialize, skip: &[&str]) -> String {
-    let Ok(Value::Object(fields)) = serde_json::to_value(value) else {
-        return String::new();
-    };
-    let shown = fields
-        .iter()
-        .filter(|(key, _)| !skip.contains(&key.as_str()));
-    shown
+fn fields(value: &impl Serialize) -> Map<String, Value> {
+    match serde_json::to_value(value) {
+        Ok(Value::Object(fields)) => fields,
+        _ => Map::new(),
+    }
+}
+
+fn pairs(fields: &Map<String, Value>) -> String {
+    let pairs = fields.iter();
+    pairs
         .map(|(key, value)| format!(" {key} {}", plain(value)))
         .collect()
 }
