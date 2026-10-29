@@ -9,12 +9,14 @@ mod behaviour;
 mod context;
 mod flags;
 mod hot;
+mod line;
 mod measures;
 mod next;
 mod outputs;
 mod raw;
 mod schema;
 mod stats;
+mod summary;
 
 pub use context::{BeforeInfo, Context, Intent, SetupFrom};
 pub use flags::{DeadReason, Flag};
@@ -26,10 +28,11 @@ pub use raw::{
     Role, SecondPassOutcome, Setup, SetupSide,
 };
 pub use schema::{
-    At, BeforeJson, Behaviour, CalledJson, CoverageJson, Diff, Direction, Head, Hot, HotVersus,
-    IntentJson, Measure, RecipeJson, Report, SetupJson, Src, Unit, Verdict, VersusBefore,
-    VersusPrevious,
+    At, BeforeJson, Behaviour, CalledJson, Compared, CoverageJson, Diff, Direction, Head, Hot,
+    HotVersus, IntentJson, Line, LineFile, LineMeasure, Measure, RecipeJson, Report, SetupJson,
+    Src, Unit, Verdict, VersusBefore, VersusPrevious,
 };
+pub use summary::Summary;
 
 /// The last passed run outside the pool (plan, row 35). `Unreadable` is `previous-unreadable`.
 #[derive(Debug, Clone, Copy)]

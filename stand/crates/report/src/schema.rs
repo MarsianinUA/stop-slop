@@ -1,6 +1,6 @@
-//! `report.json`, `schemaVersion` 1 (architecture plan, «report.json»): keys camelCase, values
-//! kebab-case, every path with `/`, oids in full. `write` and `load` are the only I/O of the report
-//! after `read_outputs`.
+//! `report.json`, `schemaVersion` 1, and the `--json` line (architecture plan, «report.json»): keys
+//! camelCase, values kebab-case, every path with `/`, oids in full. `write` and `load` are the only
+//! I/O of the report after `read_outputs`.
 
 use std::fs;
 use std::time::{Duration, SystemTime};
@@ -11,15 +11,16 @@ use serde_json::Value;
 
 use crate::context::{BeforeInfo, Intent, SetupFrom};
 use crate::flags::Flag;
+use crate::next::Next;
 use crate::outputs::{RECORDS, Records};
 use crate::raw::Failure;
 use crate::{Before, ReportError};
 
 pub(crate) const SCHEMA_VERSION: u32 = 1;
 
-const REPORT: &str = "report.json";
+pub(crate) const REPORT: &str = "report.json";
 
-fn diff_path(dir: &Utf8Path, file: &str) -> Utf8PathBuf {
+pub(crate) fn diff_path(dir: &Utf8Path, file: &str) -> Utf8PathBuf {
     dir.join("diff").join(format!("{file}.json"))
 }
 
@@ -238,6 +239,61 @@ pub enum At {
     Key { key: Value },
 }
 
+/// The quiet `--json` line (plan, row 76): `Report::line` or `Line::failed`. `cli` prints it with
+/// `next` as command strings, and sets `run` of a failed run that has its folder.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Line {
+    pub run: Option<String>,
+    #[serde(serialize_with = "slash::option")]
+    pub report: Option<Utf8PathBuf>,
+    /// Only the exceptions.
+    pub measures: Vec<LineMeasure>,
+    /// Only the files with a diff or a flag that names them; `None` as in the report.
+    pub behaviour: Option<Vec<LineFile>>,
+    pub flags: Vec<Flag>,
+    pub failure: Option<Failure>,
+    /// The measures and files with no exception.
+    pub quiet: u32,
+    /// Measures without an `expect` entry graded `unmeasurable`: they stay quiet (plan, row 66).
+    /// 0 until the grades of T-13b.
+    pub unmeasurable: u32,
+    #[serde(skip)]
+    pub next: Vec<Next>,
+}
+
+/// A `Measure` without `direction`, `samples` and `spread`: `report.json` has them.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LineMeasure {
+    pub name: String,
+    pub unit: Unit,
+    pub src: Src,
+    pub median: f64,
+    pub before: Option<Compared>,
+    pub previous: VersusPrevious,
+}
+
+/// `median` is `None` when "before" failed, as in `VersusBefore`.
+#[derive(Debug, Clone, Serialize)]
+pub struct Compared {
+    pub median: Option<f64>,
+    pub verdict: Verdict,
+}
+
+/// `sample`: at most 3 records of `diffs`; `path`: all of them, `diff/<file>.json` of the run folder.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LineFile {
+    pub file: String,
+    pub src: Src,
+    pub noise_known: bool,
+    pub diffs: u32,
+    pub sample: Vec<Diff>,
+    #[serde(serialize_with = "slash::path")]
+    pub path: Utf8PathBuf,
+}
+
 impl Report {
     /// `<dir>/diff/<file>.json` with all the diffs of each behaviour file and `<dir>/records.json`,
     /// then `<dir>/report.json` through a temporary file and a rename: a `report.json` is whole and
@@ -342,12 +398,16 @@ pub(crate) fn slashed(path: &Utf8Path) -> String {
     }
 }
 
-/// `serialize_with` for the paths of `Failure`.
+/// `serialize_with` for the paths of `Failure`, `Line` and `LineFile`.
 pub(crate) mod slash {
-    use camino::Utf8PathBuf;
+    use camino::{Utf8Path, Utf8PathBuf};
     use serde::Serializer;
 
     use super::slashed;
+
+    pub(crate) fn path<S: Serializer>(path: &Utf8Path, out: S) -> Result<S::Ok, S::Error> {
+        out.serialize_str(&slashed(path))
+    }
 
     pub(crate) fn option<S: Serializer>(
         path: &Option<Utf8PathBuf>,
