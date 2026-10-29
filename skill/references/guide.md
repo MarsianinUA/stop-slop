@@ -3,7 +3,7 @@
 The shortest path, in the fix flow:
 
 1. Before the first edit: `stop-slop-stand snapshot`. It records the work tree as "before" of this session.
-2. No stand file yet: `stop-slop-stand init`, then edit `<git common>/info/stop-slop-stand/compose.yaml` and write the harness beside it (`guide recipe`, `guide probes`). `stop-slop-stand run --dry-run` checks them without a VM and says what the run will download and build.
+2. No stand file yet: `stop-slop-stand init`, then edit `<git common>/info/stop-slop-stand/compose.yaml` and write the harness beside it (`guide recipe`, `guide probes`). `stop-slop-stand run --dry-run` checks them without a VM and drops nothing: it says what the run will download, build and drop. Then `stop-slop-stand run --json` once, before any edit: a failure then is the recipe's.
 3. While editing: `stop-slop-stand run --json` measures the head against the previous run. Nothing is sealed or graded yet.
 4. After the tests pass: declare the cost of the change in `x-stand.expect` (`guide expect`), then `stop-slop-stand run --before session --json`. The first such run seals the recipe.
 5. Read the line (`guide line`). On an exception: `inspect` the kept state (`guide inspect`), fix the code, `accept` a shift you can explain, or hand `needs` to the user.
@@ -14,7 +14,7 @@ The exit code says what to do:
 
 - `0`: the head passed every repeat. Flags and diffs are facts, not failures: read the line.
 - `1`: the head failed. Read `failure` (phase, service, cause, logs, the `on-failure` probes), run what `next` names (an `inspect` of the failed state, or `guide recipe`), then fix the code or the recipe.
-- `2`: the stand refused its input and measured nothing. stderr says why and ends with `next:` commands; follow them.
+- `2`: the stand refused its input and measured nothing. stderr says why and ends with `next:` commands; follow them. What only the user can change, such as the disk, `host_share` in `stand.toml` or another run that holds the stand, goes to the user.
 - `3`: the stand itself broke. Show stderr and the line to the user and stop measuring: no retry, and no change to the recipe or the code for it. The task goes on, and its summary says the stand did not measure, and why.
 - `130`: Ctrl+C stopped it; the VMs are gone and what it collected is in the run folder. Run it again only when the user asks.
 
@@ -27,6 +27,7 @@ The recipe is the folder `<git common>/info/stop-slop-stand/`: the stand file `c
   - A setup service and the workload run one replica.
   - A service another one calls needs `expose` (TCP): the stand puts every service name in each guest's hosts, and only exposed ports answer.
   - A guest has no outside network unless its service says `x-stand: { network: public }`. Give it only to what downloads, such as the prepare service.
+  - An outside API the app calls, such as payments or mail, becomes a stub: a long-running service of the harness that answers as the real one does, the same way every repeat. The app finds it by a name in `environment`; the stub at the end of this topic also tells a probe what the app sent.
   - `service_healthy` needs a `healthcheck`. A service name has no `.` and is not `stand` or `volume`.
   - Each variable of `environment` has its value in the file: the stand takes none from the host.
 - Mounts, in the short form `source:target` or `source:target:ro`.
@@ -38,16 +39,63 @@ The recipe is the folder `<git common>/info/stop-slop-stand/`: the stand file `c
 - The prepare service: the setup service with `${STAND_REPO}` that every other `${STAND_REPO}` service waits for. It installs and builds on the version disk, nothing else. Its snapshot then seeds every other service with `${STAND_REPO}` in every repeat.
   - It mounts only `${STAND_REPO}`, and every other service with `${STAND_REPO}` uses its `image`, written the same: a VM from a snapshot keeps the snapshot's image.
   - Migrations and data go in a setup service of their own after it, as `migrate` in the template.
-  - The package manager's store and cache go on `/w`, outside `/w/app`, never in a bind: `npm ci --cache /w/.npm`, `pnpm install --store-dir /w/.pnpm-store`. pnpm 10 skips the build scripts of dependencies: allow them in the prepare command. Native modules build in the guest, never come from the host.
+  - The package manager's store and cache go on `/w`, outside `/w/app`, never in a bind, where an install takes minutes instead of seconds: `npm ci --cache /w/.npm`, `pnpm install --store-dir /w/.pnpm-store`. pnpm 10 skips the build scripts of dependencies: allow them in the prepare command. Native modules build in the guest, never come from the host.
   - Keep the guest's root disk clean, with no global installs or caches: the snapshot keeps every block of it.
 - The stand runs `id`, `tar` and `du` in the guests. An image without them, such as a distroless one, cannot run in it.
 - `x-stand`: `workload`, `repeat` (3), `setup_timeout` (`10m`), `timeout` per repeat (`5m`), `probes` (`guide probes`), `expect` (`guide expect`), `fault` and `second_pass`. A service's `x-stand` takes `profile: node` for hot functions and coverage, and `network: public`. `stop_signal` and `stop_grace_period` (`10s`) work as in Compose; every repeat ends with that clean stop.
 - The workload writes `*.jsonl` into `/stand/out`. With `--before`, each file is compared record by record with the same file of "before"; fields that differ between repeats of "before" are noise.
+- A value that changes every run, such as a time or a random id, stays out of a record, or goes into `ignore` of its probe (`guide probes`): otherwise the stand takes its whole field path for noise in every record of the file, and the data at that path no longer compares.
 - Each `*.jsonl` of `/stand/out`, a probe's output too, is a plain file of at most 64 MiB: a link, a FIFO, a folder or a bigger file there is exit 2 with its path.
-- The stand's network drops new connections to a service after about 256 within 10 seconds (`network-limit-hit`). Give the workload keep-alive or a pool, and fewer than 25 new connections a second per service.
+- The stand's network drops new connections to a service after about 256 within 10 seconds (`network-limit-hit`). Every caller counts, the app's own clients too, and so does each request that sends `Connection: close`. Keep connections open: keep-alive in the workload, a pool in the app (`pg.Pool`, not a client per request), and fewer than 25 new connections a second per service. Node's `fetch` reuses a connection only after its answer's body is read: read every body.
+- Each commit waits for the disk: 10,000 single-row commits take about 33 seconds in a guest on Windows. Size the workload so a repeat stays well within `timeout`.
 - `x-stand.fault: { target: "db:5432", mode: down }` cuts the target: new connections are refused and open ones dropped. `mode: slow` with `delay: 2s` holds each connection instead. The target is a long-running service with that port in `expose`, and a dependency of the app, such as its database: the fault reaches every VM of the repeat but the workload, so a target only the workload calls changes nothing.
 - `x-stand.second_pass: true` runs the workload a second time on the state the first pass left, as a retry would; `expect.unchanged` names what must hold (`guide expect`).
 - With `--before` a changed, new or deleted file of the recipe is exit 2 that names it. Put it back, or seal again: `run --before <..> --reseal --reason "<why>"`. The journal of the seal in the line shows each reseal.
+
+A stub of a payment API. The app gets `PAYMENTS_URL: "http://payments:8080"` in its `environment` and waits for `payments` with `service_healthy`:
+
+```yaml
+services:
+  payments:
+    image: node:22-slim
+    working_dir: /harness
+    volumes: [".:/harness:ro"]
+    command: ["node", "stub.mjs"]
+    expose: [8080]
+    healthcheck: { test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8080/health').then(r => process.exit(r.ok ? 0 : 1), () => process.exit(1))"], interval: 1s, retries: 30 }
+    deploy: { resources: { limits: { cpus: "1", memory: 128m } } }
+x-stand:
+  probes:
+    payments-sent:
+      in: payments
+      at: after-workload
+      run: ["node", "-e", "fetch('http://127.0.0.1:8080/sent').then(r => r.text()).then(t => process.stdout.write(t))"]
+```
+
+`stub.mjs` beside the stand file answers every request with the same body and keeps what it got, which `GET /sent` prints one record per line:
+
+```js
+import { createServer } from "node:http";
+
+const sent = [];
+const parse = (text) => {
+  try {
+    return JSON.parse(text);
+  } catch {
+    return text;
+  }
+};
+
+createServer(async (request, response) => {
+  let body = "";
+  for await (const chunk of request) body += chunk;
+  if (request.url === "/health") return response.end("ok");
+  if (request.url === "/sent") return response.end(sent.map((it) => `${JSON.stringify(it)}\n`).join(""));
+  sent.push({ method: request.method, url: request.url, body: body ? parse(body) : null });
+  response.setHeader("content-type", "application/json");
+  response.end(JSON.stringify({ id: "pay_1", status: "succeeded" }));
+}).listen(8080);
+```
 
 ## expect
 
