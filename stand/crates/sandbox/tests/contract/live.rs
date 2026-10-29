@@ -134,10 +134,9 @@ impl Case {
         }
     }
 
-    /// Once every connection `net` counted has closed. `net` rewrites its file at most every
-    /// 100 ms, so a read right after the client's exit may still miss its last connection.
+    /// Once every connection `net` counted has closed. The relay holds a connection until its
+    /// upstream closes too, on Windows up to half a second after the client's exit.
     fn settled(&self, id: &SandboxId) -> Metrics {
-        std::thread::sleep(Duration::from_millis(500));
         let deadline = Instant::now() + Duration::from_secs(10);
         loop {
             let metrics = self.sandbox.metrics(id).unwrap();
@@ -228,6 +227,7 @@ shared!(
     a_snapshot_outlives_its_vm,
     tree_lands_before_the_command,
     copy_out_brings_the_scratch_folder,
+    metrics_count_every_answer_before_the_call,
     create_returns_once_the_command_runs,
     exec_writes_stdout_and_times_out,
     a_hung_healthcheck_is_killed_at_its_timeout,

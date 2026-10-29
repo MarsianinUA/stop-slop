@@ -12,7 +12,8 @@ use std::time::{Duration, Instant};
 use camino::{Utf8Path, Utf8PathBuf};
 use sandbox::{
     Call, ExecOutcome, Exposed, Fake, Fault, FaultMode, ImageRef, Launch, Metrics, Mount, Outbound,
-    Rule, Sandbox, SandboxError, SandboxId, Scenario, Script, Seed, Stopped, VolumeName, Waitable,
+    Peer, PortStats, Rule, Sandbox, SandboxError, SandboxId, Scenario, Script, Seed, Stopped,
+    VolumeName, Waitable,
 };
 use tempfile::TempDir;
 
@@ -428,6 +429,75 @@ fn fake_copy_out_brings_the_scratch_folder() {
     on_fake(
         vec![rule("profiled", writes(exits(0), &files))],
         copy_out_brings_the_scratch_folder,
+    );
+}
+
+/// Five requests from `client` to `web`, each a healthcheck-like exec, each read at once after
+/// its end: every answer before a `metrics` call is in it, though `net` rewrites its file at
+/// most every 100 ms.
+fn metrics_count_every_answer_before_the_call(sandbox: &impl Sandbox) {
+    let peers = vec![
+        Peer {
+            service: "web".into(),
+            replicas: 1,
+            ports: vec![8080],
+        },
+        Peer {
+            service: "client".into(),
+            replicas: 1,
+            ports: Vec::new(),
+        },
+    ];
+    let mut web = launch("web", NGINX);
+    web.ports = vec![Exposed(8080)];
+    web.peers = peers.clone();
+    let mut client = launch("client", ALPINE);
+    client.command = Some(argv(&["sleep", "600"]));
+    client.peers = peers;
+    let ids = sandbox.create(&[web, client]).unwrap();
+    let get = "wget -q -O /dev/null http://web:8080/";
+    // The first one waits for nginx to listen.
+    let first = format!("until {get}; do sleep 0.2; done");
+    for answered in 1..=5 {
+        let script = if answered == 1 { first.as_str() } else { get };
+        let exec = sandbox.exec_detached(&ids[1], &argv(&["sh", "-c", script]), EXIT);
+        let job = [Waitable::Exec(exec.unwrap())];
+        let ended = sandbox.wait(&job, sandbox.now() + EXIT).unwrap();
+        assert_eq!(
+            ended.map(|ended| ended.code),
+            Some(Some(0)),
+            "request {answered}"
+        );
+        let metrics = sandbox.metrics(&ids[1]).unwrap();
+        let web = metrics.ports.iter().find(|port| port.target == "web:8080");
+        let ok = web.and_then(|port| port.http).map_or(0, |http| http[1]);
+        assert!(ok >= answered, "request {answered}: {metrics:?}");
+    }
+    destroy(sandbox, &ids);
+}
+
+#[test]
+fn fake_metrics_count_every_answer_before_the_call() {
+    let answered = PortStats {
+        target: "web:8080".into(),
+        connections: 5,
+        open: 0,
+        bytes_out: 400,
+        bytes_in: 4000,
+        http: Some([0, 5, 0, 0, 0]),
+        drops: 0,
+    };
+    let client = Script {
+        health: vec![Some(0)],
+        metrics: Metrics {
+            ports: vec![answered],
+            ..Metrics::default()
+        },
+        ..Script::default()
+    };
+    on_fake(
+        vec![rule("web", Script::default()), rule("client", client)],
+        metrics_count_every_answer_before_the_call,
     );
 }
 

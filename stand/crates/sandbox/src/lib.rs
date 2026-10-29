@@ -61,6 +61,8 @@ pub trait Sandbox {
     /// From now until `destroy`, in the relays of `ids`.
     fn fault(&self, ids: &[SandboxId], fault: &Fault) -> Result<(), SandboxError>;
     // `metrics`, `logs`, `copy_out` work only before `destroy`; after it they are `Gone`.
+    /// The counters (`ports`, `unexposed`) hold every change the guest saw before the call started;
+    /// the adapter waits for the guest's next write of them, up to 200 ms when nothing changed.
     fn metrics(&self, id: &SandboxId) -> Result<Metrics, SandboxError>;
     /// The service's stdout and stderr, whole since its start, the two interleaved as they came.
     fn logs(&self, id: &SandboxId) -> Result<Vec<u8>, SandboxError>;
@@ -270,7 +272,8 @@ pub struct Metrics {
 pub struct PortStats {
     pub target: String,
     pub connections: u64,
-    /// Open at the read.
+    /// Open as of the call. The relay holds a connection until its upstream closes too, so a
+    /// client's connection can stay open past the client's exit (on Windows up to half a second).
     pub open: u64,
     pub bytes_out: u64,
     pub bytes_in: u64,
