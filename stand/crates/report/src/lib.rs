@@ -5,6 +5,7 @@ use std::io;
 
 use camino::Utf8Path;
 
+mod behaviour;
 mod context;
 mod flags;
 mod hot;
@@ -25,8 +26,9 @@ pub use raw::{
     Role, SecondPassOutcome, Setup, SetupSide,
 };
 pub use schema::{
-    BeforeJson, CalledJson, CoverageJson, Direction, Head, Hot, HotVersus, IntentJson, Measure,
-    RecipeJson, Report, SetupJson, Src, Unit, Verdict, VersusBefore, VersusPrevious,
+    At, BeforeJson, Behaviour, CalledJson, CoverageJson, Diff, Direction, Head, Hot, HotVersus,
+    IntentJson, Measure, RecipeJson, Report, SetupJson, Src, Unit, Verdict, VersusBefore,
+    VersusPrevious,
 };
 
 /// The last passed run outside the pool (plan, row 35). `Unreadable` is `previous-unreadable`.
@@ -44,6 +46,16 @@ pub fn make(raw: &Raw, outputs: &Outputs, context: &Context<'_>) -> Report {
     let (measures, mut flags) = measures::of(raw, outputs, context, before);
     flags.extend(flags::facts(raw));
     flags.extend(flags::of_context(raw, context));
+    flags.extend(flags::bad_lines(outputs));
+    flags.extend(behaviour::dead(raw, outputs));
+    let behaviour = match before {
+        Before::Passed(_) => {
+            let (files, file_flags) = behaviour::of(raw, outputs, context);
+            flags.extend(file_flags);
+            Some(files)
+        }
+        Before::Absent | Before::Failed(_) => None,
+    };
     flags::order(&mut flags);
     let previous = match context.previous {
         Previous::Read(report) => Some(report),
@@ -76,7 +88,14 @@ pub fn make(raw: &Raw, outputs: &Outputs, context: &Context<'_>) -> Report {
         flags,
         hot: hot::of(raw, before, previous),
         coverage: hot::coverage(raw),
+        behaviour,
+        records: outputs.records.clone(),
     }
+}
+
+/// Reads `<dir>/report.json`; another `schemaVersion` is `ReportError::Schema`.
+pub fn load(dir: &Utf8Path) -> Result<Report, ReportError> {
+    schema::load(dir)
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -144,7 +163,8 @@ impl Side {
 }
 
 /// The versions the report reads: the head, and "before" when it passed. A failed "before" has
-/// nothing to compare, so its setup outputs are not read either.
+/// nothing to compare, so its setup outputs are not read either: the `on-failure` probes there are
+/// part of its failure (T-12 stage 5 note).
 fn sides(raw: &Raw) -> Vec<(Side, &SetupSide, &[RepeatOutput])> {
     let mut sides = vec![(Side::Head, &raw.setup.head, raw.head.as_slice())];
     if let (Before::Passed(repeats), Some(setup)) = (Before::of(raw), &raw.setup.before) {

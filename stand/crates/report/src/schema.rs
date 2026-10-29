@@ -1,17 +1,27 @@
 //! `report.json`, `schemaVersion` 1 (architecture plan, «report.json»): keys camelCase, values
-//! kebab-case, every path with `/`, oids in full.
+//! kebab-case, every path with `/`, oids in full. `write` and `load` are the only I/O of the report
+//! after `read_outputs`.
 
+use std::fs;
 use std::time::{Duration, SystemTime};
 
-use camino::Utf8Path;
+use camino::{Utf8Path, Utf8PathBuf};
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
-use crate::Before;
 use crate::context::{BeforeInfo, Intent, SetupFrom};
 use crate::flags::Flag;
+use crate::outputs::{RECORDS, Records};
 use crate::raw::Failure;
+use crate::{Before, ReportError};
 
 pub(crate) const SCHEMA_VERSION: u32 = 1;
+
+const REPORT: &str = "report.json";
+
+fn diff_path(dir: &Utf8Path, file: &str) -> Utf8PathBuf {
+    dir.join("diff").join(format!("{file}.json"))
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -33,6 +43,11 @@ pub struct Report {
     /// By `selfMs`, the hottest first.
     pub hot: Vec<Hot>,
     pub coverage: Option<CoverageJson>,
+    /// `None` without `--before` or when "before" failed.
+    pub behaviour: Option<Vec<Behaviour>>,
+    /// This run's records for `records.json`; a loaded report has none.
+    #[serde(skip)]
+    pub(crate) records: Records,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -170,8 +185,8 @@ pub struct HotVersus {
     pub verdict: Verdict,
 }
 
-/// From the coverage repeat only; `None` without one, when it failed (`coverage-unknown`), or when
-/// a service's coverage is unknown (`no-profile`).
+/// From the coverage repeat only; `None` without one (`unprofiled`) or when it leaves the coverage
+/// unknown (`coverage-unknown`).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CoverageJson {
     pub services: Vec<String>,
@@ -186,6 +201,98 @@ pub struct CalledJson {
     pub column: u32,
     /// Entries into the body, not calls: each resumption after `await` counts too.
     pub calls: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Behaviour {
+    /// Its name in `/stand/out`.
+    pub file: String,
+    pub src: Src,
+    /// The probe's `key`; `None` pairs the records by position.
+    pub key: Option<String>,
+    /// At least two repeats of "before": with one, nothing is known to be noise.
+    pub noise_known: bool,
+    /// The paths that differ between repeats of "before": left out of `diffs`.
+    pub noise: Vec<String>,
+    /// The paths stable on "before" that differ between repeats of the head: kept in `diffs`.
+    pub head_only_noise: Vec<String>,
+    pub diffs: Vec<Diff>,
+}
+
+/// A record only on one side has `path` `""` and the other side `null`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Diff {
+    #[serde(flatten)]
+    pub at: At,
+    pub path: String,
+    pub before: Value,
+    pub head: Value,
+}
+
+/// `record` from 1 by position in the file, or the value at the probe's `key` instead.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum At {
+    Record { record: u32 },
+    Key { key: Value },
+}
+
+impl Report {
+    /// `<dir>/diff/<file>.json` with all the diffs of each behaviour file and `<dir>/records.json`,
+    /// then `<dir>/report.json` through a temporary file and a rename: a `report.json` is whole and
+    /// says the rest is.
+    pub fn write(&self, dir: &Utf8Path) -> Result<(), ReportError> {
+        for file in self.behaviour.iter().flatten() {
+            let path = diff_path(dir, &file.file);
+            if let Some(parent) = path.parent() {
+                fs::create_dir_all(parent).map_err(ReportError::io(parent))?;
+            }
+            write_json(&path, &file.diffs, false)?;
+        }
+        write_json(&dir.join(RECORDS), &self.records, false)?;
+        let temporary = dir.join(format!("{REPORT}.tmp"));
+        write_json(&temporary, self, true)?;
+        let path = dir.join(REPORT);
+        fs::rename(&temporary, &path).map_err(ReportError::io(&path))
+    }
+}
+
+/// `pretty` for the files people read; the records only feed later pools.
+fn write_json(path: &Utf8Path, value: &impl Serialize, pretty: bool) -> Result<(), ReportError> {
+    let bytes = if pretty {
+        serde_json::to_vec_pretty(value)
+    } else {
+        serde_json::to_vec(value)
+    };
+    let bytes = bytes.map_err(|error| ReportError::Bad {
+        path: path.to_owned(),
+        message: error.to_string(),
+    })?;
+    fs::write(path, bytes).map_err(ReportError::io(path))
+}
+
+/// `schemaVersion` first: a report of another version is `Schema`, not a parse error of its fields.
+pub(crate) fn load(dir: &Utf8Path) -> Result<Report, ReportError> {
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct Version {
+        schema_version: u64,
+    }
+    let path = dir.join(REPORT);
+    let text = fs::read_to_string(&path).map_err(ReportError::io(&path))?;
+    let bad = |error: serde_json::Error| ReportError::Bad {
+        path: path.clone(),
+        message: error.to_string(),
+    };
+    let version: Version = serde_json::from_str(&text).map_err(bad)?;
+    if version.schema_version != u64::from(SCHEMA_VERSION) {
+        return Err(ReportError::Schema {
+            path,
+            found: version.schema_version,
+        });
+    }
+    serde_json::from_str(&text).map_err(bad)
 }
 
 pub(crate) fn before_json(

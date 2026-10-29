@@ -5,6 +5,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::Before;
+use crate::flags::Flag;
 use crate::raw::{CoverageOutcome, ProfileOutcome, Raw, RepeatOutput};
 use crate::schema::{CalledJson, CoverageJson, Direction, Hot, HotVersus, Report, Verdict};
 use crate::stats::{self, Sample};
@@ -163,23 +164,50 @@ fn functions(repeats: &[RepeatOutput]) -> Vec<Function<'_>> {
     functions.collect()
 }
 
-/// The functions the services of the coverage repeat entered, the services added up. `run` reads a
-/// replica without chunks as one without calls, so a service with no call that also wrote no
-/// profile in a measured repeat of the head has an unknown coverage (T-12 stage 6 note). `stop-slop
-/// hot` cannot tell the services of a file apart, so then the whole block is unknown: `None`, not a
-/// claim that no function of that service ran. A coverage of no service is `None` too.
+/// Why the coverage repeat leaves the coverage unknown, one `coverage-unknown` each: it failed; it
+/// covered no service; or `run` read a replica without chunks as one without calls, so a service
+/// with no call that also wrote no profile in a measured repeat of the head may have run unseen
+/// (T-12 stage 6 note). `stop-slop hot` cannot tell the services of a file apart, so any reason
+/// leaves the whole block `None`, not a claim that no function of that service ran.
+pub(crate) fn unknown(raw: &Raw) -> Vec<Flag> {
+    let services = match &raw.coverage {
+        None => return Vec::new(),
+        Some(CoverageOutcome::Failed(failure)) => {
+            return vec![Flag::CoverageUnknown {
+                stage: Some(failure.phase),
+                service: None,
+            }];
+        }
+        Some(CoverageOutcome::Read(services)) => services,
+    };
+    if services.is_empty() {
+        return vec![Flag::CoverageUnknown {
+            stage: None,
+            service: None,
+        }];
+    }
+    let mut unseen = BTreeSet::new();
+    for instance in raw.head.iter().flat_map(|repeat| &repeat.instances) {
+        let uncalled = services
+            .get(&instance.service)
+            .is_some_and(|coverage| coverage.called.is_empty());
+        if uncalled && matches!(instance.profile, Some(ProfileOutcome::NoProfile)) {
+            unseen.insert(instance.service.as_str());
+        }
+    }
+    let flags = unseen.into_iter().map(|service| Flag::CoverageUnknown {
+        stage: None,
+        service: Some(service.to_owned()),
+    });
+    flags.collect()
+}
+
+/// The functions the services of the coverage repeat entered, the services added up.
 pub(crate) fn coverage(raw: &Raw) -> Option<CoverageJson> {
     let Some(CoverageOutcome::Read(services)) = &raw.coverage else {
         return None;
     };
-    let mut instances = raw.head.iter().flat_map(|repeat| &repeat.instances);
-    let unknown = instances.any(|instance| {
-        matches!(instance.profile, Some(ProfileOutcome::NoProfile))
-            && services
-                .get(&instance.service)
-                .is_some_and(|coverage| coverage.called.is_empty())
-    });
-    if services.is_empty() || unknown {
+    if !unknown(raw).is_empty() {
         return None;
     }
     let mut calls: BTreeMap<(&str, u32, u32), u64> = BTreeMap::new();

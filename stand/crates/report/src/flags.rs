@@ -9,9 +9,10 @@ use profile::Samples;
 use sandbox::ExecOutcome;
 use serde::{Deserialize, Serialize};
 
-use crate::raw::{CoverageOutcome, Phase, ProfileOutcome, Raw, RepeatOutput, SetupSide};
+use crate::outputs::Outputs;
+use crate::raw::{Phase, ProfileOutcome, Raw, RepeatOutput, SetupSide};
 use crate::stats::{self, Sample};
-use crate::{Before, Context, Previous, Side, sides};
+use crate::{Before, Context, Previous, Side, hot, sides};
 
 /// A spread above it hides any shift under it, and most declared costs are smaller.
 const HIGH_NOISE: f64 = 0.2;
@@ -80,8 +81,12 @@ pub enum Flag {
     BeforeFailed {
         stage: Phase,
     },
+    /// `stage`: the coverage repeat failed there. `service`: one with no call that wrote no profile
+    /// in a measured repeat either, so it may have run unseen. Both `None`: the repeat covered no
+    /// service.
     CoverageUnknown {
-        stage: Phase,
+        stage: Option<Phase>,
+        service: Option<String>,
     },
     PreviousUnreadable,
     RecipeChanged,
@@ -167,11 +172,7 @@ pub(crate) fn facts(raw: &Raw) -> Vec<Flag> {
             stage: failure.phase,
         });
     }
-    if let Some(CoverageOutcome::Failed(failure)) = &raw.coverage {
-        flags.push(Flag::CoverageUnknown {
-            stage: failure.phase,
-        });
-    }
+    flags.extend(hot::unknown(raw));
     probes(&sides, &mut flags);
     stops(&sides, &mut flags);
     flags
@@ -399,6 +400,15 @@ pub(crate) fn of_context(raw: &Raw, context: &Context<'_>) -> Vec<Flag> {
         }
         Previous::Read(_) => Vec::new(),
     }
+}
+
+pub(crate) fn bad_lines(outputs: &Outputs) -> Vec<Flag> {
+    let lines = outputs.bad_lines.iter();
+    let flags = lines.map(|(file, line)| Flag::BadResultLine {
+        file: file.clone(),
+        line: *line,
+    });
+    flags.collect()
 }
 
 /// `before` is the fewest of a version that was compared: a failed "before" has none.

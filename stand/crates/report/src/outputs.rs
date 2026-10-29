@@ -1,21 +1,34 @@
-//! The only reads of the report (architecture plan, `report`): the logs of the long-running
-//! services up to their cut.
+//! What `make` reads of the run folder (architecture plan, `report`): the top-level `*.jsonl` of
+//! each `/stand/out`, the logs of the long-running services up to their cut, and `records.json` of
+//! the pooled runs. A broken line of a workload file is a flag, not an error.
 
 use std::collections::BTreeMap;
-use std::fs::File;
+use std::fs::{self, File};
 use std::io::Read;
 
 use camino::{Utf8Path, Utf8PathBuf};
-use serde_json::{Map, Value};
+use serde::{Deserialize, Serialize};
+use serde_json::{Map, Value, json};
 
 use crate::raw::{Raw, Role};
-use crate::{ReportError, sides};
+use crate::{ReportError, Side, sides};
+
+pub(crate) const RECORDS: &str = "records.json";
+
+/// The repeat of `FileRecords` that holds the `after-setup` output of setup.
+pub(crate) const SETUP: u32 = 0;
 
 /// What `make` takes from the files of a run; only `read_outputs` builds it.
 #[derive(Debug, Default)]
 pub struct Outputs {
+    pub(crate) records: Records,
     /// By the log of an instance.
     errors: BTreeMap<Utf8PathBuf, u32>,
+    /// The first broken line of each workload file, from 1.
+    pub(crate) bad_lines: BTreeMap<String, u32>,
+    /// `records.json` of each pooled run in the order of `Context.pool`; `None` when it does not
+    /// read.
+    pub(crate) pool: Vec<Option<Records>>,
 }
 
 impl Outputs {
@@ -25,11 +38,45 @@ impl Outputs {
     }
 }
 
-/// `pool`: the folders of the pooled runs, in the order of `Context.pool`.
-pub fn read_outputs(raw: &Raw, _pool: &[Utf8PathBuf]) -> Result<Outputs, ReportError> {
+/// The behaviour records of a run by file, version and repeat, after `{"line": ...}` and before
+/// `ignore`: this is `records.json`, from which the later runs of the pool learn their noise mask.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub(crate) struct Records {
+    pub(crate) files: BTreeMap<String, FileRecords>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub(crate) struct FileRecords {
+    #[serde(default)]
+    pub(crate) head: BTreeMap<u32, Vec<Value>>,
+    #[serde(default)]
+    pub(crate) before: BTreeMap<u32, Vec<Value>>,
+}
+
+impl FileRecords {
+    pub(crate) fn side(&self, side: Side) -> &BTreeMap<u32, Vec<Value>> {
+        match side {
+            Side::Head => &self.head,
+            Side::Before => &self.before,
+        }
+    }
+
+    fn side_mut(&mut self, side: Side) -> &mut BTreeMap<u32, Vec<Value>> {
+        match side {
+            Side::Head => &mut self.head,
+            Side::Before => &mut self.before,
+        }
+    }
+}
+
+/// `pool`: the folders of the pooled runs, in the order of `Context.pool`; their `records.json`
+/// feeds the noise mask.
+pub fn read_outputs(raw: &Raw, pool: &[Utf8PathBuf]) -> Result<Outputs, ReportError> {
     let mut outputs = Outputs::default();
-    for (_, _, repeats) in sides(raw) {
+    for (side, setup, repeats) in sides(raw) {
+        outputs.files(raw, side, SETUP, &setup.out_dir)?;
         for repeat in repeats {
+            outputs.files(raw, side, repeat.repeat, &repeat.out_dir)?;
             let instances = repeat.instances.iter();
             for instance in instances.filter(|instance| instance.role == Role::LongRunning) {
                 let count = error_lines(&instance.log, instance.log_cut)?;
@@ -37,7 +84,82 @@ pub fn read_outputs(raw: &Raw, _pool: &[Utf8PathBuf]) -> Result<Outputs, ReportE
             }
         }
     }
+    // A pooled run whose records do not read teaches the mask nothing, as an unreadable pooled
+    // report is left out of the pool.
+    let pooled = pool.iter().map(|dir| read_records(&dir.join(RECORDS)));
+    outputs.pool = pooled.collect();
     Ok(outputs)
+}
+
+impl Outputs {
+    /// The top-level `*.jsonl` of one `/stand/out`: not the `.err` and `.status` beside a probe's
+    /// output, and not a name that is not UTF-8, which no JSON could name.
+    fn files(
+        &mut self,
+        raw: &Raw,
+        side: Side,
+        repeat: u32,
+        dir: &Utf8Path,
+    ) -> Result<(), ReportError> {
+        for entry in fs::read_dir(dir).map_err(ReportError::io(dir))? {
+            let entry = entry.map_err(ReportError::io(dir))?;
+            let Ok(name) = entry.file_name().into_string() else {
+                continue;
+            };
+            if !name.ends_with(".jsonl") {
+                continue;
+            }
+            let path = dir.join(&name);
+            plain(&path)?;
+            let bytes = fs::read(&path).map_err(ReportError::io(&path))?;
+            let probe = raw.probes.contains_key(&name);
+            let (records, bad) = parse(&String::from_utf8_lossy(&bytes), probe);
+            if let Some(line) = bad {
+                self.bad_lines.entry(name.clone()).or_insert(line);
+            }
+            let file = self.records.files.entry(name).or_default();
+            file.side_mut(side).insert(repeat, records);
+        }
+        Ok(())
+    }
+}
+
+/// The guest writes `/stand/out`: a link there may lead to any file of the host, and a FIFO would
+/// hold the read forever. Every VM is gone by now, so nothing swaps the file after this look.
+fn plain(path: &Utf8Path) -> Result<(), ReportError> {
+    let metadata = fs::symlink_metadata(path).map_err(ReportError::io(path))?;
+    if metadata.file_type().is_file() {
+        return Ok(());
+    }
+    Err(ReportError::Bad {
+        path: path.to_owned(),
+        message: "not a plain file: the stand reads the results in /stand/out only as plain \
+                  files, never through a link"
+            .to_owned(),
+    })
+}
+
+/// A probe's line that is not JSON is `{"line": ...}` (plan, row 62); a broken line of a workload
+/// file is left out, and the first one comes back. Blank lines are no records.
+fn parse(text: &str, probe: bool) -> (Vec<Value>, Option<u32>) {
+    let mut records = Vec::new();
+    let mut bad = None;
+    for (index, line) in text.lines().enumerate() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        match serde_json::from_str::<Value>(line) {
+            Ok(record) => records.push(record),
+            Err(_) if probe => records.push(json!({ "line": line })),
+            Err(_) => bad = bad.or(Some(u32::try_from(index + 1).unwrap_or(u32::MAX))),
+        }
+    }
+    (records, bad)
+}
+
+fn read_records(path: &Utf8Path) -> Option<Records> {
+    let text = fs::read_to_string(path).ok()?;
+    serde_json::from_str(&text).ok()
 }
 
 /// The lines of the log before `cut`: what the service logged after the workload ended is not the
@@ -137,5 +259,21 @@ mod tests {
         for line in others {
             assert!(!is_error(line), "{line}");
         }
+    }
+
+    #[test]
+    fn a_probe_line_that_is_not_json_is_a_line_record_and_a_workload_line_is_bad() {
+        let text = "{\"id\":1}\n\nnot json\n{\"id\":2}\n";
+        let (records, bad) = parse(text, true);
+        let expected = [
+            json!({"id": 1}),
+            json!({"line": "not json"}),
+            json!({"id": 2}),
+        ];
+        assert_eq!(records, expected);
+        assert_eq!(bad, None);
+        let (records, bad) = parse(text, false);
+        assert_eq!(records, [json!({"id": 1}), json!({"id": 2})]);
+        assert_eq!(bad, Some(3));
     }
 }
