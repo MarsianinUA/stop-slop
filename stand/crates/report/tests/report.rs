@@ -1747,8 +1747,9 @@ fn a_failed_line_carries_the_facts_so_far_and_its_next_steps() {
         repeat,
         code,
     };
+    // The failed second repeat gave no sample.
     let expected = [
-        Flag::LowRepeats { samples: 2 },
+        Flag::LowRepeats { samples: 1 },
         Flag::Unprofiled,
         Flag::MissingExpose {
             name: "cache".to_owned(),
@@ -1778,6 +1779,22 @@ fn a_failed_line_carries_the_facts_so_far_and_its_next_steps() {
         text.contains(&format!("\nprobes {}\n", slashed(&rescue.out))),
         "{text}"
     );
+
+    // A step after `run` failed: both repeats passed, no probe ran on the failure, and `schema`
+    // keeps its flag although the failure has no repeat either.
+    raw.head[1].probes.clear();
+    let after_run = Failure {
+        phase: Phase::Report,
+        service: None,
+        repeat: None,
+        cause: Cause::Error("repeat-1-head/out/out.jsonl: not a plain file".to_owned()),
+        logs: None,
+        probes: Vec::new(),
+    };
+    let line = Line::failed(after_run, Some(&raw), Vec::new());
+    let mut expected = expected.to_vec();
+    expected[0] = Flag::LowRepeats { samples: 2 };
+    assert_eq!(line.flags, expected);
 
     // A failed setup: its probes ran on the failure too, and no repeat ran.
     raw.head.clear();

@@ -3,6 +3,7 @@
 //! I/O of the report after `read_outputs`.
 
 use std::fs;
+use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
 use camino::{Utf8Path, Utf8PathBuf};
@@ -48,7 +49,7 @@ pub struct Report {
     pub behaviour: Option<Vec<Behaviour>>,
     /// This run's records for `records.json`; a loaded report has none.
     #[serde(skip)]
-    pub(crate) records: Records,
+    pub(crate) records: Arc<Records>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -306,7 +307,7 @@ impl Report {
             }
             write_json(&path, &file.diffs, false)?;
         }
-        write_json(&dir.join(RECORDS), &self.records, false)?;
+        write_json(&dir.join(RECORDS), self.records.as_ref(), false)?;
         let temporary = dir.join(format!("{REPORT}.tmp"));
         write_json(&temporary, self, true)?;
         let path = dir.join(REPORT);
@@ -321,10 +322,7 @@ fn write_json(path: &Utf8Path, value: &impl Serialize, pretty: bool) -> Result<(
     } else {
         serde_json::to_vec(value)
     };
-    let bytes = bytes.map_err(|error| ReportError::Bad {
-        path: path.to_owned(),
-        message: error.to_string(),
-    })?;
+    let bytes = bytes.map_err(|error| ReportError::bad(path, error))?;
     fs::write(path, bytes).map_err(ReportError::io(path))
 }
 
@@ -337,10 +335,7 @@ pub(crate) fn load(dir: &Utf8Path) -> Result<Report, ReportError> {
     }
     let path = dir.join(REPORT);
     let text = fs::read_to_string(&path).map_err(ReportError::io(&path))?;
-    let bad = |error: serde_json::Error| ReportError::Bad {
-        path: path.clone(),
-        message: error.to_string(),
-    };
+    let bad = |error: serde_json::Error| ReportError::bad(&path, error);
     let version: Version = serde_json::from_str(&text).map_err(bad)?;
     if version.schema_version != u64::from(SCHEMA_VERSION) {
         return Err(ReportError::Schema {

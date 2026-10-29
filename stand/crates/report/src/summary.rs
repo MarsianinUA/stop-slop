@@ -9,7 +9,7 @@ use serde_json::Value;
 
 use crate::flags::Flag;
 use crate::raw::Failure;
-use crate::schema::{IntentJson, Line, LineMeasure, Report, slashed};
+use crate::schema::{IntentJson, Line, LineFile, LineMeasure, Report, slashed};
 
 /// The hot functions the summary prints; the report has all of them.
 const TOP: usize = 10;
@@ -65,12 +65,7 @@ impl Report {
             lines.push(format!("previousRun {previous}"));
         }
         lines.extend(line.measures.iter().map(measure_text));
-        for file in line.behaviour.iter().flatten() {
-            lines.push(format!(
-                "behaviour {} diffs {}  noiseKnown {}",
-                file.file, file.diffs, file.noise_known
-            ));
-        }
+        lines.extend(line.behaviour.iter().flatten().map(file_text));
         lines.extend(self.flags.iter().map(flag_text));
         for hot in self.hot.iter().take(TOP) {
             let mut text = format!(
@@ -106,13 +101,7 @@ impl Line {
         }
         lines.extend(self.measures.iter().map(measure_text));
         for file in self.behaviour.iter().flatten() {
-            lines.push(format!(
-                "behaviour {} diffs {}  noiseKnown {}  {}",
-                file.file,
-                file.diffs,
-                file.noise_known,
-                slashed(&file.path)
-            ));
+            lines.push(format!("{}  {}", file_text(file), slashed(&file.path)));
         }
         lines.extend(self.flags.iter().map(flag_text));
         lines.push(format!("quiet {}", self.quiet));
@@ -167,6 +156,13 @@ fn failure_text(failure: &Failure) -> Vec<String> {
     let probes = failure.probes.iter();
     lines.extend(probes.map(|probe| format!("probes {}", slashed(probe))));
     lines
+}
+
+fn file_text(file: &LineFile) -> String {
+    format!(
+        "behaviour {} diffs {}  noiseKnown {}",
+        file.file, file.diffs, file.noise_known
+    )
 }
 
 fn measure_text(measure: &LineMeasure) -> String {

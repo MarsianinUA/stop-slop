@@ -11,7 +11,7 @@ use crate::outputs::Outputs;
 use crate::raw::{Raw, RepeatOutput, Role};
 use crate::schema::{Direction, Measure, Report, Src, Unit, Verdict, VersusBefore, VersusPrevious};
 use crate::stats::{self, Sample};
-use crate::{Before, Context, Previous, origin};
+use crate::{Before, Context, Side};
 
 /// In the order the measures of one subject print.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -116,10 +116,7 @@ pub(crate) fn of(
     let volumes = raw.setup.head.sizes.keys().chain(before_volumes);
     keys.extend(volumes.map(|name| Key::Volume(name.clone())));
 
-    let previous = match context.previous {
-        Previous::Read(report) => Some(report),
-        Previous::None | Previous::Unreadable => None,
-    };
+    let previous = context.previous.report();
     let mut measures = Vec::with_capacity(keys.len());
     let mut flags = Vec::new();
     let mut counts = None;
@@ -302,38 +299,10 @@ impl<'a> Attempts<'a> {
         own_before: Option<&'a [f64]>,
         context: &'a Context<'_>,
     ) -> Attempts<'a> {
-        let mut attempts = Attempts {
-            head: Vec::new(),
-            before: Vec::new(),
-        };
-        let mut origins: (BTreeSet<&'a str>, BTreeSet<&'a str>) = Default::default();
-        for report in context.pool {
-            let Some(measure) = find(&report.measures, name) else {
-                continue;
-            };
-            let head_origin = origin(report.head.setup.cached.as_deref(), &report.run);
-            if !setup || origins.0.insert(head_origin) {
-                attempts.head.push(&measure.samples);
-            }
-            let (Some(versus), Some(info)) = (&measure.before, &report.before) else {
-                continue;
-            };
-            let before_origin = origin(info.setup.cached.as_deref(), &report.run);
-            if !versus.samples.is_empty() && (!setup || origins.1.insert(before_origin)) {
-                attempts.before.push(&versus.samples);
-            }
+        Attempts {
+            head: attempts(name, Side::Head, setup, Some(own_head), context),
+            before: attempts(name, Side::Before, setup, own_before, context),
         }
-        let head_origin = origin(context.setup_from.head.as_deref(), &context.run);
-        if !setup || origins.0.insert(head_origin) {
-            attempts.head.push(own_head);
-        }
-        let before_origin = origin(context.setup_from.before.as_deref(), &context.run);
-        if let Some(own) = own_before.filter(|own| !own.is_empty())
-            && (!setup || origins.1.insert(before_origin))
-        {
-            attempts.before.push(own);
-        }
-        attempts
     }
 
     /// The pooled samples of each version, for `low-repeats`.
@@ -343,4 +312,28 @@ impl<'a> Attempts<'a> {
         let before = (!self.before.is_empty()).then(|| count(&self.before));
         (count(&self.head), before)
     }
+}
+
+/// The attempts of one version that have samples; with `setup`, only the first of each origin.
+fn attempts<'a>(
+    name: &str,
+    side: Side,
+    setup: bool,
+    own: Option<&'a [f64]>,
+    context: &'a Context<'_>,
+) -> Vec<&'a [f64]> {
+    let pooled = context.pool.iter().filter_map(|report| {
+        let measure = find(&report.measures, name)?;
+        let samples = match side {
+            Side::Head => &measure.samples,
+            Side::Before => &measure.before.as_ref()?.samples,
+        };
+        Some((report.origin(side)?, samples.as_slice()))
+    });
+    let own = own.map(|own| (context.origin(side), own));
+    let mut origins = BTreeSet::new();
+    let kept = pooled
+        .chain(own)
+        .filter(|(from, samples)| !samples.is_empty() && (!setup || origins.insert(*from)));
+    kept.map(|(_, samples)| samples).collect()
 }

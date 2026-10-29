@@ -5,13 +5,14 @@
 use std::collections::BTreeMap;
 use std::fs::{self, File};
 use std::io::Read;
+use std::sync::Arc;
 
 use camino::{Utf8Path, Utf8PathBuf};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 
 use crate::raw::{Raw, Role};
-use crate::{ReportError, Side, sides};
+use crate::{Before, ReportError, Side, sides};
 
 pub(crate) const RECORDS: &str = "records.json";
 
@@ -21,13 +22,14 @@ pub(crate) const SETUP: u32 = 0;
 /// What `make` takes from the files of a run; only `read_outputs` builds it.
 #[derive(Debug, Default)]
 pub struct Outputs {
-    pub(crate) records: Records,
+    /// Shared with the `Report` of `make`, which writes it as `records.json`.
+    pub(crate) records: Arc<Records>,
     /// By the log of an instance.
     errors: BTreeMap<Utf8PathBuf, u32>,
     /// The first broken line of each workload file, from 1.
     pub(crate) bad_lines: BTreeMap<String, u32>,
     /// `records.json` of each pooled run in the order of `Context.pool`; `None` when it does not
-    /// read.
+    /// read. Empty unless "before" passed: only the diff reads it.
     pub(crate) pool: Vec<Option<Records>>,
 }
 
@@ -86,8 +88,10 @@ pub fn read_outputs(raw: &Raw, pool: &[Utf8PathBuf]) -> Result<Outputs, ReportEr
     }
     // A pooled run whose records do not read teaches the mask nothing, as an unreadable pooled
     // report is left out of the pool.
-    let pooled = pool.iter().map(|dir| read_records(&dir.join(RECORDS)));
-    outputs.pool = pooled.collect();
+    if let Before::Passed(_) = Before::of(raw) {
+        let pooled = pool.iter().map(|dir| read_records(&dir.join(RECORDS)));
+        outputs.pool = pooled.collect();
+    }
     Ok(outputs)
 }
 
@@ -117,7 +121,8 @@ impl Outputs {
             if let Some(line) = bad {
                 self.bad_lines.entry(name.clone()).or_insert(line);
             }
-            let file = self.records.files.entry(name).or_default();
+            let files = &mut Arc::make_mut(&mut self.records).files;
+            let file = files.entry(name).or_default();
             file.side_mut(side).insert(repeat, records);
         }
         Ok(())
@@ -131,12 +136,11 @@ fn plain(path: &Utf8Path) -> Result<(), ReportError> {
     if metadata.file_type().is_file() {
         return Ok(());
     }
-    Err(ReportError::Bad {
-        path: path.to_owned(),
-        message: "not a plain file: the stand reads the results in /stand/out only as plain \
-                  files, never through a link"
-            .to_owned(),
-    })
+    Err(ReportError::bad(
+        path,
+        "not a plain file: the stand reads the results in /stand/out only as plain files, never \
+         through a link",
+    ))
 }
 
 /// A probe's line that is not JSON is `{"line": ...}` (plan, row 62); a broken line of a workload

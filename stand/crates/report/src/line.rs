@@ -5,13 +5,13 @@ use std::collections::BTreeSet;
 
 use camino::Utf8Path;
 
-use crate::Side;
 use crate::flags::{self, Flag};
 use crate::next::Next;
-use crate::raw::{BeforeOutcome, Failure, Raw};
+use crate::raw::{Failure, Phase, Raw};
 use crate::schema::{
     Behaviour, Compared, Line, LineFile, LineMeasure, Measure, REPORT, Report, Verdict, diff_path,
 };
+use crate::{Before, Side};
 
 /// At most this many records of a diff in the line; the rest is in `diff/<file>.json`.
 const SAMPLE: usize = 3;
@@ -44,19 +44,22 @@ impl Report {
 }
 
 impl Line {
-    /// Flags from what the head collected before it failed; `raw` is `None` before the start. A
-    /// failed setup has no repeat, so no `low-repeats`. `run` comes back `None`: `cli` sets it once
-    /// the run has its folder.
+    /// Flags from what the head collected before it failed; `raw` is `None` before the start.
+    /// `low-repeats` counts the repeats that passed: the failed one gave no sample, and a failed
+    /// setup ran none, so it has no `low-repeats`. `run` comes back `None`: `cli` sets it once the
+    /// run has its folder.
     pub fn failed(failure: Failure, raw: Option<&Raw>, next: Vec<Next>) -> Line {
         let flags = raw.map(|raw| {
             let mut found = flags::facts(raw);
             found.retain(|flag| !on_failure(flag, &failure));
-            let before = match &raw.before {
-                Some(BeforeOutcome::Passed(repeats)) => Some(repeats.len()),
-                Some(BeforeOutcome::Failed(_)) | None => None,
+            let before = match Before::of(raw) {
+                Before::Passed(repeats) => Some(repeats.len()),
+                Before::Absent | Before::Failed(_) => None,
             };
             if !raw.head.is_empty() {
-                found.extend(flags::low_repeats(raw.head.len(), before));
+                let passed = raw.head.iter();
+                let passed = passed.filter(|repeat| Some(repeat.repeat) != failure.repeat);
+                found.extend(flags::low_repeats(passed.count(), before));
             }
             flags::order(&mut found);
             found
@@ -77,10 +80,13 @@ impl Line {
 
 /// The probes of the phase of the head that failed ran `on-failure`: their outputs are in
 /// `failure.probes`, so they give no `probe-failed` (T-13 stage 2 decision). A failed setup and
-/// its probes have no repeat; in a failed repeat no `after-workload` probe runs.
+/// its probes have no repeat; in a failed repeat no `after-workload` probe runs. A step after `run`,
+/// such as `report`, has no repeat either but ran no probe on its failure.
 fn on_failure(flag: &Flag, failure: &Failure) -> bool {
-    matches!(flag, Flag::ProbeFailed { side, repeat, .. }
-        if side == Side::Head.as_str() && *repeat == failure.repeat)
+    let in_run = matches!(failure.phase, Phase::Setup | Phase::Ready | Phase::Workload);
+    in_run
+        && matches!(flag, Flag::ProbeFailed { side, repeat, .. }
+            if side == Side::Head.as_str() && *repeat == failure.repeat)
 }
 
 /// A shift that shows: against "before" with `--before`, else against the previous run. The grades

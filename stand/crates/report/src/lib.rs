@@ -1,7 +1,8 @@
 //! The raw outputs of a stand run into `report.json`, the `--json` line and the summary. `run`
 //! returns `Raw`, so this crate sits below `run` (plan, row 85); `cli` adds the `Context`.
 
-use std::io;
+use std::sync::Arc;
+use std::{fmt, io};
 
 use camino::Utf8Path;
 
@@ -42,6 +43,15 @@ pub enum Previous<'r> {
     Read(&'r Report),
 }
 
+impl<'r> Previous<'r> {
+    fn report(self) -> Option<&'r Report> {
+        match self {
+            Previous::Read(report) => Some(report),
+            Previous::None | Previous::Unreadable => None,
+        }
+    }
+}
+
 /// Setup sizes and `after-setup` records of pooled runs with one setup origin (`setup.cached`, else
 /// the run) count once: they are one measurement (plan, row 88).
 pub fn make(raw: &Raw, outputs: &Outputs, context: &Context<'_>) -> Report {
@@ -60,10 +70,7 @@ pub fn make(raw: &Raw, outputs: &Outputs, context: &Context<'_>) -> Report {
         Before::Absent | Before::Failed(_) => None,
     };
     flags::order(&mut flags);
-    let previous = match context.previous {
-        Previous::Read(report) => Some(report),
-        Previous::None | Previous::Unreadable => None,
-    };
+    let previous = context.previous.report();
     Report {
         schema_version: schema::SCHEMA_VERSION,
         run: context.run.clone(),
@@ -92,7 +99,7 @@ pub fn make(raw: &Raw, outputs: &Outputs, context: &Context<'_>) -> Report {
         hot: hot::of(raw, before, previous),
         coverage: hot::coverage(raw),
         behaviour,
-        records: outputs.records.clone(),
+        records: Arc::clone(&outputs.records),
     }
 }
 
@@ -114,7 +121,10 @@ pub enum ReportError {
         path: camino::Utf8PathBuf,
         message: String,
     },
-    #[error("{path}: schemaVersion {found}, this tool writes 1")]
+    #[error(
+        "{path}: schemaVersion {found}, this tool writes {}",
+        schema::SCHEMA_VERSION
+    )]
     Schema {
         path: camino::Utf8PathBuf,
         found: u64,
@@ -126,6 +136,13 @@ impl ReportError {
         move |source| ReportError::Io {
             path: path.to_owned(),
             source,
+        }
+    }
+
+    fn bad(path: &Utf8Path, message: impl fmt::Display) -> ReportError {
+        ReportError::Bad {
+            path: path.to_owned(),
+            message: message.to_string(),
         }
     }
 }
@@ -176,7 +193,24 @@ fn sides(raw: &Raw) -> Vec<(Side, &SetupSide, &[RepeatOutput])> {
     sides
 }
 
-/// The run that built a version's setup: its `setup.cached`, else the run itself (plan, row 88).
-fn origin<'a>(cached: Option<&'a str>, run: &'a str) -> &'a str {
-    cached.unwrap_or(run)
+impl Report {
+    /// The run that built a version's setup: its `setup.cached`, else the run itself (plan, row
+    /// 88). `None` for "before" of a run without it.
+    fn origin(&self, side: Side) -> Option<&str> {
+        let cached = match side {
+            Side::Head => self.head.setup.cached.as_deref(),
+            Side::Before => self.before.as_ref()?.setup.cached.as_deref(),
+        };
+        Some(cached.unwrap_or(&self.run))
+    }
+}
+
+impl Context<'_> {
+    fn origin(&self, side: Side) -> &str {
+        let cached = match side {
+            Side::Head => self.setup_from.head.as_deref(),
+            Side::Before => self.setup_from.before.as_deref(),
+        };
+        cached.unwrap_or(&self.run)
+    }
 }

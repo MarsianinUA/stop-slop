@@ -10,8 +10,8 @@ use serde_json::Value;
 use crate::flags::{DeadReason, Flag};
 use crate::outputs::{FileRecords, Outputs, SETUP};
 use crate::raw::{ProbeRule, Raw};
-use crate::schema::{At, Behaviour, Diff, Report, Src};
-use crate::{Context, Side, origin, sides};
+use crate::schema::{At, Behaviour, Diff, Src};
+use crate::{Context, Side, sides};
 
 static NULL: Value = Value::Null;
 
@@ -167,16 +167,16 @@ fn lists<'a>(
         let Some(records) = records.as_ref().and_then(|records| records.files.get(file)) else {
             continue;
         };
-        if let Some(from) = report_origin(report, side) {
+        if let Some(from) = report.origin(side) {
             add(&mut lists, &mut origins, from, records.side(side));
         }
     }
-    let cached = match side {
-        Side::Head => context.setup_from.head.as_deref(),
-        Side::Before => context.setup_from.before.as_deref(),
-    };
-    let from = origin(cached, &context.run);
-    add(&mut lists, &mut origins, from, this.side(side));
+    add(
+        &mut lists,
+        &mut origins,
+        context.origin(side),
+        this.side(side),
+    );
     lists
 }
 
@@ -192,14 +192,6 @@ fn add<'a>(
         }
         lists.push(records);
     }
-}
-
-fn report_origin(report: &Report, side: Side) -> Option<&str> {
-    let cached = match side {
-        Side::Head => report.head.setup.cached.as_deref(),
-        Side::Before => report.before.as_ref()?.setup.cached.as_deref(),
-    };
-    Some(origin(cached, &report.run))
 }
 
 /// The paths that differ between neighbouring lists: what changes from repeat to repeat.
