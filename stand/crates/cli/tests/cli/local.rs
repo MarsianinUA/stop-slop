@@ -83,8 +83,14 @@ fn init_writes_a_template_that_loads_and_refuses_a_second_time() {
     let ran = world.run(&fake, &["init"]);
     assert_eq!(ran.exit, Exit::Passed, "{}", ran.err);
     let file = world.recipe().join("compose.yaml");
-    let wrote = format!("wrote {}", file.as_str().replace('\\', "/"));
-    assert_eq!(ran.out.trim_end(), wrote);
+    // The path from git, which resolves the temp folder: `/private/var` for `/var` on macOS, the
+    // long name for `RUNNER~1` on Windows.
+    let wrote = ran.out.trim_end().strip_prefix("wrote ").expect(&ran.out);
+    assert!(!wrote.contains('\\'), "{wrote}");
+    assert_eq!(
+        Utf8Path::new(wrote).canonicalize_utf8().unwrap(),
+        file.canonicalize_utf8().unwrap()
+    );
     assert!(spec::load(&file, &spec::Policy::new(None).unwrap()).is_ok());
     let dry = world.run(&fake, &["run", "--dry-run"]);
     assert_eq!(dry.exit, Exit::Passed, "{}", dry.err);

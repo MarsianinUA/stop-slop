@@ -135,7 +135,8 @@ jobs:
         run: cargo test --locked -p sandbox --features microsandbox --test contract -- --test-threads=1
       # stop-slop-stand keeps 20 GiB free on the disk of its folder, more than the root disk has.
       # Its folder is outside the cache: the set's `clean` drops the images, and a cached
-      # stand-guest would skip the download the next step checks.
+      # stand-guest would skip the download the next step checks. The link also checks that the
+      # stand resolves its folder: microsandbox refuses a bind through a link.
       - name: Put the stand folder of the cli set on the temporary disk
         run: |
           sudo install -d -o "$(id -u)" -g "$(id -g)" /mnt/stop-slop-stand-cli
