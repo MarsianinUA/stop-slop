@@ -10,13 +10,10 @@ pub(crate) fn run(env: &mut Env<'_>) -> Result<Exit, StandError> {
     let worktree = source::open(env.cwd)?;
     let tree = source::snapshot(&worktree)?;
     let pinned = source::pin(&worktree, &tree, SystemTime::now())?;
-    let out = |error| StandError::Io {
-        path: "stdout".into(),
-        source: error,
-    };
-    writeln!(env.out, "{}", pinned.commit).map_err(out)?;
+    let out = StandError::io("stdout");
+    writeln!(env.out, "{}", pinned.commit).map_err(&out)?;
     if let Some(old) = pinned.replaced {
-        writeln!(env.out, "replaced {old}").map_err(out)?;
+        writeln!(env.out, "replaced {old}").map_err(&out)?;
     }
     Ok(Exit::Passed)
 }

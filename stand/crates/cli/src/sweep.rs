@@ -19,20 +19,8 @@ pub(crate) fn leftovers(
     store: &Store,
     now: SystemTime,
 ) -> Result<(), StandError> {
-    let left = sandbox.leftovers()?;
-    let mut keep = Vec::new();
-    for run in store.kept_runs(now)? {
-        keep.extend(run::kept_ids(&run.dir)?);
-    }
-    for entry in store.cache_entries(now)? {
-        keep.extend(run::cached_ids(&entry)?.unwrap_or_default());
-    }
-    for id in &left.sandboxes {
-        sandbox.destroy(id)?;
-    }
-    for id in left.snapshots.iter().filter(|id| !keep.contains(id)) {
-        sandbox.drop_snapshot(id)?;
-    }
+    let keep = named(&store.cache_entries(now)?, &store.kept_runs(now)?)?;
+    clear(sandbox, &keep)?;
     store.clear_trees()?;
     store.clear_unused_entries()?;
     let expired = store.expired(now)?;
@@ -75,21 +63,37 @@ pub(crate) fn make_room(
     Ok(read)
 }
 
+/// Every VM of the namespace and every snapshot but `keep`: under the lock no run is alive.
+pub(crate) fn clear(sandbox: &impl Sandbox, keep: &[SnapshotId]) -> Result<(), StandError> {
+    let left = sandbox.leftovers()?;
+    for id in &left.sandboxes {
+        sandbox.destroy(id)?;
+    }
+    for id in left.snapshots.iter().filter(|id| !keep.contains(id)) {
+        sandbox.drop_snapshot(id)?;
+    }
+    Ok(())
+}
+
 /// The snapshots of cache entries and of kept runs that nothing names any more.
 pub(crate) fn drop_snapshots(
     sandbox: &impl Sandbox,
     entries: &[Utf8PathBuf],
     runs: &[RunPaths],
 ) -> Result<(), StandError> {
-    let mut ids: Vec<SnapshotId> = Vec::new();
+    for id in &named(entries, runs)? {
+        sandbox.drop_snapshot(id)?;
+    }
+    Ok(())
+}
+
+fn named(entries: &[Utf8PathBuf], runs: &[RunPaths]) -> Result<Vec<SnapshotId>, StandError> {
+    let mut ids = Vec::new();
     for entry in entries {
         ids.extend(run::cached_ids(entry)?.unwrap_or_default());
     }
     for run in runs {
         ids.extend(run::kept_ids(&run.dir)?);
     }
-    for id in &ids {
-        sandbox.drop_snapshot(id)?;
-    }
-    Ok(())
+    Ok(ids)
 }

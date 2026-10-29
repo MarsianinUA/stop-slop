@@ -3,7 +3,7 @@
 
 use std::env;
 use std::ffi::OsString;
-use std::io::{self, Write};
+use std::io;
 use std::process::{self, ExitCode};
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -42,11 +42,7 @@ fn main() -> ExitCode {
     });
     let (cwd, store, sandbox) = match started {
         Ok(started) => started,
-        Err(message) => {
-            // A stderr that fails has nowhere left to report it; the exit code still tells.
-            let _ = writeln!(err, "{message}\nnext: stop-slop-stand guide");
-            return Exit::Broken.into();
-        }
+        Err(message) => return cli::refuse_start(&command, &message, &mut out, &mut err).into(),
     };
     let env = Env {
         cwd: &cwd,

@@ -66,7 +66,7 @@ mod tests {
 
     /// Every variant, `Guide` with each topic.
     fn every_next() -> Vec<Next> {
-        let topics = guide::TOPICS.map(|(_, topic)| Next::Guide(Some(topic)));
+        let topics = guide::TOPICS.map(|topic| Next::Guide(Some(topic)));
         let mut every = vec![
             Next::Snapshot,
             Next::Init,

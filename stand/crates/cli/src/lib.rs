@@ -1,5 +1,8 @@
 //! The command `stop-slop-stand`. `execute` is the whole program but the process: `main` gives it
 //! the folders of the OS, the adapter, Ctrl+C and the host, tests give it a `Fake` and their own.
+//!
+//! A failed write of a refusal, a line or a summary (`let _ =`) is not reported: there is nowhere
+//! left to report it, and the exit code still tells.
 
 use std::io::Write;
 use std::process::ExitCode;
@@ -7,9 +10,12 @@ use std::time::SystemTime;
 
 use budget::{Host, HostError};
 use camino::{Utf8Path, Utf8PathBuf};
+use report::{Cause, Failure, Line, Next, Phase, slashed};
 use run::Cancel;
 use sandbox::Sandbox;
 use store::{RunLock, Session, Store};
+
+use crate::error::{At, Halt};
 
 mod accept;
 mod args;
@@ -86,9 +92,44 @@ pub fn execute(command: Command, sandbox: &impl Sandbox, mut env: Env<'_>) -> Ex
     done.unwrap_or_else(|error| refused(&error, &mut env))
 }
 
+/// What fails before `execute`: the folders of the OS, the stand folder, the adapter. Exit 3, and
+/// `run --json` prints its line too, with the phase `config`: every exit code has one (row 83).
+pub fn refuse_start(
+    command: &Command,
+    message: &str,
+    out: &mut dyn Write,
+    err: &mut dyn Write,
+) -> Exit {
+    let next = vec![Next::Guide(None)];
+    let _ = writeln!(err, "{message}");
+    let _ = next::print_next(err, &next);
+    if let Command::Run { output, .. } | Command::DryRun { output, .. } = command
+        && let Output::Json(layout) = *output
+    {
+        let line = refusal_line(Phase::Config, error_cause(message), next);
+        let _ = next::print_line(out, &line, layout);
+    }
+    Exit::Broken
+}
+
+fn refusal_line(phase: Phase, cause: Cause, next: Vec<Next>) -> Line {
+    let failure = Failure {
+        phase,
+        service: None,
+        repeat: None,
+        cause,
+        logs: None,
+        probes: Vec::new(),
+    };
+    Line::failed(failure, None, next)
+}
+
+fn error_cause(text: &str) -> Cause {
+    Cause::Error(text.lines().collect::<Vec<_>>().join("; "))
+}
+
 /// The commands without `--json`: the reason, then on 2 and 3 the `next:` lines (plan, row 83).
 fn refused(error: &StandError, env: &mut Env<'_>) -> Exit {
-    // A stderr that fails has nowhere left to report it; the exit code still tells.
     let _ = writeln!(env.err, "{error}");
     let exit = error.exit();
     if matches!(exit, Exit::Refused | Exit::Broken) {
@@ -106,28 +147,36 @@ fn stand_file(cwd: &Utf8Path, worktree: &source::Worktree) -> Utf8PathBuf {
         .join(STAND_FILE)
 }
 
-/// The stand file of the work tree, loaded, for `inspect` and `accept`: the key of their session
-/// is its path and `session()` rewrites the session's images, so it must load, and they wait its
-/// `run::span` (Gate 1, row 65).
-struct Loaded {
+/// What `run`, `inspect` and `accept` read before the lock: the work tree, `stand.toml` and the
+/// live stand file. The key of a session is the stand file's path and `session()` rewrites the
+/// session's images, so the stand file must load, and the lock waits its `run::span` (Gate 1,
+/// row 65).
+struct Opened {
     worktree: source::Worktree,
     file: Utf8PathBuf,
     policy: spec::Policy,
-    stand: spec::Stand,
+    share: budget::Share,
+    live: spec::Stand,
 }
 
-impl Loaded {
-    fn read(env: &Env<'_>) -> Result<Loaded, StandError> {
-        let worktree = source::open(env.cwd)?;
-        let (policy, _) = policy(env.store)?;
+impl Opened {
+    fn read(env: &Env<'_>) -> Result<Opened, Halt> {
+        let worktree = source::open(env.cwd).at(Phase::Source)?;
+        let (policy, share) = policy(env.store).at(Phase::Config)?;
         let file = stand_file(env.cwd, &worktree);
-        let stand = spec::load(&file, &policy)?;
-        Ok(Loaded {
+        let live = spec::load(&file, &policy).at(Phase::Spec)?;
+        Ok(Opened {
             worktree,
             file,
             policy,
-            stand,
+            share,
+            live,
         })
+    }
+
+    fn lock(&self, env: &mut Env<'_>) -> Result<RunLock, Halt> {
+        let span = run::span(&self.live);
+        lock::wait(env.store, span, env.cancel, &mut *env.err).at(Phase::Lock)
     }
 
     /// The caller keeps the lock while it uses the session.
@@ -136,19 +185,13 @@ impl Loaded {
         env: &mut Env<'_>,
         now: SystemTime,
     ) -> Result<(RunLock, Session), StandError> {
-        let span = run::span(&self.stand);
-        let lock = lock::wait(env.store, span, env.cancel, &mut *env.err)?;
-        let images = images(&self.stand);
+        let lock = self.lock(env)?;
+        let images = images(&self.live);
         let session = env
             .store
             .session(&self.file, &self.worktree.root, &images, now)?;
         Ok((lock, session))
     }
-}
-
-/// Paths print with `/` on every OS (plan, row 45).
-fn slashed(path: &Utf8Path) -> String {
-    path.as_str().replace('\\', "/")
 }
 
 /// The images of a stand, each once, in the order of their services.

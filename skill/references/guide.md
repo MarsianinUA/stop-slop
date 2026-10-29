@@ -140,7 +140,7 @@ The recipe is the folder `<git common>/info/stop-slop-stand/`: the stand file `c
 
 - `<run>` is `run` of the line; only the kept run of the session works, the last one that kept snapshots. `<side>` is `head` or `before`. `<service>` is a service with a volume: only those keep an end-of-run snapshot.
 - The copy runs alone, without its neighbours and without network, with the command of its service; a service that cannot start that way is exit 2 with the reason.
-- `argv` runs under 60 seconds. The first line is `exit <code>` or `timeout`, then at most 40 lines of its stdout, then `full output <path>`; its stderr is in `<path>.err`. The code of `argv` never becomes the exit code.
+- `argv` runs under 60 seconds. The first line is `exit <code>` or `timeout`, then at most 40 lines and 64 KiB of its stdout, then `full output <path>`; its stderr is in `<path>.err`. The code of `argv` never becomes the exit code.
   - When `argv` left something other than a regular file at that path, such as a link, one line says so and nothing of it is printed.
 - A write lands in the copy only: the kept snapshot stays as it was.
 - After a failed head (exit 1), `next` names the `inspect` of each volume service with the state of the failure. A probe (`guide probes`) is what turns a look into a measured fact.

@@ -3,17 +3,19 @@
 //! the exit code. The budget is not counted again: one VM within the limits the run had.
 
 use std::fs::{self, File};
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::time::SystemTime;
 
 use run::{InspectError, Inspected, Side};
 use sandbox::{ExecOutcome, Sandbox};
 
 use crate::error::StandError;
-use crate::{Env, Exit, Loaded, slashed};
+use crate::{Env, Exit, Opened, slashed};
 
 /// Lines of stdout printed; the file holds the rest.
 const LINES: usize = 40;
+/// Bytes read for them at most: one line can be the whole file.
+const BYTES: u64 = 64 << 10;
 
 pub(crate) fn run(
     run_id: &str,
@@ -23,8 +25,8 @@ pub(crate) fn run(
     sandbox: &impl Sandbox,
     env: &mut Env<'_>,
 ) -> Result<Exit, StandError> {
-    let loaded = Loaded::read(env)?;
-    let (_lock, session) = loaded.session(env, SystemTime::now())?;
+    let opened = Opened::read(env)?;
+    let (_lock, session) = opened.session(env, SystemTime::now())?;
     let kept = match session.kept()? {
         Some(kept) if kept.id == run_id => kept,
         other => {
@@ -42,31 +44,25 @@ pub(crate) fn run(
 
 fn print(inspected: &Inspected, out: &mut dyn Write) -> Result<(), StandError> {
     let path = &inspected.out;
-    let stdout = |source| StandError::Io {
-        path: "stdout".into(),
-        source,
-    };
-    let read = |source| StandError::Io {
-        path: path.clone(),
-        source,
-    };
+    let stdout = StandError::io("stdout");
+    let read = StandError::io(path);
     match inspected.outcome {
         ExecOutcome::Exited(code) => writeln!(out, "exit {code}"),
         ExecOutcome::TimedOut => writeln!(out, "timeout"),
     }
-    .map_err(stdout)?;
+    .map_err(&stdout)?;
     // `<run>/inspect/` is a writable bind of the guest, so `argv` may have left a link or a folder
     // there; a link is never followed. The VM is gone, so what is checked here stays.
     let regular = fs::symlink_metadata(path).is_ok_and(|meta| meta.is_file());
     if !regular {
         let said = format!("the output {} is not a regular file", slashed(path));
-        return writeln!(out, "{said}; nothing of it is printed").map_err(stdout);
+        return writeln!(out, "{said}; nothing of it is printed").map_err(&stdout);
     }
-    let file = File::open(path).map_err(read)?;
-    for line in BufReader::new(file).split(b'\n').take(LINES) {
-        let line = line.map_err(read)?;
+    let file = File::open(path).map_err(&read)?;
+    for line in BufReader::new(file.take(BYTES)).split(b'\n').take(LINES) {
+        let line = line.map_err(&read)?;
         let line = line.strip_suffix(b"\r").unwrap_or(&line);
-        writeln!(out, "{}", String::from_utf8_lossy(line)).map_err(stdout)?;
+        writeln!(out, "{}", String::from_utf8_lossy(line)).map_err(&stdout)?;
     }
-    writeln!(out, "full output {}", slashed(path)).map_err(stdout)
+    writeln!(out, "full output {}", slashed(path)).map_err(&stdout)
 }

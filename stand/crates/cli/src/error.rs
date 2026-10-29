@@ -73,6 +73,14 @@ pub(crate) enum StandError {
 }
 
 impl StandError {
+    pub(crate) fn io(path: impl Into<Utf8PathBuf>) -> impl Fn(io::Error) -> StandError {
+        let path = path.into();
+        move |source| StandError::Io {
+            path: path.clone(),
+            source,
+        }
+    }
+
     pub(crate) fn exit(&self) -> Exit {
         match self {
             StandError::Source(error) => match error {
@@ -156,6 +164,13 @@ impl StandError {
 pub(crate) struct Halt {
     pub phase: Phase,
     pub error: StandError,
+}
+
+/// The commands without a line, which print no phase.
+impl From<Halt> for StandError {
+    fn from(halt: Halt) -> StandError {
+        halt.error
+    }
 }
 
 pub(crate) trait At<T> {

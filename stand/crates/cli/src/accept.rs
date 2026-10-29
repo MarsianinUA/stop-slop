@@ -8,7 +8,7 @@ use spec::Change;
 use store::Acceptance;
 
 use crate::error::StandError;
-use crate::{Env, Exit, Loaded, Reason, context};
+use crate::{Env, Exit, Opened, Reason, context};
 
 pub(crate) fn run(
     measure: &str,
@@ -22,15 +22,15 @@ pub(crate) fn run(
     }
     // Kept and printed as `Next::Accept` writes it: `+015%` is `+15%`.
     let bound = context::bound(change);
-    let loaded = Loaded::read(env)?;
-    if !change.within(&loaded.policy) {
+    let opened = Opened::read(env)?;
+    if !change.within(&opened.policy) {
         return Err(StandError::TooWide {
             allow: bound.to_string(),
-            max: loaded.policy.max_tolerance.get(),
+            max: opened.policy.max_tolerance.get(),
         });
     }
     let now = SystemTime::now();
-    let (_lock, session) = loaded.session(env, now)?;
+    let (_lock, session) = opened.session(env, now)?;
     let history = session.history()?;
     let last = history.iter().rev().find(|record| record.passed);
     let last = last.ok_or(StandError::NoRun)?;
@@ -55,10 +55,7 @@ pub(crate) fn run(
         head_tree: head_tree.clone(),
         accepted_at: now,
     })?;
-    let said = writeln!(env.out, "accepted {measure} {bound} for head {head_tree}");
-    said.map_err(|source| StandError::Io {
-        path: "stdout".into(),
-        source,
-    })?;
+    writeln!(env.out, "accepted {measure} {bound} for head {head_tree}")
+        .map_err(StandError::io("stdout"))?;
     Ok(Exit::Passed)
 }

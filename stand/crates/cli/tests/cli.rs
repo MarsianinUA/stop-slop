@@ -96,6 +96,14 @@ struct Ran {
 }
 
 impl Ran {
+    fn new(exit: Exit, out: Vec<u8>, err: Vec<u8>) -> Ran {
+        Ran {
+            exit,
+            out: String::from_utf8(out).unwrap(),
+            err: String::from_utf8(err).unwrap(),
+        }
+    }
+
     /// The one line of `--json`.
     fn line(&self) -> Value {
         let lines: Vec<&str> = self.out.lines().collect();
@@ -208,16 +216,11 @@ impl World {
                 },
             ),
         };
-        Ran {
-            exit,
-            out: String::from_utf8(out).unwrap(),
-            err: String::from_utf8(err).unwrap(),
-        }
+        Ran::new(exit, out, err)
     }
 
     fn report(&self, line: &Value) -> Value {
-        let path = line["report"].as_str().expect("a report");
-        serde_json::from_str(&fs::read_to_string(path).unwrap()).unwrap()
+        read_json(Utf8Path::new(line["report"].as_str().expect("a report")))
     }
 
     /// The folder of a run by its id, in whichever session holds it.
@@ -233,6 +236,28 @@ impl World {
     fn sessions(&self) -> Vec<Utf8PathBuf> {
         folders(&self.paths.root.join("sessions"))
     }
+}
+
+fn read_json(path: &Utf8Path) -> Value {
+    serde_json::from_str(&fs::read_to_string(path).unwrap()).unwrap()
+}
+
+/// What a run did from `mark` of the journal up to its first `Create`: the start.
+fn before_first_create(fake: &Fake, mark: usize) -> Vec<Call> {
+    let journal = fake.journal()[mark..].to_vec();
+    let first = journal
+        .iter()
+        .position(|call| matches!(call, Call::Create { .. }))
+        .unwrap();
+    journal[..first].to_vec()
+}
+
+fn dropped(calls: &[Call]) -> Vec<SnapshotId> {
+    let ids = calls.iter().filter_map(|call| match call {
+        Call::DropSnapshot(id) => Some(id.clone()),
+        _ => None,
+    });
+    ids.collect()
 }
 
 fn folders(dir: &Utf8Path) -> Vec<Utf8PathBuf> {
@@ -270,8 +295,7 @@ fn cached_of(session: &Utf8Path) -> Vec<SnapshotId> {
 
 /// The snapshots of the kept run of a session (`kept` of `session.json`, `kept.json`).
 fn kept_of(session: &Utf8Path) -> Vec<SnapshotId> {
-    let state: Value =
-        serde_json::from_str(&fs::read_to_string(session.join("session.json")).unwrap()).unwrap();
+    let state = read_json(&session.join("session.json"));
     match state["kept"].as_str() {
         Some(run) => run::kept_ids(&session.join("runs").join(run)).unwrap(),
         None => Vec::new(),
@@ -582,6 +606,34 @@ fn the_json_line_is_one_line_on_success_failure_and_refusal_and_pretty_indents_i
     let pretty = world.run(&fake(Vec::new()), &["run", "--json", "--pretty"]);
     let value: Value = serde_json::from_str(&pretty.out).unwrap();
     assert!(pretty.out.lines().count() > 1 && value["run"].is_string());
+    // Before `execute`: the folders of the OS, the stand folder or the adapter fail in `main`.
+    for (args, json) in [
+        (&["run", "--json"][..], true),
+        (&["run", "--dry-run", "--json"], true),
+        (&["run"], false),
+        (&["guide"], false),
+    ] {
+        let args = std::iter::once("stop-slop-stand").chain(args.iter().copied());
+        let command = cli::parse(args.map(OsString::from)).unwrap();
+        let (mut out, mut err) = (Vec::new(), Vec::new());
+        let exit = cli::refuse_start(&command, "C:/stand: denied\nby the OS", &mut out, &mut err);
+        let ran = Ran::new(exit, out, err);
+        assert_eq!(ran.exit, Exit::Broken);
+        assert!(
+            ran.err.starts_with("C:/stand: denied\nby the OS\n"),
+            "{}",
+            ran.err
+        );
+        assert_eq!(ran.next(), ["stop-slop-stand guide"]);
+        if json {
+            let line = ran.line();
+            assert_eq!(line["failure"]["phase"], "config");
+            assert_eq!(line["failure"]["cause"], "C:/stand: denied; by the OS");
+            assert_eq!(line["next"], serde_json::json!(["stop-slop-stand guide"]));
+        } else {
+            assert_eq!(ran.out, "");
+        }
+    }
 }
 
 #[test]
@@ -803,26 +855,14 @@ fn the_start_sweeps_leftovers_but_keeps_kept_and_cached_snapshots_and_the_ttl_fo
     fs::write(world.tar("head"), b"partial").unwrap();
     let mark = fake.journal().len();
     assert_eq!(world.run(&fake, &["run"]).exit, Exit::Passed);
-    let journal = fake.journal()[mark..].to_vec();
-    let first_create = journal
-        .iter()
-        .position(|call| matches!(call, Call::Create { .. }))
-        .unwrap();
-    let swept = &journal[..first_create];
+    let swept = before_first_create(&fake, mark);
     assert!(
         swept
             .iter()
             .any(|call| matches!(call, Call::Destroy(id) if *id == stray[0]))
     );
-    let dropped: Vec<SnapshotId> = swept
-        .iter()
-        .filter_map(|call| match call {
-            Call::DropSnapshot(id) => Some(id.clone()),
-            _ => None,
-        })
-        .collect();
     assert_eq!(
-        dropped,
+        dropped(&swept),
         [stray_snapshot],
         "only the stray goes at the start"
     );
@@ -874,7 +914,7 @@ fn db_launch(fake: &Fake) -> Launch {
 fn age_sessions(world: &World, by: Duration) {
     for session in world.sessions() {
         let path = session.join("session.json");
-        let mut state: Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        let mut state = read_json(&path);
         let old = SystemTime::now() - by;
         state["usedAt"] = Value::String(humantime::format_rfc3339(old).to_string());
         fs::write(&path, state.to_string()).unwrap();
@@ -913,18 +953,7 @@ fn a_low_disk_drops_the_cache_and_kept_run_of_others_then_its_own_cache_then_its
     let ran = world.run_on(&fake, &["run"], &host, &Cancel::new());
     assert_eq!(ran.exit, Exit::Passed, "{}", ran.err);
     assert_eq!(reads.get(), 3);
-    let journal = fake.journal()[mark..].to_vec();
-    let first_create = journal
-        .iter()
-        .position(|call| matches!(call, Call::Create { .. }))
-        .unwrap();
-    let dropped: Vec<SnapshotId> = journal[..first_create]
-        .iter()
-        .filter_map(|call| match call {
-            Call::DropSnapshot(id) => Some(id.clone()),
-            _ => None,
-        })
-        .collect();
+    let dropped = dropped(&before_first_create(&fake, mark));
     let (first, then) = dropped.split_at(others.len().min(dropped.len()));
     assert_eq!(set(first), others, "the others' go first");
     assert_eq!(
@@ -935,8 +964,7 @@ fn a_low_disk_drops_the_cache_and_kept_run_of_others_then_its_own_cache_then_its
     // Its setup came from no cache: the slot was gone.
     let own_runs = folders(&own.join("runs"));
     let last = own_runs.last().unwrap();
-    let report: Value =
-        serde_json::from_str(&fs::read_to_string(last.join("report.json")).unwrap()).unwrap();
+    let report = read_json(&last.join("report.json"));
     assert!(report["head"]["setup"]["cached"].is_null());
     // The disk low to the end: the kept run goes too, and the budget refuses.
     let low = |dir: &Utf8Path| {
@@ -1014,7 +1042,7 @@ fn a_pooled_run_takes_the_fault_and_the_second_pass_and_runs_them_again_when_unk
     // The last report of the pool knows no category (no head repeat reached the fault) and has no
     // second pass: the next run makes both again.
     let path = dir.join("report.json");
-    let mut last: Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+    let mut last = read_json(&path);
     for category in last["fault"]["categories"]["head"].as_array_mut().unwrap() {
         for value in category["values"].as_array_mut().unwrap() {
             *value = Value::String("unknown".into());
@@ -1207,8 +1235,7 @@ fn clean_drops_snapshots_before_images_and_keeps_the_journal() {
 /// The folder of the entry a cache slot of a session names (`cache.<slot>.digest` of
 /// `session.json`, a law of the blueprint).
 fn slot_entry(session: &Utf8Path, slot: &str) -> Utf8PathBuf {
-    let state: Value =
-        serde_json::from_str(&fs::read_to_string(session.join("session.json")).unwrap()).unwrap();
+    let state = read_json(&session.join("session.json"));
     let digest = state["cache"][slot]["digest"]
         .as_str()
         .unwrap_or_else(|| panic!("no {slot} slot: {state}"));
@@ -1606,6 +1633,19 @@ fn inspect_prints_the_code_forty_lines_and_the_path_and_refuses_what_is_not_kept
     let again = world.run(&fake, &["inspect", run, "head", "db", "--", "true"]);
     let said = format!("exit 0\nfull output {}\n", looked(&world, run, 2));
     assert_eq!(again.out, said);
+    // One line of a megabyte: 64 KiB of it are read and printed.
+    let long = |stdout: &Utf8Path| {
+        fs::write(stdout, format!("{}\nrow 2\n", "x".repeat(1 << 20))).unwrap();
+    };
+    let swapped = Wrapped {
+        after_exec: Some(&long),
+        ..Wrapped::new(&fake)
+    };
+    let ran = world.run(&swapped, &["inspect", run, "head", "db", "--", "true"]);
+    let lines: Vec<&str> = ran.out.lines().collect();
+    assert_eq!(lines.len(), 3, "{}", ran.err);
+    assert_eq!(lines[1], "x".repeat(64 << 10));
+    assert_eq!(lines[2], format!("full output {}", looked(&world, run, 3)));
     // What `argv` leaves in place of its output is not a regular file: nothing of it is printed.
     let folder = |stdout: &Utf8Path| {
         fs::remove_file(stdout).unwrap();
@@ -1621,7 +1661,7 @@ fn inspect_prints_the_code_forty_lines_and_the_path_and_refuses_what_is_not_kept
         let path = looked(&world, run, n);
         format!("exit 0\nthe output {path} is not a regular file; nothing of it is printed\n")
     };
-    assert_eq!(ran.out, not_regular(3));
+    assert_eq!(ran.out, not_regular(4));
     // Windows makes a link only in developer mode or for an administrator, so Linux CI runs this.
     #[cfg(unix)]
     {
@@ -1636,7 +1676,7 @@ fn inspect_prints_the_code_forty_lines_and_the_path_and_refuses_what_is_not_kept
             ..Wrapped::new(&fake)
         };
         let ran = world.run(&linked, &["inspect", run, "head", "db", "--", "true"]);
-        assert_eq!(ran.out, not_regular(4));
+        assert_eq!(ran.out, not_regular(5));
     }
     // Another run, a side or a service the kept run has no snapshot of: 2, and no VM.
     let mark = fake.journal().len();

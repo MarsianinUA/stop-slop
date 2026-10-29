@@ -12,14 +12,15 @@ use report::{Cause, Extra, Failure, Line, Next, Phase, Previous, Report, Topic};
 use run::{Cancel, Failed, RunError, Version, Versions};
 use sandbox::{ImageRef, Sandbox};
 use source::{Before, Resolved, Tree, Worktree};
-use spec::{Policy, Stand};
-use store::{PoolKey, RunPaths, Session, Slot, Store};
+use spec::Stand;
+use store::{PoolKey, RunLock, RunPaths, Session, Slot, Store};
 
 use crate::cache::{self, Planned};
 use crate::context::{self, Known};
 use crate::error::{At, Halt, StandError};
 use crate::{
-    Compare, Env, Exit, Output, images, lock, next, policy, seal, slashed, stand_file, sweep,
+    Compare, Env, Exit, Opened, Output, error_cause, images, next, refusal_line, refused, seal,
+    slashed, sweep,
 };
 
 /// How a run ended, for the line or the summary.
@@ -38,15 +39,6 @@ enum Ended {
         halt: Halt,
         run: Option<String>,
     },
-}
-
-/// Step 1: what is read before the lock.
-struct Opened {
-    worktree: Worktree,
-    file: Utf8PathBuf,
-    policy: Policy,
-    share: budget::Share,
-    live: Stand,
 }
 
 /// What the cleanup after the run needs, as far as the run got.
@@ -68,18 +60,12 @@ pub(crate) fn run(
     sandbox: &impl Sandbox,
     env: &mut Env<'_>,
 ) -> Exit {
-    let ended = match opened(env) {
+    let ended = match locked(env) {
         Err(halt) => Ended::Halted { halt, run: None },
-        Ok(opened) => {
-            let span = run::span(&opened.live);
-            match lock::wait(env.store, span, env.cancel, &mut *env.err).at(Phase::Lock) {
-                Err(halt) => Ended::Halted { halt, run: None },
-                Ok(_lock) => {
-                    let mut made = Made::default();
-                    let outcome = measure(opened, compare, sandbox, env, &mut made);
-                    settle(outcome, &made, sandbox, env.store, &mut *env.err)
-                }
-            }
+        Ok((_lock, opened)) => {
+            let mut made = Made::default();
+            let outcome = measure(opened, compare, sandbox, env, &mut made);
+            settle(outcome, made, sandbox, env.store, &mut *env.err)
         }
     };
     print(ended, output, env)
@@ -91,16 +77,11 @@ pub(crate) fn dry(
     sandbox: &impl Sandbox,
     env: &mut Env<'_>,
 ) -> Exit {
-    let checked = opened(env).and_then(|opened| {
-        let span = run::span(&opened.live);
-        let _lock = lock::wait(env.store, span, env.cancel, &mut *env.err).at(Phase::Lock)?;
-        dry_checks(opened, before, sandbox, env)
-    });
+    let checked = locked(env).and_then(|(_lock, opened)| dry_checks(opened, before, sandbox, env));
     let text = match checked {
         Err(halt) => return print(Ended::Halted { halt, run: None }, output, env),
         Ok(text) => text,
     };
-    // A stdout that fails has nowhere left to report it; the exit code still tells.
     let _ = match output {
         Output::Json(layout) => next::print_line(env.out, &Line::default(), layout),
         Output::Summary => write!(env.out, "{text}"),
@@ -108,18 +89,25 @@ pub(crate) fn dry(
     Exit::Passed
 }
 
-fn opened(env: &Env<'_>) -> Result<Opened, Halt> {
-    let worktree = source::open(env.cwd).at(Phase::Source)?;
-    let (policy, share) = policy(env.store).at(Phase::Config)?;
-    let file = stand_file(env.cwd, &worktree);
-    let live = spec::load(&file, &policy).at(Phase::Spec)?;
-    Ok(Opened {
-        worktree,
-        file,
-        policy,
-        share,
-        live,
-    })
+/// Steps 1 and 2: what is read before the lock, then the lock.
+fn locked(env: &mut Env<'_>) -> Result<(RunLock, Opened), Halt> {
+    let opened = Opened::read(env)?;
+    Ok((opened.lock(env)?, opened))
+}
+
+/// Steps 4 and 5, for `run` and `--dry-run` alike: the sweep, room on the disk, the budget.
+fn admit(
+    stand: &Stand,
+    share: budget::Share,
+    session: &Session,
+    sandbox: &impl Sandbox,
+    env: &Env<'_>,
+    now: SystemTime,
+) -> Result<budget::Admission, Halt> {
+    sweep::leftovers(sandbox, env.store, now).at(Phase::Sweep)?;
+    checkpoint(env.cancel, Phase::Sweep)?;
+    let host = sweep::make_room(sandbox, env.store, session.key(), env.host).at(Phase::Budget)?;
+    budget::check(demand(stand), &host, share).at(Phase::Budget)
 }
 
 /// The first step under the lock: a missing snapshot, an unknown ref or a "before" equal to the
@@ -162,9 +150,7 @@ fn measure(
     let session = store
         .session(&file, &worktree.root, &images(&live), now)
         .at(Phase::Seal)?;
-    let key = session.key().to_owned();
-    made.session = Some(session);
-    let session = made.session.as_ref().expect("just set");
+    let session = &*made.session.insert(session);
     let (stand, sealed) = match compare {
         None => (live, None),
         Some(compare) => {
@@ -177,10 +163,7 @@ fn measure(
     };
     checkpoint(env.cancel, Phase::Seal)?;
 
-    sweep::leftovers(sandbox, store, now).at(Phase::Sweep)?;
-    checkpoint(env.cancel, Phase::Sweep)?;
-    let host = sweep::make_room(sandbox, store, &key, env.host).at(Phase::Budget)?;
-    budget::check(demand(&stand), &host, share).at(Phase::Budget)?;
+    admit(&stand, share, session, sandbox, env, now)?;
     let pulled = sandbox.pull(&image_refs(&stand)).at(Phase::Pull)?;
     checkpoint(env.cancel, Phase::Pull)?;
 
@@ -200,8 +183,9 @@ fn measure(
         before_tree: before.as_ref().map(|resolved| resolved.tree.to_string()),
         digest: stand.recipe.digest.clone(),
     };
-    let run = session.new_run(now, &pool_key).at(Phase::Source)?;
-    made.run = Some(run.clone());
+    let run = &*made
+        .run
+        .insert(session.new_run(now, &pool_key).at(Phase::Source)?);
 
     let left = sandbox.leftovers().at(Phase::Setup)?;
     let head_key = cache::key(&stand, &head, &pulled);
@@ -270,7 +254,7 @@ fn measure(
     });
     let report = report::make(&raw, &outputs, &context);
     report.write(&run.dir).at(Phase::Report)?;
-    session.passed(&run).at(Phase::Report)?;
+    session.passed(run).at(Phase::Report)?;
     Ok(Done::Passed(Box::new(report)))
 }
 
@@ -279,40 +263,48 @@ fn measure(
 /// here turns a passed run into exit 3; after a halt it only adds a line to stderr.
 fn settle(
     outcome: Result<Done, Halt>,
-    made: &Made,
+    made: Made,
     sandbox: &impl Sandbox,
     store: &Store,
     err: &mut dyn Write,
 ) -> Ended {
+    let Made {
+        session,
+        run,
+        plans,
+    } = made;
     let mut settled = Ok(());
-    if let (Some(session), Some(run)) = (&made.session, &made.run) {
+    if let (Some(session), Some(run)) = (&session, &run) {
         settled = match &outcome {
-            Ok(_) => cache::keep(session, &made.plans, sandbox, store),
-            Err(_) => cache::discard(&made.plans, sandbox, store),
+            Ok(_) => cache::keep(session, &plans, sandbox, store),
+            Err(_) => cache::discard(&plans, sandbox, store),
         }
         .and_then(|()| keep_run(session, run, sandbox));
     }
     let settled = settled
         .and_then(|()| Ok(store.clear_trees()?))
         .at(Phase::Report);
-    let run_id = made.run.as_ref().map(|run| run.id.clone());
-    match (outcome, settled) {
-        (Err(halt), settled) => {
+    match (outcome, settled, run) {
+        (Err(halt), settled, run) => {
             if let Err(also) = settled {
-                // A stderr that fails has nowhere left to report it.
                 let _ = writeln!(err, "{}", also.error);
             }
-            Ended::Halted { halt, run: run_id }
+            Ended::Halted {
+                halt,
+                run: run.map(|run| run.id),
+            }
         }
-        (Ok(_), Err(halt)) => Ended::Halted { halt, run: run_id },
-        (Ok(Done::Passed(report)), Ok(())) => Ended::Passed {
-            run: made.run.clone().expect("a passed run has its folder"),
-            report,
+        (Ok(_), Err(halt), run) => Ended::Halted {
+            halt,
+            run: run.map(|run| run.id),
         },
-        (Ok(Done::Failed(failed)), Ok(())) => Ended::Failed {
-            run: made.run.clone().expect("a failed run has its folder"),
-            failed,
-        },
+        (Ok(done), Ok(()), run) => {
+            let run = run.expect("a run that ended has its folder");
+            match done {
+                Done::Passed(report) => Ended::Passed { run, report },
+                Done::Failed(failed) => Ended::Failed { run, failed },
+            }
+        }
     }
 }
 
@@ -398,10 +390,7 @@ fn dry_checks(
         }
     };
     checkpoint(env.cancel, Phase::Seal)?;
-    sweep::leftovers(sandbox, store, now).at(Phase::Sweep)?;
-    checkpoint(env.cancel, Phase::Sweep)?;
-    let host = sweep::make_room(sandbox, store, session.key(), env.host).at(Phase::Budget)?;
-    let admitted = budget::check(demand(&stand), &host, share).at(Phase::Budget)?;
+    let admitted = admit(&stand, share, &session, sandbox, env, now)?;
     let cached = sandbox.cached(&image_refs(&stand)).at(Phase::Pull)?;
     checkpoint(env.cancel, Phase::Pull)?;
 
@@ -446,25 +435,25 @@ fn dry_checks(
 }
 
 fn print(ended: Ended, output: Output, env: &mut Env<'_>) -> Exit {
-    // A stdout or stderr that fails has nowhere left to report it; the exit code still tells.
     match ended {
         Ended::Passed { run, report } => {
             let line = report.line(&run.dir);
             let _ = match output {
                 Output::Json(layout) => next::print_line(env.out, &line, layout),
                 Output::Summary => write!(env.out, "{}", report.summary())
-                    .and_then(|()| {
-                        let path = run.dir.join("report.json");
-                        writeln!(env.out, "report {}", slashed(&path))
+                    .and_then(|()| match &line.report {
+                        Some(path) => writeln!(env.out, "report {}", slashed(path)),
+                        None => Ok(()),
                     })
                     .and_then(|()| next::print_next(env.out, &line.next)),
             };
             Exit::Passed
         }
         Ended::Failed { run, failed } => {
-            let next = inspect_next(&run.id, &failed.kept);
-            let _ = writeln!(env.err, "the head failed: {}", one_line(&failed.failure));
-            let mut line = Line::failed(failed.failure.clone(), Some(&failed.raw), next);
+            let Failed { failure, raw, kept } = *failed;
+            let next = inspect_next(&run.id, &kept);
+            let _ = writeln!(env.err, "the head failed: {}", one_line(&failure));
+            let mut line = Line::failed(failure, Some(&raw), next);
             line.run = Some(run.id);
             let _ = match output {
                 Output::Json(layout) => next::print_line(env.out, &line, layout),
@@ -474,32 +463,13 @@ fn print(ended: Ended, output: Output, env: &mut Env<'_>) -> Exit {
             Exit::AppFailed
         }
         Ended::Halted { halt, run } => {
-            let exit = halt.error.exit();
-            let next = halt.error.next();
-            let _ = writeln!(env.err, "{}", halt.error);
-            if matches!(exit, Exit::Refused | Exit::Broken) {
-                let _ = next::print_next(env.err, &next);
-            }
+            let exit = refused(&halt.error, env);
             if let Output::Json(layout) = output {
                 let cause = match exit {
                     Exit::Cancelled => Cause::Cancelled,
-                    _ => Cause::Error(
-                        halt.error
-                            .to_string()
-                            .lines()
-                            .collect::<Vec<_>>()
-                            .join("; "),
-                    ),
+                    _ => error_cause(&halt.error.to_string()),
                 };
-                let failure = Failure {
-                    phase: halt.phase,
-                    service: None,
-                    repeat: None,
-                    cause,
-                    logs: None,
-                    probes: Vec::new(),
-                };
-                let mut line = Line::failed(failure, None, next);
+                let mut line = refusal_line(halt.phase, cause, halt.error.next());
                 line.run = run;
                 let _ = next::print_line(env.out, &line, layout);
             }
@@ -546,16 +516,12 @@ fn checkpoint(cancel: &Cancel, phase: Phase) -> Result<(), Halt> {
     Ok(())
 }
 
-/// A tar that fails halfway is deleted: a partial one could look whole (review of T-08).
+/// A tar that fails halfway is deleted: a partial one could look whole (review of T-08). It lives
+/// for this run only, so it is not synced to the disk.
 fn write_tar(worktree: &Worktree, tree: &Tree, path: &Utf8Path) -> Result<(), StandError> {
-    let io = |source| StandError::Io {
-        path: path.to_owned(),
-        source,
-    };
-    let written = File::create(path).map_err(io).and_then(|mut file| {
-        source::archive(worktree, tree, &mut file)?;
-        file.sync_all().map_err(io)
-    });
+    let written = File::create(path)
+        .map_err(StandError::io(path))
+        .and_then(|mut file| Ok(source::archive(worktree, tree, &mut file)?));
     if written.is_err() {
         // The archive's own error is the one to report.
         let _ = std::fs::remove_file(path);

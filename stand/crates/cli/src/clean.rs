@@ -8,7 +8,7 @@ use sandbox::Sandbox;
 use store::Clean;
 
 use crate::error::StandError;
-use crate::{Env, Exit, lock, policy, stand_file};
+use crate::{Env, Exit, lock, policy, stand_file, sweep};
 
 pub(crate) fn run(
     what: Clean,
@@ -29,13 +29,7 @@ pub(crate) fn run(
     )?;
     match what {
         Clean::Sessions => {
-            let left = sandbox.leftovers()?;
-            for id in &left.sandboxes {
-                sandbox.destroy(id)?;
-            }
-            for id in &left.snapshots {
-                sandbox.drop_snapshot(id)?;
-            }
+            sweep::clear(sandbox, &[])?;
             sandbox.prune_images(&[])?;
         }
         // Without the adapter: a microsandbox home that no longer opens is wiped too, and this

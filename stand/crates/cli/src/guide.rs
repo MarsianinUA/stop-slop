@@ -4,7 +4,6 @@
 use std::fs::{self, OpenOptions};
 use std::io::{ErrorKind, Write};
 
-use camino::Utf8Path;
 use report::Topic;
 
 use crate::error::StandError;
@@ -16,12 +15,12 @@ const TEMPLATE: &str = include_str!("template.yaml");
 
 /// In the order of the contents. `probes` is the whole of `probes.md`; the others are the `## `
 /// sections of `guide.md`.
-pub(crate) const TOPICS: [(&str, Topic); 5] = [
-    ("recipe", Topic::Recipe),
-    ("probes", Topic::Probes),
-    ("expect", Topic::Expect),
-    ("line", Topic::Line),
-    ("inspect", Topic::Inspect),
+pub(crate) const TOPICS: [Topic; 5] = [
+    Topic::Recipe,
+    Topic::Probes,
+    Topic::Expect,
+    Topic::Line,
+    Topic::Inspect,
 ];
 
 pub(crate) fn name(topic: Topic) -> &'static str {
@@ -35,7 +34,7 @@ pub(crate) fn name(topic: Topic) -> &'static str {
 }
 
 pub(crate) fn names() -> String {
-    TOPICS.map(|(name, _)| name).join(", ")
+    TOPICS.map(name).join(", ")
 }
 
 pub(crate) fn run(topic: Option<Topic>, env: &mut Env<'_>) -> Result<Exit, StandError> {
@@ -50,10 +49,7 @@ pub(crate) fn run(topic: Option<Topic>, env: &mut Env<'_>) -> Result<Exit, Stand
             .expect("every topic but probes is a section of guide.md")
             .to_owned(),
     };
-    write!(env.out, "{text}").map_err(|source| StandError::Io {
-        path: "stdout".into(),
-        source,
-    })?;
+    write!(env.out, "{text}").map_err(StandError::io("stdout"))?;
     Ok(Exit::Passed)
 }
 
@@ -90,26 +86,26 @@ pub(crate) fn init(env: &mut Env<'_>) -> Result<Exit, StandError> {
     let worktree = source::open(env.cwd)?;
     let file = stand_file(env.cwd, &worktree);
     let folder = file.parent().expect("the stand file lies in its folder");
-    let io = |path: &Utf8Path| {
-        let path = path.to_owned();
-        move |source| StandError::Io { path, source }
-    };
-    fs::create_dir_all(folder).map_err(io(folder))?;
+    fs::create_dir_all(folder).map_err(StandError::io(folder))?;
     let created = OpenOptions::new().write(true).create_new(true).open(&file);
     let mut handle = match created {
         Ok(handle) => handle,
         Err(error) if error.kind() == ErrorKind::AlreadyExists => {
             return Err(StandError::StandFileExists(file));
         }
-        Err(error) => return Err(io(&file)(error)),
+        Err(error) => return Err(StandError::io(&file)(error)),
     };
-    handle.write_all(TEMPLATE.as_bytes()).map_err(io(&file))?;
-    writeln!(env.out, "wrote {}", slashed(&file)).map_err(io(Utf8Path::new("stdout")))?;
+    handle
+        .write_all(TEMPLATE.as_bytes())
+        .map_err(StandError::io(&file))?;
+    writeln!(env.out, "wrote {}", slashed(&file)).map_err(StandError::io("stdout"))?;
     Ok(Exit::Passed)
 }
 
 #[cfg(test)]
 mod tests {
+    use camino::Utf8Path;
+
     use super::*;
 
     #[test]
@@ -118,14 +114,14 @@ mod tests {
         let mut headings: Vec<&str> = sections.iter().map(|(name, _)| *name).collect();
         headings.sort_unstable();
         let mut expected: Vec<&str> = TOPICS
-            .iter()
-            .map(|(name, _)| *name)
-            .filter(|name| *name != "probes")
+            .into_iter()
+            .filter(|topic| *topic != Topic::Probes)
+            .map(name)
             .collect();
         expected.sort_unstable();
         assert_eq!(headings, expected, "the `## ` sections of guide.md");
-        for (name, topic) in TOPICS {
-            assert_eq!(super::name(topic), name);
+        for topic in TOPICS {
+            let name = name(topic);
             if topic != Topic::Probes {
                 let text = section(name).unwrap();
                 let mut lines = text.lines();

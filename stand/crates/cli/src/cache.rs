@@ -4,7 +4,7 @@
 
 use report::SetupFrom;
 use run::SetupCache;
-use sandbox::{Cached, Leftovers, Pulled, Sandbox};
+use sandbox::{Cached, Leftovers, Pulled, Sandbox, SnapshotId};
 use source::Tree;
 use spec::Stand;
 use store::{CacheEntry, Session, SetupKey, Slot, Store};
@@ -60,6 +60,23 @@ pub(crate) fn known(cached: &Cached) -> Option<Pulled> {
     })
 }
 
+/// The entry of `key` with the snapshots its `entry.json` names, and whether every one of them is
+/// among `left`: a hit.
+fn lookup(
+    session: &Session,
+    key: &SetupKey,
+    left: &Leftovers,
+) -> Result<Option<(CacheEntry, Vec<SnapshotId>, bool)>, StandError> {
+    let Some(entry) = session.cached(key)? else {
+        return Ok(None);
+    };
+    let Some(ids) = run::cached_ids(&entry.dir)? else {
+        return Ok(None);
+    };
+    let whole = ids.iter().all(|id| left.snapshots.contains(id));
+    Ok(Some((entry, ids, whole)))
+}
+
 /// The run that built the entry of `key`, when `plan` would take it now; drops and writes
 /// nothing.
 pub(crate) fn would_hit(
@@ -67,16 +84,12 @@ pub(crate) fn would_hit(
     key: &SetupKey,
     left: &Leftovers,
 ) -> Result<Option<String>, StandError> {
-    let Some(entry) = session.cached(key)? else {
-        return Ok(None);
-    };
-    let whole = run::cached_ids(&entry.dir)?
-        .is_some_and(|ids| ids.iter().all(|id| left.snapshots.contains(id)));
-    Ok(whole.then_some(entry.built_by))
+    let found = lookup(session, key, left)?;
+    Ok(found.and_then(|(entry, _, whole)| whole.then_some(entry.built_by)))
 }
 
-/// A hit needs `entry.json` and every snapshot it names among `left`; otherwise the snapshots
-/// still there go, and the folder of the key starts empty for this run's setup.
+/// On a miss the snapshots of the key's entry still there go, and its folder starts empty for
+/// this run's setup.
 pub(crate) fn plan(
     session: &Session,
     slot: Slot,
@@ -85,10 +98,8 @@ pub(crate) fn plan(
     run: &str,
     sandbox: &impl Sandbox,
 ) -> Result<Planned, StandError> {
-    if let Some(entry) = session.cached(&key)?
-        && let Some(ids) = run::cached_ids(&entry.dir)?
-    {
-        if ids.iter().all(|id| left.snapshots.contains(id)) {
+    if let Some((entry, ids, whole)) = lookup(session, &key, left)? {
+        if whole {
             return Ok(Planned {
                 slot,
                 key,

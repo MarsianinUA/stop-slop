@@ -470,8 +470,8 @@ fn holds_a_member(group: &Path) -> io::Result<bool> {
 }
 
 /// FITRIM on every owned disk, so the blocks of deleted files stay out of the snapshot. A failure
-/// only leaves them in, so it goes to the log, never stderr (`cli` owns it), and the snapshot is
-/// taken anyway. The root disk takes no discard and is never named.
+/// only leaves them in, so it is a warning, which `cli` shows on stderr, and the snapshot is taken
+/// anyway. The root disk takes no discard and is never named.
 async fn trim(live: &Live) {
     if live.owned.is_empty() {
         return;

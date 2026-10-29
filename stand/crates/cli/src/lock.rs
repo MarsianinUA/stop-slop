@@ -35,7 +35,6 @@ pub(crate) fn wait(
             return Err(StandError::Cancelled);
         }
         if !said {
-            // A stderr that fails has nowhere left to report it.
             let _ = writeln!(err, "waiting for the stand");
             said = true;
         }

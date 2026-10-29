@@ -603,8 +603,8 @@ pub(crate) fn duration(duration: Duration) -> String {
 }
 
 /// Every path of the report and the line has `/`, on Windows too (plan, row 45); elsewhere a `\` is
-/// part of a file name.
-pub(crate) fn slashed(path: &Utf8Path) -> String {
+/// part of a file name. `cli` prints its paths so too.
+pub fn slashed(path: &Utf8Path) -> String {
     if cfg!(windows) {
         path.as_str().replace('\\', "/")
     } else {

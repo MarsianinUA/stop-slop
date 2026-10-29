@@ -37,7 +37,7 @@ pub use schema::{
     CoverageJson, Diff, Direction, ExpectJson, FaultJson, Grade, Head, Hot, HotVersus, IntentJson,
     JournalJson, Line, LineFault, LineFile, LineMeasure, LinePass, Measure, Need, PassFile,
     PassOpen, PassState, RecipeJson, Report, SealJson, SecondPassJson, SetupJson, Src, Unit,
-    Verdict, VersusBefore, VersusPrevious,
+    Verdict, VersusBefore, VersusPrevious, slashed,
 };
 pub use summary::Summary;
 

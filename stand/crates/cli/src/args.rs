@@ -10,11 +10,11 @@ use std::ffi::OsString;
 use std::io::Write;
 
 use clap::{Args, Parser, Subcommand};
-use report::{Cause, Failure, Line, Phase, Topic};
+use report::{Cause, Phase, Topic};
 use run::Side;
 use source::Before;
 
-use crate::{Exit, guide, next};
+use crate::{Exit, guide, next, refusal_line};
 
 pub enum Command {
     Run {
@@ -89,7 +89,6 @@ pub fn refuse_args(
     out: &mut dyn Write,
     err: &mut dyn Write,
 ) -> Exit {
-    // A stdout or stderr that fails has nowhere left to report it; the exit code still tells.
     let text = error.render().to_string();
     if !error.use_stderr() {
         let _ = write!(out, "{text}");
@@ -104,15 +103,8 @@ pub fn refuse_args(
         // The error runs to the first empty line; usage and tips for a person follow, stderr keeps them.
         let message = text.split("\n\n").next().unwrap_or_default();
         let message = message.strip_prefix("error: ").unwrap_or(message);
-        let failure = Failure {
-            phase: Phase::Args,
-            service: None,
-            repeat: None,
-            cause: Cause::Error(message.trim().to_owned()),
-            logs: None,
-            probes: Vec::new(),
-        };
-        let line = Line::failed(failure, None, next);
+        let cause = Cause::Error(message.trim().to_owned());
+        let line = refusal_line(Phase::Args, cause, next);
         let _ = next::print_line(out, &line, JsonLayout::Line);
     }
     Exit::Refused
@@ -276,9 +268,8 @@ fn side(text: &str) -> Result<Side, String> {
 
 fn topic(text: &str) -> Result<Topic, String> {
     guide::TOPICS
-        .iter()
-        .find(|(name, _)| *name == text)
-        .map(|(_, topic)| *topic)
+        .into_iter()
+        .find(|topic| guide::name(*topic) == text)
         .ok_or_else(|| format!("topics: {}", guide::names()))
 }
 

@@ -342,17 +342,16 @@ impl Inner {
         let guest = guest::version(guest::local_build()).await?;
         let local = self.local().await?;
         // SDK 0.7.8 makes its database on the first open, and a home without one holds no image.
-        let catalog = local.config().home().join("db").join("msb.db");
+        if !local.config().home().join("db").join("msb.db").exists() {
+            let digests = images.into_iter().map(|image| (image, None)).collect();
+            return Ok(Cached { digests, guest });
+        }
         let mut digests = Vec::with_capacity(images.len());
         for image in images {
-            let digest = if !catalog.exists() {
-                None
-            } else {
-                match msb::Image::get(image.as_str()).await {
-                    Ok(handle) => Some(manifest_digest(&image, &handle)?),
-                    Err(msb::MicrosandboxError::ImageNotFound(_)) => None,
-                    Err(error) => return Err(backend(error)),
-                }
+            let digest = match msb::Image::get(image.as_str()).await {
+                Ok(handle) => Some(manifest_digest(&image, &handle)?),
+                Err(msb::MicrosandboxError::ImageNotFound(_)) => None,
+                Err(error) => return Err(backend(error)),
             };
             digests.push((image, digest));
         }
