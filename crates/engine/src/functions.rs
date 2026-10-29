@@ -1,4 +1,3 @@
-use std::borrow::Cow;
 use std::cmp::Reverse;
 
 use kit::LineIndex;
@@ -33,18 +32,18 @@ impl Engine {
             .build(&program)
             .semantic;
         let nodes = semantic.nodes();
+        // The names as `run` takes them for fingerprints, so a function and its findings agree.
+        let named: Vec<_> = nodes
+            .iter()
+            .filter_map(|node| Some((node.span(), finding::function_name(node.kind())?)))
+            .collect();
         let mut found: Vec<(Span, Option<String>)> = nodes
             .iter()
             .filter(|node| has_body(node.kind()))
             .map(|node| {
-                let id = node.id();
-                let name = own_name(nodes, id).or_else(|| {
-                    nodes
-                        .ancestor_ids(id)
-                        .filter(|&ancestor| has_body(nodes.kind(ancestor)))
-                        .find_map(|ancestor| own_name(nodes, ancestor))
-                });
-                (reach(nodes, id), name.map(Cow::into_owned))
+                let name = finding::function_around(&named, node.span().start);
+                let name = (!name.is_empty()).then(|| name.to_owned());
+                (reach(nodes, node.id()), name)
             })
             .collect();
         // A function in the computed key of a method comes before the method's own node.
@@ -68,11 +67,6 @@ fn has_body(kind: AstKind<'_>) -> bool {
         AstKind::ArrowFunctionExpression(_) => true,
         _ => false,
     }
-}
-
-/// The name of the function itself, or of the method, property or variable that holds it.
-fn own_name<'a>(nodes: &AstNodes<'a>, id: NodeId) -> Option<Cow<'a, str>> {
-    finding::function_name(nodes.kind(id)).or_else(|| finding::function_name(nodes.parent_kind(id)))
 }
 
 fn reach(nodes: &AstNodes<'_>, id: NodeId) -> Span {

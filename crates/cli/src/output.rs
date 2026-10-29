@@ -268,20 +268,23 @@ pub(crate) fn hot_json(base: Option<&Base>, found: &Found<'_>, layout: JsonLayou
                 findings: row.findings.iter().copied().map(finding_json).collect(),
             })
             .collect(),
-        unexercised: found.unexercised.as_ref().map(|functions| {
-            functions
-                .iter()
-                .map(|function| UnexercisedJson {
-                    file: function.file.as_str(),
-                    function: function.function.as_deref(),
-                    line: function.line,
-                    end_line: function.end_line,
-                    stale: function.stale,
-                })
-                .collect()
-        }),
+        unexercised: match &found.coverage {
+            Coverage::Collected(functions) => Some(
+                functions
+                    .iter()
+                    .map(|function| UnexercisedJson {
+                        file: function.file.as_str(),
+                        function: function.function.as_deref(),
+                        line: function.line,
+                        end_line: function.end_line,
+                        stale: function.stale,
+                    })
+                    .collect(),
+            ),
+            Coverage::NotCollected | Coverage::Unknown(_) => None,
+        },
         coverage: match found.coverage {
-            Coverage::Collected => "collected",
+            Coverage::Collected(_) => "collected",
             Coverage::NotCollected => "not-collected",
             Coverage::Unknown(_) => "unknown",
         },
@@ -302,21 +305,27 @@ pub(crate) fn hot_text(base: Option<&Base>, found: &Found<'_>) -> String {
             facts.push_str(&counted(entries, "entry", "entries"));
         }
         let stale = if row.stale { " stale" } else { "" };
-        let (ms, file, line) = (row.self_ms, row.file, row.line);
-        let _ = writeln!(text, "{ms}ms {file}:{line} {function} ({facts}){stale}");
+        // The order of the stand's summary; the service tells apart two rows of one function.
+        let (ms, file, line, service) = (row.self_ms, row.file, row.line, &row.service);
+        let _ = writeln!(
+            text,
+            "{ms}ms {file}:{line} {function} {service} ({facts}){stale}"
+        );
     }
-    for function in found.unexercised.iter().flatten() {
-        let name = function.function.as_deref().unwrap_or(ANONYMOUS);
-        let stale = if function.stale { " stale" } else { "" };
-        let (file, line) = (function.file, function.line);
-        let _ = writeln!(text, "unexercised {file}:{line} {name}{stale}");
-    }
-    if found.blind() {
-        let coverage = match &found.coverage {
-            Coverage::Unknown(reasons) => format!("unknown: {}", reasons.join("; ")),
-            Coverage::Collected | Coverage::NotCollected => "not collected".to_owned(),
-        };
-        let _ = writeln!(text, "coverage: {coverage}");
+    match &found.coverage {
+        Coverage::Collected(functions) => {
+            for function in functions {
+                let name = function.function.as_deref().unwrap_or(ANONYMOUS);
+                let stale = if function.stale { " stale" } else { "" };
+                let (file, line) = (function.file, function.line);
+                let _ = writeln!(text, "unexercised {file}:{line} {name}{stale}");
+            }
+        }
+        Coverage::NotCollected if found.files => text.push_str("coverage: not collected\n"),
+        Coverage::Unknown(reasons) if found.files => {
+            let _ = writeln!(text, "coverage: unknown: {}", reasons.join("; "));
+        }
+        Coverage::NotCollected | Coverage::Unknown(_) => {}
     }
     text
 }

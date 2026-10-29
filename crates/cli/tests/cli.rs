@@ -2085,7 +2085,7 @@ fn hot_lists_the_hot_functions_of_the_branch_with_the_findings_inside() {
     };
     assert_eq!(*base, format!("base main {} (flag)", sha7(&t, "main")));
     assert!(
-        row.starts_with("812ms src/orders/orders.service.ts:40 buildReport (")
+        row.starts_with("812ms src/orders/orders.service.ts:40 buildReport api (")
             && row.ends_with(", 1200 entries)"),
         "{text}"
     );

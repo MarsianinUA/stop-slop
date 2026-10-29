@@ -10,7 +10,7 @@ use std::path::Path;
 use camino::{Utf8Path, Utf8PathBuf};
 use engine::{Engine, Finding, FunctionSpan, LineRange, SourceFile};
 use kit::serde::Deserialize;
-use kit::{Role, Roles};
+use kit::{Position, Role, Roles};
 use serde_json::Value;
 use state::State;
 
@@ -73,10 +73,9 @@ struct Called {
 pub(crate) struct Found<'c> {
     /// The hottest first.
     pub(crate) hot: Vec<HotRow<'c>>,
-    /// `None` without coverage: then no function counts as never entered.
-    pub(crate) unexercised: Option<Vec<Unexercised<'c>>>,
-    pub(crate) coverage: Coverage,
-    files: bool,
+    pub(crate) coverage: Coverage<'c>,
+    /// The branch has files.
+    pub(crate) files: bool,
 }
 
 pub(crate) struct HotRow<'c> {
@@ -88,7 +87,7 @@ pub(crate) struct HotRow<'c> {
     pub(crate) end_line: u32,
     pub(crate) self_ms: f64,
     pub(crate) total_ms: f64,
-    /// `None` without coverage.
+    /// `None` without coverage, or when no function of the file is around the start any more.
     pub(crate) entries: Option<u64>,
     /// The file differs from the head tree of the report, so its lines may have moved since.
     pub(crate) stale: bool,
@@ -104,8 +103,9 @@ pub(crate) struct Unexercised<'c> {
     pub(crate) stale: bool,
 }
 
-pub(crate) enum Coverage {
-    Collected,
+pub(crate) enum Coverage<'c> {
+    /// With the changed functions the coverage repeat never entered.
+    Collected(Vec<Unexercised<'c>>),
     /// No service had a profile, or the report does not say why there is none.
     NotCollected,
     /// The reasons of its `coverage-unknown` flags.
@@ -113,17 +113,13 @@ pub(crate) enum Coverage {
 }
 
 impl Found<'_> {
-    /// Without coverage, code of the branch may never have run, and nothing can tell which.
-    pub(crate) fn blind(&self) -> bool {
-        self.files && !matches!(self.coverage, Coverage::Collected)
-    }
-
     fn exit(&self) -> Exit {
-        let unexercised = self
-            .unexercised
-            .as_ref()
-            .is_some_and(|functions| !functions.is_empty());
-        if !self.hot.is_empty() || unexercised || self.blind() {
+        let listed = match &self.coverage {
+            Coverage::Collected(unexercised) => !unexercised.is_empty(),
+            // Without coverage, code of the branch may never have run, and nothing can tell which.
+            Coverage::NotCollected | Coverage::Unknown(_) => self.files,
+        };
+        if !self.hot.is_empty() || listed {
             Exit::Found
         } else {
             Exit::Clean
@@ -163,11 +159,16 @@ pub(crate) fn run(args: HotArgs) -> Result<Exit, CliError> {
         .zip(bytes)
         .map(|(path, bytes)| Source::new(path, bytes, called))
         .collect();
+    let coverage = match called {
+        Some(_) => {
+            let roles = &rules::RULESET.roles;
+            Coverage::Collected(unexercised(&sources, &checked.changed, &stale, roles))
+        }
+        None => no_coverage(&report.flags),
+    };
     let found = Found {
         hot: rows(&sources, &report.hot, &checked.findings, &stale),
-        unexercised: called
-            .map(|_| unexercised(&sources, &checked.changed, &stale, &rules::RULESET.roles)),
-        coverage: coverage(&report),
+        coverage,
         files: !checked.files.is_empty(),
     };
     let base = checked.base.as_ref();
@@ -206,12 +207,8 @@ fn parse(text: &str) -> Result<Report, String> {
     serde_json::from_str(text).map_err(|error| error.to_string())
 }
 
-fn coverage(report: &Report) -> Coverage {
-    if report.coverage.is_some() {
-        return Coverage::Collected;
-    }
-    let reasons: Vec<String> = report
-        .flags
+fn no_coverage(flags: &[Value]) -> Coverage<'static> {
+    let reasons: Vec<String> = flags
         .iter()
         .filter(|flag| flag["kind"] == "coverage-unknown")
         .map(unknown_reason)
@@ -284,14 +281,14 @@ impl<'c> Source<'c> {
 
     /// The index of the innermost span around a start of V8.
     fn innermost(&self, line: u32, utf16_column: u32) -> Option<usize> {
-        let at = (line, self.char_column(line, utf16_column));
-        let around = self.spans.iter().enumerate().filter(|(_, span)| {
-            (span.start.line, span.start.column) <= at && at < (span.end.line, span.end.column)
-        });
-        // Spans nest, so the innermost one starts last.
-        around
-            .max_by_key(|(_, span)| (span.start.line, span.start.column))
-            .map(|(index, _)| index)
+        let at = Position {
+            line,
+            column: self.char_column(line, utf16_column),
+        };
+        // Spans come outermost first, so the last one around `at` is the innermost.
+        self.spans
+            .iter()
+            .rposition(|span| span.start <= at && at < span.end)
     }
 
     /// The column in characters, as `Position` counts, of a column in UTF-16 code units: they
@@ -618,18 +615,14 @@ mod tests {
 
     #[test]
     fn coverage_tells_not_collected_from_unknown_with_the_reasons() {
-        let report = |block: &str, flags: &str| {
+        let report = |flags: &str| {
             let text = format!(
-                r#"{{"schemaVersion": 1, "head": {{"tree": "t"}}, "hot": [], "coverage": {block}, "flags": {flags}}}"#
+                r#"{{"schemaVersion": 1, "head": {{"tree": "t"}}, "hot": [], "coverage": null, "flags": {flags}}}"#
             );
-            coverage(&parse(&text).unwrap())
+            no_coverage(&parse(&text).unwrap().flags)
         };
         assert!(matches!(
-            report(r#"{"from": null, "services": ["api"], "called": []}"#, "[]"),
-            Coverage::Collected
-        ));
-        assert!(matches!(
-            report("null", r#"[{"kind": "unprofiled"}]"#),
+            report(r#"[{"kind": "unprofiled"}]"#),
             Coverage::NotCollected
         ));
         let flags = r#"[
@@ -638,7 +631,7 @@ mod tests {
             {"kind": "coverage-unknown", "stage": null, "service": "api"},
             {"kind": "coverage-unknown", "stage": null, "service": null}
         ]"#;
-        let Coverage::Unknown(reasons) = report("null", flags) else {
+        let Coverage::Unknown(reasons) = report(flags) else {
             panic!("unknown");
         };
         assert_eq!(

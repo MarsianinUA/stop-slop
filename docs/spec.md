@@ -290,15 +290,16 @@ On exit 2 and 3, `check --json` prints one line instead, even with `--pretty`, a
   - `line` and `endLine` are its lines on disk now; `selfMs` and `totalMs` come from the report.
   - `entries` counts how often the coverage repeat entered it, each resumption after an `await` too; `null` without coverage.
   - `findings` are the findings of `check` on its lines, in the form of `check`.
+  - Where the file on disk has no function around that place any more, the row keeps the name and the line of the report: `endLine` is `line`, and `entries` is `null`.
 - `unexercised` lists the functions on changed lines of the branch that the coverage repeat never entered, outside test files: the stand runs the app, not its tests.
 - `stale` is true when the file on disk differs from the report's head tree: its lines may have moved since, so run the stand again.
 - `coverage` is `collected`, `not-collected` when no service had `x-stand.profile`, or `unknown` when the report has a `coverage-unknown` flag. Without coverage `unexercised` is `null`, since no function can be said to have never run, and a branch with files exits with 1.
 
-Without `--json`, `hot` prints the `base` line of `check` and a line per function, ` stale` at the end where it applies. Without coverage and with files in the branch, the last line is `coverage: not collected`, or `coverage: unknown: ` and the reason.
+Without `--json`, `hot` prints the `base` line of `check` and a line per row, with the service after the name as in the stand's summary and ` stale` at the end where it applies. Without coverage and with files in the branch, the last line is `coverage: not collected`, or `coverage: unknown: ` and the reason.
 
 ```text
 base main 76bde5d (ancestor)
-812ms src/orders/orders.service.ts:40 summarize (1 finding, 10 entries)
+812ms src/orders/orders.service.ts:40 summarize api (1 finding, 10 entries)
 unexercised src/orders/orders.service.ts:12 formatRefund
 ```
 
