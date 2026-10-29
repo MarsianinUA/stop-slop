@@ -110,11 +110,15 @@ fn a_build_writes_out_and_entry_json_after_the_whole_setup_and_nothing_else() {
     assert_clean(&fake, &case.left());
 }
 
-/// A link a service leaves in `/stand/out` never gets into an entry, nor out of one: a copy would
-/// read what it points at on the host, and the report refuses it in a build.
+/// A link a service leaves in `/stand/out` is never followed: a copy would read what it points at
+/// on the host. One with another name, or below the top, stays out of an entry and out of a hit,
+/// as the report never reads it; a top-level `*.jsonl` one, which the report refuses, is a stand
+/// fault in a build and on a hit alike.
 #[cfg(unix)]
 #[test]
-fn a_link_in_the_setup_outputs_is_a_stand_fault_in_a_build_and_on_a_hit() {
+fn a_link_in_the_setup_outputs_is_skipped_unless_it_is_named_as_a_result() {
+    use std::os::unix::fs::symlink;
+
     let refused = |result: &Result<_, RunError>, link: &Utf8Path| {
         matches!(
             result,
@@ -124,16 +128,42 @@ fn a_link_in_the_setup_outputs_is_a_stand_fault_in_a_build_and_on_a_hit() {
             }) if *path == link
         )
     };
-    // A build: its setup passes, no entry is written, no repeat starts, its snapshots go.
+    // Links with another name or in a folder: the build copies the rest, and so does a hit.
+    let first = Case::new(EXAMPLE);
+    let out = first.run_dir().join("setup-head/out");
+    fs::create_dir_all(out.join("logs")).unwrap();
+    let secret = first.root.join("secret");
+    fs::write(&secret, b"host").unwrap();
+    symlink(&secret, out.join("leak")).unwrap();
+    symlink(&secret, out.join("logs/leak.jsonl")).unwrap();
+    let fake = fake(example_rules());
+    first.run(&fake, &first.versions(false)).unwrap();
+    let entry_out = first.entry(Side::Head).join("out");
+    let copied = ["logs", "probe.schema.jsonl", "probe.schema.jsonl.err"];
+    assert_eq!(names_in(&entry_out), copied);
+    assert!(names_in(&entry_out.join("logs")).is_empty());
+    assert_clean(&fake, &first.left());
+    symlink(&secret, entry_out.join("leak")).unwrap();
+    let second = Case::new(EXAMPLE);
+    let versions = Versions {
+        head: hit(&second, &first, Side::Head),
+        before: None,
+    };
+    second.run(&fake, &versions).unwrap();
+    assert_eq!(names_in(&second.run_dir().join("setup-head/out")), copied);
+    let mut left = first.left();
+    left.extend(second.kept());
+    assert_clean(&fake, &left);
+
+    // A top-level `*.jsonl` link in a build: its setup passes, no entry is written, no repeat
+    // starts, its snapshots go.
     let case = Case::new(EXAMPLE);
     let out = case.run_dir().join("setup-head/out");
     fs::create_dir_all(&out).unwrap();
-    let secret = case.root.join("secret");
-    fs::write(&secret, b"host").unwrap();
-    std::os::unix::fs::symlink(&secret, out.join("leak")).unwrap();
-    let fake = fake(example_rules());
+    symlink(&secret, out.join("leak.jsonl")).unwrap();
+    let fake = crate::fake(example_rules());
     let result = case.run(&fake, &case.versions(false));
-    assert!(refused(&result, &out.join("leak")), "{result:?}");
+    assert!(refused(&result, &out.join("leak.jsonl")), "{result:?}");
     assert_eq!(run::cached_ids(&case.entry(Side::Head)).unwrap(), None);
     assert_eq!(
         services(&fake.journal()),
@@ -146,8 +176,8 @@ fn a_link_in_the_setup_outputs_is_a_stand_fault_in_a_build_and_on_a_hit() {
     let fake = crate::fake(example_rules());
     first.run(&fake, &first.versions(false)).unwrap();
     let built = fake.journal().len();
-    let link = first.entry(Side::Head).join("out/leak");
-    std::os::unix::fs::symlink(&secret, &link).unwrap();
+    let link = first.entry(Side::Head).join("out/leak.jsonl");
+    symlink(&secret, &link).unwrap();
     let second = Case::new(EXAMPLE);
     let versions = Versions {
         head: hit(&second, &first, Side::Head),
