@@ -12,9 +12,9 @@ use camino::{Utf8Path, Utf8PathBuf};
 use report::{Extra, ProbeRan, Raw};
 use run::{Cancel, RunError, SetupCache, Side, Version, Versions};
 use sandbox::{
-    Call, ExecId, ExecOutcome, Exited, Fake, Fault, ImageRef, Launch, Leftovers, Metrics, Mount,
-    Pulled, Rule, Sandbox, SandboxError, SandboxId, Scenario, Script, Seed, SnapshotId, Stopped,
-    VolumeName, Waitable,
+    Cached, Call, ExecId, ExecOutcome, Exited, Fake, Fault, ImageRef, Launch, Leftovers, Metrics,
+    Mount, Pulled, Rule, Sandbox, SandboxError, SandboxId, Scenario, Script, Seed, SnapshotId,
+    Stopped, VolumeName, Waitable,
 };
 use spec::{Policy, Stand};
 use tempfile::TempDir;
@@ -516,6 +516,9 @@ impl Sandbox for Hooked<'_> {
     }
     fn pull(&self, images: &[ImageRef]) -> Result<Pulled, SandboxError> {
         self.fake.pull(images)
+    }
+    fn cached(&self, images: &[ImageRef]) -> Result<Cached, SandboxError> {
+        self.fake.cached(images)
     }
     fn create(&self, batch: &[Launch]) -> Result<Vec<SandboxId>, SandboxError> {
         let ids = self.fake.create(batch)?;

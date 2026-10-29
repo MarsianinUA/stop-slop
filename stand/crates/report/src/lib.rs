@@ -26,18 +26,18 @@ pub use context::{
 };
 pub use flags::{DeadReason, Flag};
 pub use next::{Next, Topic};
-pub use outputs::{Outputs, read_outputs};
+pub use outputs::{BadResult, Outputs, RESULT_LIMIT, check_result, read_outputs};
 pub use raw::{
     BeforeOutcome, Cause, CoverageOutcome, Extra, Failure, FaultOutcome, FaultRepeat,
     InstanceOutput, Pass, PassPair, Phase, ProbeRan, ProbeRule, ProfileOutcome, Raw, RepeatOutput,
-    Role, SecondPassOutcome, Setup, SetupSide,
+    Role, SecondPassOutcome, Setup, SetupSide, Side,
 };
 pub use schema::{
     At, BeforeJson, Behaviour, CalledJson, Categories, CategoryChange, CategoryJson, Compared,
     CoverageJson, Diff, Direction, ExpectJson, FaultJson, Grade, Head, Hot, HotVersus, IntentJson,
     JournalJson, Line, LineFault, LineFile, LineMeasure, LinePass, Measure, Need, PassFile,
     PassOpen, PassState, RecipeJson, Report, SealJson, SecondPassJson, SetupJson, Src, Unit,
-    Verdict, VersusBefore, VersusPrevious,
+    Verdict, VersusBefore, VersusPrevious, slashed,
 };
 pub use summary::Summary;
 
@@ -145,6 +145,8 @@ pub enum ReportError {
         path: camino::Utf8PathBuf,
         found: u64,
     },
+    #[error(transparent)]
+    BadResult(#[from] BadResult),
 }
 
 impl ReportError {
@@ -179,21 +181,6 @@ impl<'r> Before<'r> {
             None => Before::Absent,
             Some(BeforeOutcome::Failed(failure)) => Before::Failed(failure),
             Some(BeforeOutcome::Passed(repeats)) => Before::Passed(repeats),
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-enum Side {
-    Head,
-    Before,
-}
-
-impl Side {
-    fn as_str(self) -> &'static str {
-        match self {
-            Side::Head => "head",
-            Side::Before => "before",
         }
     }
 }

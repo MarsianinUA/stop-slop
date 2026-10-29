@@ -142,15 +142,20 @@ impl Store {
         Ok(images.into_iter().collect())
     }
 
-    /// The kept run of every session not expired at `now`; the sweep leaves the snapshots
-    /// `run::kept_ids` reads from them, so an expired session's snapshots go before `forget`
-    /// deletes its runs. `now` is the one `expired` gets: a session expired at one time and not
-    /// at the other would lose its snapshots and stay.
-    pub fn kept_runs(&self, now: SystemTime) -> Result<Vec<RunPaths>, StoreError> {
+    /// The kept run of every session in `scope` not expired at `now`; the sweep leaves the
+    /// snapshots `run::kept_ids` reads from them, so an expired session's snapshots go before
+    /// `forget` deletes its runs. `now` is the one `expired` gets: a session expired at one time
+    /// and not at the other would lose its snapshots and stay. What `drop_kept` would take after
+    /// the sweep, for `run --dry-run`.
+    pub fn kept_runs(
+        &self,
+        scope: &KeptScope,
+        now: SystemTime,
+    ) -> Result<Vec<RunPaths>, StoreError> {
         Ok(self
             .sessions()?
             .into_iter()
-            .filter(|(_, state)| !is_expired(state, now))
+            .filter(|(session, state)| scope.covers(&session.key) && !is_expired(state, now))
             .filter_map(|(session, state)| Some(session.run(&state.kept?)))
             .collect())
     }

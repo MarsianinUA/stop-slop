@@ -679,6 +679,32 @@ fn fake_pull_gives_digests_in_order() {
     assert_eq!(pulled.guest, "fake");
 }
 
+/// An image never pulled is `None`, not an error: asking pulls nothing.
+fn cached_names_the_pulled_digest_and_none_for_an_image_never_pulled(sandbox: &impl Sandbox) {
+    let pulled = sandbox.pull(&[ImageRef::new(ALPINE)]).unwrap();
+    let asked = [ImageRef::new(ALPINE), ImageRef::new(MISSING)];
+    let cached = sandbox.cached(&asked).unwrap();
+    let alpine = Some(pulled.digests[0].1.clone());
+    let expected = [(asked[0].clone(), alpine), (asked[1].clone(), None)];
+    assert_eq!(cached.digests, expected);
+    assert_eq!(cached.guest, pulled.guest);
+}
+
+#[test]
+fn fake_cached_names_the_pulled_digest_and_none_for_an_image_never_pulled() {
+    let fake = Fake::new(Scenario {
+        missing_images: vec![MISSING.into()],
+        digests: vec![(ALPINE.into(), "sha256:alpine".into())],
+        ..Scenario::default()
+    });
+    cached_names_the_pulled_digest_and_none_for_an_image_never_pulled(&fake);
+    let journal = fake.journal();
+    assert!(
+        matches!(journal.as_slice(), [Call::Pull(_), Call::Cached(asked)] if asked.len() == 2),
+        "{journal:#?}"
+    );
+}
+
 fn a_snapshot_outlives_its_vm(sandbox: &impl Sandbox) {
     let (_first, first) = folder();
     let (_second, second) = folder();
@@ -1055,8 +1081,18 @@ fn volume(name: &VolumeName, guest: &str) -> Mount {
 
 fn folder() -> (TempDir, Utf8PathBuf) {
     let temp = tempfile::tempdir().unwrap();
-    let path = Utf8Path::from_path(temp.path()).unwrap().to_owned();
+    let path = resolved(Utf8Path::from_path(temp.path()).unwrap());
     (temp, path)
+}
+
+/// microsandbox refuses a bind through a link on Unix, and the temp folder of macOS lies behind
+/// `/var`. Not on Windows, where `canonicalize` gives a `\\?\` path.
+fn resolved(path: &Utf8Path) -> Utf8PathBuf {
+    if cfg!(unix) {
+        path.canonicalize_utf8().unwrap()
+    } else {
+        path.to_owned()
+    }
 }
 
 fn create(sandbox: &impl Sandbox, launch: Launch) -> SandboxId {

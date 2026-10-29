@@ -1,0 +1,82 @@
+# The stand file of stop-slop-stand: Compose plus x-stand. `stop-slop-stand guide recipe` explains
+# every key. The files next to this one are the harness: both versions mount the same ones.
+# Debug it with Docker: STAND_REPO=<the repo> docker compose -f <this file> up
+services:
+  db:
+    image: postgres:17
+    environment: { POSTGRES_PASSWORD: stand }
+    volumes: ["pgdata:/var/lib/postgresql/data"]   # a volume is the disk of one service; no :ro
+    expose: [5432]
+    healthcheck: { test: ["CMD", "pg_isready", "-U", "postgres"], interval: 1s, retries: 30 }
+    deploy: { resources: { limits: { cpus: "1", memory: 512m } } }
+
+  # The prepare service: install and build, nothing else. It runs on the version's own disk, and
+  # every other service with ${STAND_REPO} starts from its snapshot, so it binds only ${STAND_REPO}.
+  prepare:
+    image: node:22
+    working_dir: /w/app
+    volumes: ["${STAND_REPO}:/w/app"]   # the measured tree
+    # The package manager's cache and store go on /w, outside /w/app, never in a bind:
+    # npm ci --cache /w/.npm, pnpm install --store-dir /w/.pnpm-store. pnpm 10 skips the build
+    # scripts of dependencies: allow them here. Native modules build here, in the guest. Nothing
+    # goes global: the snapshot keeps every block of the root disk.
+    command: ["sh", "-c", "npm ci --cache /w/.npm && npm run build"]
+    deploy: { resources: { limits: { cpus: "2", memory: 2g } } }
+    x-stand: { network: public }   # only what downloads gets the network
+
+  # Migrations and data: a setup service of their own, after prepare.
+  migrate:
+    image: node:22   # the image of prepare: a VM from its snapshot keeps that image
+    working_dir: /w/app
+    volumes: ["${STAND_REPO}:/w/app"]
+    command: ["npm", "run", "migrate"]
+    environment: { DATABASE_URL: "postgres://postgres:stand@db:5432/postgres" }
+    depends_on:
+      prepare: { condition: service_completed_successfully }
+      db: { condition: service_healthy }
+    deploy: { resources: { limits: { cpus: "1", memory: 512m } } }
+
+  api:
+    image: node:22
+    working_dir: /w/app
+    volumes: ["${STAND_REPO}:/w/app"]
+    command: ["node", "dist/main.js"]
+    environment: { DATABASE_URL: "postgres://postgres:stand@db:5432/postgres" }
+    expose: [3000]   # every service others call needs expose
+    depends_on:
+      migrate: { condition: service_completed_successfully }
+      db: { condition: service_healthy }
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://localhost:3000/health').then(r => process.exit(r.ok ? 0 : 1), () => process.exit(1))"]
+      interval: 1s
+      retries: 30
+    deploy: { resources: { limits: { cpus: "1", memory: 512m } } }
+    x-stand: { profile: node }   # hot functions and coverage of the head
+
+  # The workload: its exit ends a repeat. load.mjs beside this file is yours to write: it calls the
+  # app and writes /stand/out/*.jsonl, which the stand compares with "before" record by record.
+  # Keep-alive or a pool: the stand's network drops new connections after about 256 in 10 seconds.
+  load:
+    image: node:22
+    working_dir: /harness
+    volumes: [".:/harness:ro"]   # the harness: a folder of the recipe, read-only; a file goes in a folder
+    command: ["node", "load.mjs", "http://api:3000"]
+    depends_on: { api: { condition: service_healthy } }
+    deploy: { resources: { limits: { cpus: "1", memory: 256m } } }
+
+volumes: { pgdata: {} }
+
+x-stand:
+  workload: load
+  repeat: 3
+  # probes:   # the state below the app: `stop-slop-stand guide probes`
+  #   rows:
+  #     in: db
+  #     at: after-workload
+  #     run: ["psql", "-U", "postgres", "-At", "-c", "select row_to_json(o) from orders o order by id"]
+  #     key: /id
+  # expect:   # the cost of the change, declared before the first run --before: `guide expect`
+  #   cost:
+  #     - { measure: stand.wall, change: +10%, reason: "one more lookup per order" }
+  # fault: { target: "db:5432", mode: down }   # a dependency of the app: `guide recipe`
+  # second_pass: true   # the workload twice on one state: `guide recipe`

@@ -35,8 +35,9 @@ fn home() -> Home {
 }
 
 impl Home {
+    /// Resolved, as `open` makes it: the temp folder of macOS lies behind the link `/var`.
     fn root(&self) -> Utf8PathBuf {
-        self.dir.join("home")
+        self.store.paths().root.clone()
     }
 
     /// `<dir>/<worktree>/stand/compose.yaml` with a harness file and an empty folder.
@@ -103,7 +104,7 @@ fn ids(runs: &[RunPaths]) -> Vec<&str> {
 /// A set: `kept_runs` goes in the order of the session keys, which are hashes.
 fn kept_at(store: &Store, now: SystemTime) -> BTreeSet<String> {
     store
-        .kept_runs(now)
+        .kept_runs(&KeptScope::All, now)
         .unwrap()
         .into_iter()
         .map(|run| run.id)
@@ -416,6 +417,10 @@ fn the_kept_run_is_the_last_one_kept_and_drop_kept_forgets_by_scope() {
         kept_at(&home.store, at(3)),
         BTreeSet::from([second.id.clone(), other.id.clone()])
     );
+    let of = |scope: KeptScope| home.store.kept_runs(&scope, at(3)).unwrap();
+    let key = || mine.key().to_owned();
+    assert_eq!(ids(&of(KeptScope::OtherThan(key()))), [other.id.as_str()]);
+    assert_eq!(ids(&of(KeptScope::Only(key()))), [second.id.as_str()]);
 
     let dropped = home
         .store
@@ -587,6 +592,35 @@ fn clean_all_keeps_a_config_in_the_root() {
     assert_eq!(store.config().unwrap().host_share, Some(60));
 }
 
+#[cfg(unix)]
+#[test]
+fn a_root_behind_a_link_is_resolved_and_clean_all_keeps_its_config() {
+    let temp = tempfile::tempdir().unwrap();
+    let dir = Utf8Path::from_path(temp.path())
+        .unwrap()
+        .canonicalize_utf8()
+        .unwrap();
+    fs::create_dir(dir.join("disk")).unwrap();
+    std::os::unix::fs::symlink(dir.join("disk"), dir.join("link")).unwrap();
+    let root = dir.join("link").join("stop-slop-stand");
+    let store = Store::open(StorePaths {
+        root: root.clone(),
+        config: root.join("stand.toml"),
+    })
+    .unwrap();
+    let resolved = dir.join("disk").join("stop-slop-stand");
+    assert_eq!(store.paths().root, resolved);
+    assert_eq!(store.paths().config, resolved.join("stand.toml"));
+    assert_eq!(store.sandbox_home(), resolved.join("msb"));
+    fs::write(root.join("stand.toml"), "host_share = 60\n").unwrap();
+    store.trees().unwrap();
+    store.clean(Clean::All).unwrap();
+    assert_eq!(
+        names_in(&resolved),
+        BTreeSet::from(["stand.toml".to_owned()])
+    );
+}
+
 #[test]
 fn the_trees_are_two_tar_files_that_clear_trees_deletes() {
     let home = home();
@@ -732,7 +766,7 @@ fn cache_entries_skip_expired_sessions_and_drop_cache_forgets_by_scope() {
 
     let live: BTreeSet<Utf8PathBuf> = home
         .store
-        .cache_entries(at(0) + 3 * DAY)
+        .cache_entries(&KeptScope::All, at(0) + 3 * DAY)
         .unwrap()
         .into_iter()
         .collect();
@@ -740,6 +774,13 @@ fn cache_entries_skip_expired_sessions_and_drop_cache_forgets_by_scope() {
         live,
         BTreeSet::from([my_entry.clone(), their_entry.clone()])
     );
+    let of = |scope: KeptScope| home.store.cache_entries(&scope, at(0) + 3 * DAY).unwrap();
+    let key = || mine.key().to_owned();
+    assert_eq!(
+        of(KeptScope::OtherThan(key())),
+        std::slice::from_ref(&their_entry)
+    );
+    assert_eq!(of(KeptScope::Only(key())), std::slice::from_ref(&my_entry));
 
     let dropped: BTreeSet<Utf8PathBuf> = home
         .store

@@ -1,11 +1,11 @@
 //! What `make` reads of the run folder (architecture plan, `report`): the top-level `*.jsonl` of
 //! each `/stand/out`, the `unchanged` files after each pass of the second pass, the logs of the
 //! long-running services up to their cut, and `records.json` of the pooled runs. A broken line of a
-//! workload file is a flag, not an error.
+//! workload file is a flag, not an error; a result file the stand will not read is `BadResult`.
 
 use std::collections::BTreeMap;
-use std::fs::{self, File};
-use std::io::{self, Read};
+use std::fs::{self, File, Metadata};
+use std::io::{self, BufRead, BufReader, Read};
 use std::sync::Arc;
 
 use camino::{Utf8Path, Utf8PathBuf};
@@ -16,6 +16,46 @@ use crate::raw::{PassPair, Raw, Role};
 use crate::{Before, ReportError, Side, sides};
 
 pub(crate) const RECORDS: &str = "records.json";
+
+/// The most the stand reads of one result file: it holds the whole file in memory and writes its
+/// records into `records.json`.
+pub const RESULT_LIMIT: u64 = 64 << 20;
+
+/// A result in `/stand/out` the stand will not read. The guest wrote it, so it is the recipe's
+/// fault, not the stand's (batch review 6): `cli` gives it exit 2, whichever reader met it.
+#[derive(Debug, thiserror::Error)]
+pub enum BadResult {
+    #[error(
+        "{0}: not a plain file: the stand reads a result in /stand/out only as a plain file, never \
+         through a link"
+    )]
+    NotPlain(Utf8PathBuf),
+    #[error(
+        "{0}: not a plain folder: the stand reads the results in /stand/out only through plain \
+         folders, never through a link"
+    )]
+    NotPlainFolder(Utf8PathBuf),
+    #[error(
+        "{path}: {size} bytes, over the {} MiB the stand reads of a result file: write less into it",
+        RESULT_LIMIT >> 20
+    )]
+    TooLarge { path: Utf8PathBuf, size: u64 },
+}
+
+/// The rule of a result file, on its `symlink_metadata`: a link there may lead to any file of the
+/// host, a FIFO would hold the read forever, and a file over `RESULT_LIMIT` is never read.
+pub fn check_result(path: &Utf8Path, metadata: &Metadata) -> Result<(), BadResult> {
+    if !metadata.file_type().is_file() {
+        return Err(BadResult::NotPlain(path.to_owned()));
+    }
+    if metadata.len() > RESULT_LIMIT {
+        return Err(BadResult::TooLarge {
+            path: path.to_owned(),
+            size: metadata.len(),
+        });
+    }
+    Ok(())
+}
 
 /// The repeat of `FileRecords` that holds the `after-setup` output of setup.
 pub(crate) const SETUP: u32 = 0;
@@ -30,7 +70,7 @@ pub struct Outputs {
     /// The first broken line of each workload file, from 1.
     pub(crate) bad_lines: BTreeMap<String, u32>,
     /// `records.json` of each pooled run in the order of `Context.pool`; `None` when it does not
-    /// read. Empty unless "before" passed: only the diff reads it.
+    /// read. Empty unless "before" passed or the second pass ran: only their masks read it.
     pub(crate) pool: Vec<Option<Records>>,
     /// The records of each `unchanged` file after the first and the second pass, by file and
     /// version; a version whose second pass failed has none.
@@ -91,8 +131,9 @@ pub fn read_outputs(raw: &Raw, pool: &[Utf8PathBuf]) -> Result<Outputs, ReportEr
         }
     }
     // A pooled run whose records do not read teaches the mask nothing, as an unreadable pooled
-    // report is left out of the pool.
-    if let Before::Passed(_) = Before::of(raw) {
+    // report is left out of the pool. The second pass masks by the measured repeats of its
+    // version, with or without "before" (batch review 6).
+    if matches!(Before::of(raw), Before::Passed(_)) || raw.second_pass.is_some() {
         let pooled = pool.iter().map(|dir| read_records(&dir.join(RECORDS)));
         outputs.pool = pooled.collect();
     }
@@ -117,8 +158,8 @@ pub fn read_outputs(raw: &Raw, pool: &[Utf8PathBuf]) -> Result<Outputs, ReportEr
 }
 
 /// `file` of `expect.unchanged` under `dir`, a path with `/`: every folder on the way a plain
-/// folder and the file a plain file, as `plain` asks of a top-level one. A pass that wrote no such
-/// file has no records of it.
+/// folder, and the file under the rule of a top-level one. A pass that wrote no such file has no
+/// records of it.
 fn pass_file(dir: &Utf8Path, file: &str) -> Result<String, ReportError> {
     let mut path = dir.to_owned();
     let parts: Vec<&str> = file.split('/').collect();
@@ -130,14 +171,10 @@ fn pass_file(dir: &Utf8Path, file: &str) -> Result<String, ReportError> {
             Err(error) => return Err(ReportError::io(&path)(error)),
         };
         if index + 1 < parts.len() && !metadata.file_type().is_dir() {
-            return Err(ReportError::bad(
-                &path,
-                "not a plain folder: the stand reads the results in /stand/out only through plain \
-                 folders, never through a link",
-            ));
+            return Err(BadResult::NotPlainFolder(path).into());
         }
     }
-    plain(&path)?;
+    readable(&path)?;
     let bytes = fs::read(&path).map_err(ReportError::io(&path))?;
     Ok(String::from_utf8_lossy(&bytes).into_owned())
 }
@@ -161,7 +198,7 @@ impl Outputs {
                 continue;
             }
             let path = dir.join(&name);
-            plain(&path)?;
+            readable(&path)?;
             let bytes = fs::read(&path).map_err(ReportError::io(&path))?;
             let probe = raw.probes.contains_key(&name);
             let (records, bad) = parse(&String::from_utf8_lossy(&bytes), probe);
@@ -176,18 +213,10 @@ impl Outputs {
     }
 }
 
-/// The guest writes `/stand/out`: a link there may lead to any file of the host, and a FIFO would
-/// hold the read forever. Every VM is gone by now, so nothing swaps the file after this look.
-fn plain(path: &Utf8Path) -> Result<(), ReportError> {
+/// Every VM is gone by now, so nothing swaps or grows the file after this look.
+fn readable(path: &Utf8Path) -> Result<(), ReportError> {
     let metadata = fs::symlink_metadata(path).map_err(ReportError::io(path))?;
-    if metadata.file_type().is_file() {
-        return Ok(());
-    }
-    Err(ReportError::bad(
-        path,
-        "not a plain file: the stand reads the results in /stand/out only as plain files, never \
-         through a link",
-    ))
+    Ok(check_result(path, &metadata)?)
 }
 
 /// A probe's line that is not JSON is `{"line": ...}` (plan, row 62); a broken line of a workload
@@ -216,13 +245,17 @@ fn read_records(path: &Utf8Path) -> Option<Records> {
 /// The lines of the log before `cut`: what the service logged after the workload ended is not the
 /// measured window.
 fn error_lines(log: &Utf8Path, cut: u64) -> Result<u32, ReportError> {
-    let mut bytes = Vec::new();
-    File::open(log)
-        .and_then(|file| file.take(cut).read_to_end(&mut bytes))
-        .map_err(ReportError::io(log))?;
-    let text = String::from_utf8_lossy(&bytes);
-    let count = text.lines().filter(|line| is_error(line)).count();
-    Ok(u32::try_from(count).unwrap_or(u32::MAX))
+    let file = File::open(log).map_err(ReportError::io(log))?;
+    // Line by line: a service may log gigabytes in the window.
+    let mut count: u32 = 0;
+    for line in BufReader::new(file.take(cut)).split(b'\n') {
+        let line = line.map_err(ReportError::io(log))?;
+        let line = line.strip_suffix(b"\r").unwrap_or(&line);
+        if is_error(&String::from_utf8_lossy(line)) {
+            count = count.saturating_add(1);
+        }
+    }
+    Ok(count)
 }
 
 /// The plan's rule (Optional Assumptions, «Строка уровня error»): a JSON line by its `level` from

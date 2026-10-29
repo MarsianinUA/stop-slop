@@ -13,8 +13,8 @@ use camino::{Utf8Path, Utf8PathBuf};
 use profile::ProfileError;
 use report::{Failure, Phase, Raw};
 use sandbox::{ExecOutcome, SandboxError};
+use serde::Serialize;
 use serde::de::DeserializeOwned;
-use serde::{Deserialize, Serialize};
 use spec::Stand;
 
 mod cache;
@@ -29,6 +29,7 @@ mod ready;
 pub use cache::cached_ids;
 pub use keep::{Kept, KeptLaunch, inspect, kept_ids};
 pub use lane::run;
+pub use report::Side;
 
 /// Over the sum of the timeouts in `span`: readiness, stops, drains and snapshots between them.
 const SPAN_MARGIN: Duration = Duration::from_secs(10 * 60);
@@ -83,23 +84,6 @@ pub enum SetupCache {
     /// An empty folder: setup runs as without a cache; once the whole setup passed,
     /// `setup-<side>/out/` is copied into its `out/` and `entry.json` is written.
     Build(Utf8PathBuf),
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "kebab-case")]
-pub enum Side {
-    Head,
-    Before,
-}
-
-/// The word in the names of the run folder: `setup-head`, `repeat-2-before`.
-impl fmt::Display for Side {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(match self {
-            Side::Head => "head",
-            Side::Before => "before",
-        })
-    }
 }
 
 #[derive(Debug)]
@@ -162,6 +146,9 @@ pub enum StandFault {
         #[source]
         source: io::Error,
     },
+    /// In the setup outputs a cache entry takes; the recipe's fault, not the stand's.
+    #[error(transparent)]
+    BadResult(report::BadResult),
 }
 
 impl StandFault {

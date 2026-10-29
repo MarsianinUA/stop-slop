@@ -227,6 +227,18 @@ fn changed(categories: &Categories) -> Vec<CategoryChange> {
     changed
 }
 
+impl Report {
+    /// Whether a pooled rerun takes `extra` from this report instead of running it again (plan,
+    /// row 89): the report holds the result, and its fault has no unknown category.
+    pub fn carries(&self, extra: Extra) -> bool {
+        match extra {
+            Extra::Coverage => self.coverage.is_some(),
+            Extra::Fault => self.fault.as_ref().is_some_and(|fault| !fault.unknown()),
+            Extra::SecondPass => self.second_pass.is_some(),
+        }
+    }
+}
+
 impl FaultJson {
     /// A category the repeats of "before" disagreed on, or one no repeat of the head reached the
     /// fault for: a pooled rerun runs the fault repeats again then (plan, row 89).
@@ -274,7 +286,7 @@ pub(crate) fn second_pass(
         match pair {
             None => {}
             Some(PassPair::Failed(failure)) => flags.push(Flag::SecondPassFailed {
-                side: side.as_str().to_owned(),
+                side,
                 stage: failure.phase,
             }),
             Some(PassPair::Passed { first, second }) => {
@@ -282,7 +294,7 @@ pub(crate) fn second_pass(
                 let targets: BTreeSet<&str> = first.keys().chain(second.keys()).copied().collect();
                 open.extend(targets.into_iter().map(|target| PassOpen {
                     target: target.to_owned(),
-                    side: side.as_str().to_owned(),
+                    side,
                     first: first.get(target).copied().unwrap_or(0),
                     second: second.get(target).copied().unwrap_or(0),
                 }));
@@ -342,7 +354,7 @@ pub(crate) fn grown(second_pass: Option<&SecondPassJson>) -> Vec<Flag> {
     let grown = open.filter(|open| open.second > open.first);
     let flags = grown.map(|open| Flag::ConnectionsGrow {
         target: open.target.clone(),
-        side: open.side.clone(),
+        side: open.side,
         first: open.first,
         second: open.second,
     });

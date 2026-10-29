@@ -66,6 +66,24 @@ fn source(local: Option<Utf8PathBuf>, arch: &str) -> Result<Source, SandboxError
     Ok(Source::Release { url, sha256 })
 }
 
+/// The version `install` gives, without placing or downloading anything.
+pub(super) async fn version(local: Option<Utf8PathBuf>) -> Result<String, SandboxError> {
+    match source(local, std::env::consts::ARCH)? {
+        Source::Local(path) => Ok(dev_version(&read_local(&path).await?)),
+        Source::Release { .. } => Ok(PIN.version.to_owned()),
+    }
+}
+
+async fn read_local(path: &Utf8Path) -> Result<Vec<u8>, SandboxError> {
+    tokio::fs::read(path)
+        .await
+        .map_err(|error| guest_error(format!("{LOCAL_BUILD}={path}: {error}")))
+}
+
+fn dev_version(bytes: &[u8]) -> String {
+    format!("dev-{}", hex(&Sha256::digest(bytes)))
+}
+
 /// Into `<home>/guest/<version>/`, kept there for later runs.
 pub(super) async fn install(
     home: &Utf8Path,
@@ -76,10 +94,8 @@ pub(super) async fn install(
     // Windows refuses to replace it.
     let (version, missing) = match source(local, std::env::consts::ARCH)? {
         Source::Local(path) => {
-            let bytes = tokio::fs::read(&path)
-                .await
-                .map_err(|error| guest_error(format!("{LOCAL_BUILD}={path}: {error}")))?;
-            let version = format!("dev-{}", hex(&Sha256::digest(&bytes)));
+            let bytes = read_local(&path).await?;
+            let version = dev_version(&bytes);
             // Named by its sha256, and placed whole or not at all.
             let placed = dir_of(&version).join(FILE).exists();
             (version, (!placed).then_some(bytes))
@@ -166,7 +182,7 @@ pub(super) fn traffic(
     Ok((ports, unexposed))
 }
 
-fn hex(bytes: &[u8]) -> String {
+pub(super) fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 

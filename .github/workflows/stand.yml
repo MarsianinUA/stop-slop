@@ -49,12 +49,6 @@ jobs:
           node-version: 22
       - run: cargo fmt --check
       - run: cargo clippy --locked --workspace --all-targets -- -D warnings
-      # No crate of the workspace turns the adapter on before T-14, so without these two steps no OS
-      # of CI would build the SDK or lint the adapter.
-      - name: Lint the microsandbox adapter
-        run: cargo clippy --locked -p sandbox --features microsandbox --all-targets -- -D warnings
-      - name: Unit tests of the adapter
-        run: cargo test --locked -p sandbox --features microsandbox --lib
       # guest-release.yml builds this on a tag; here a break shows on the PR instead.
       - name: Build stand-guest for musl, as the release does
         if: runner.os == 'Linux'
@@ -98,11 +92,11 @@ jobs:
             trim::trim_under_root_tells_a_disk_without_discard_from_a_failure | tee "$RUNNER_TEMP/root.log"
           grep -q ' 4 passed;' "$RUNNER_TEMP/root.log"
 
-  # Runs the stand-guest of this commit, not the pinned release, so a change to the guest shows here
-  # before it is released.
+  # The contract set runs the stand-guest of this commit, so a change to the guest shows here before
+  # it is released; the cli set runs the pinned release.
   live:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 45
     defaults:
       run:
         working-directory: stand
@@ -139,6 +133,25 @@ jobs:
       # One case at a time: `leftovers` sees every VM of the home, another case's too.
       - name: The contract set on microsandbox VMs
         run: cargo test --locked -p sandbox --features microsandbox --test contract -- --test-threads=1
+      # stop-slop-stand keeps 20 GiB free on the disk of its folder, more than the root disk has.
+      # Its folder is outside the cache: the set's `clean` drops the images, and a cached
+      # stand-guest would skip the download the next step checks. The link also checks that the
+      # stand resolves its folder: microsandbox refuses a bind through a link.
+      - name: Put the stand folder of the cli set on the temporary disk
+        run: |
+          sudo install -d -o "$(id -u)" -g "$(id -g)" /mnt/stop-slop-stand-cli
+          ln -sfn /mnt/stop-slop-stand-cli /tmp/stop-slop-stand-cli
+          nproc
+          df -h / /mnt
+      # The pinned stand-guest from the release, as a user gets it: without STOP_SLOP_STAND_GUEST
+      # the adapter downloads it and checks its sha256. The runner's 4 CPUs give a stand 2 vCPUs, and
+      # 3 with host_share = 80, which the whole case asks.
+      - name: The stand command on microsandbox VMs
+        run: |
+          config="${XDG_CONFIG_HOME:-$HOME/.config}/stop-slop-stand"
+          mkdir -p "$config"
+          echo 'host_share = 80' > "$config/stand.toml"
+          env -u STOP_SLOP_STAND_GUEST cargo test --locked -p cli --test live -- --test-threads=1
       - name: Notes of the live run for the PR description
         if: always()
-        run: cat /tmp/stop-slop-stand-live/notes.txt || true
+        run: cat /tmp/stop-slop-stand-live/notes.txt /tmp/stop-slop-stand-cli/notes.txt || true

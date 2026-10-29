@@ -11,8 +11,9 @@ use std::time::{Duration, Instant};
 use camino::{Utf8Component, Utf8Path, Utf8PathBuf};
 
 use crate::{
-    ExecId, ExecOutcome, Exited, Exposed, Fault, ImageRef, Launch, Leftovers, Metrics, Mount,
-    Pulled, Sandbox, SandboxError, SandboxId, Seed, SnapshotId, Stopped, VolumeName, Waitable,
+    Cached, ExecId, ExecOutcome, Exited, Exposed, Fault, ImageRef, Launch, Leftovers, Metrics,
+    Mount, Pulled, Sandbox, SandboxError, SandboxId, Seed, SnapshotId, Stopped, VolumeName,
+    Waitable,
 };
 
 pub struct Fake {
@@ -22,8 +23,9 @@ pub struct Fake {
 
 /// The first rule whose `service` and, when set, `tree` match wins. `tree` is the tar of `Seed::Tree`, or of the
 /// VM whose snapshot seeds this one.
-/// `digests`: what `pull` reports per image; an unlisted image gets one derived from its name. A snapshot lives
-/// until `drop_snapshot`, across any number of runs on one `Fake`, and `guest` of `Pulled` is `fake`.
+/// `digests`: what `pull` reports per image; an unlisted image gets one derived from its name, and `cached` the
+/// same, `None` for one of `missing_images`. A snapshot lives until `drop_snapshot`, across any number of runs on
+/// one `Fake`, and `guest` of `Pulled` and `Cached` is `fake`.
 #[derive(Debug, Clone, Default)]
 pub struct Scenario {
     pub rules: Vec<Rule>,
@@ -64,6 +66,7 @@ pub struct Script {
 #[derive(Debug, Clone)]
 pub enum Call {
     Pull(Vec<ImageRef>),
+    Cached(Vec<ImageRef>),
     Create {
         batch: Vec<Launch>,
         ids: Vec<SandboxId>,
@@ -273,6 +276,18 @@ impl Sandbox for Fake {
             digests: images
                 .iter()
                 .map(|image| (image.clone(), self.digest(image)))
+                .collect(),
+            guest: "fake".to_owned(),
+        })
+    }
+
+    fn cached(&self, images: &[ImageRef]) -> Result<Cached, SandboxError> {
+        drop(self.record(Call::Cached(images.to_vec())));
+        let digest = |image: &ImageRef| (!self.is_missing(image)).then(|| self.digest(image));
+        Ok(Cached {
+            digests: images
+                .iter()
+                .map(|image| (image.clone(), digest(image)))
                 .collect(),
             guest: "fake".to_owned(),
         })

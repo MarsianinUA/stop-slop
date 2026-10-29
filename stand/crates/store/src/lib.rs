@@ -37,9 +37,10 @@ const JOURNAL: &str = "journal";
 /// read.
 const WHOLE_FILE: &str = "toml";
 
+#[derive(Debug, Clone)]
 pub struct StorePaths {
     pub root: Utf8PathBuf,
-    /// `stand.toml`; on macOS the config and data folders are one, so it lies in `root`.
+    /// `stand.toml`, in the config folder of the OS; `clean --all` leaves it when it lies in `root`.
     pub config: Utf8PathBuf,
 }
 
@@ -48,9 +49,23 @@ pub struct Store {
 }
 
 impl Store {
+    /// The root is resolved: microsandbox refuses a bind whose host path goes through a link (a
+    /// stand folder moved to another disk behind one, `/tmp` on macOS), and the run folders a VM
+    /// binds lie under the root. A `config` in the root follows it, so `clean --all` keeps it.
     pub fn open(paths: StorePaths) -> Result<Store, StoreError> {
-        fs::create_dir_all(&paths.root).map_err(StoreError::io(&paths.root))?;
-        Ok(Store { paths })
+        let StorePaths { root, config } = paths;
+        fs::create_dir_all(&root).map_err(StoreError::io(&root))?;
+        let resolved = resolve(&root)?;
+        let config = match config.strip_prefix(&root) {
+            Ok(rest) => resolved.join(rest),
+            Err(_) => config,
+        };
+        Ok(Store {
+            paths: StorePaths {
+                root: resolved,
+                config,
+            },
+        })
     }
 
     /// `None` while another process holds the OS lock on `<root>/lock`.
@@ -68,6 +83,10 @@ impl Store {
             Err(TryLockError::WouldBlock) => Ok(None),
             Err(TryLockError::Error(source)) => Err(StoreError::Io { path, source }),
         }
+    }
+
+    pub fn paths(&self) -> &StorePaths {
+        &self.paths
     }
 
     pub fn sandbox_home(&self) -> Utf8PathBuf {
@@ -204,10 +223,12 @@ pub enum Clean {
     All,
 }
 
-/// `OtherThan` keeps the kept run, or the cache, of the session with this key (`Session::key()`).
+/// `OtherThan` keeps the kept run, or the cache, of the session with this key (`Session::key()`);
+/// `Only` takes just that session's.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum KeptScope {
     OtherThan(String),
+    Only(String),
     All,
 }
 
@@ -215,6 +236,7 @@ impl KeptScope {
     fn covers(&self, key: &str) -> bool {
         match self {
             KeptScope::OtherThan(own) => own != key,
+            KeptScope::Only(own) => own == key,
             KeptScope::All => true,
         }
     }
@@ -237,6 +259,16 @@ impl StoreError {
             path: path.clone(),
             source,
         }
+    }
+}
+
+/// Not on Windows: there `canonicalize` gives a `\\?\` path, which the stand would print, and the
+/// SDK checks the links of a bind only on Unix.
+fn resolve(root: &Utf8Path) -> Result<Utf8PathBuf, StoreError> {
+    if cfg!(unix) {
+        root.canonicalize_utf8().map_err(StoreError::io(root))
+    } else {
+        Ok(root.to_owned())
     }
 }
 

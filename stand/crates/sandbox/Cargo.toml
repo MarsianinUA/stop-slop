@@ -7,12 +7,13 @@ publish = false
 
 [features]
 fake = []
-# Only `cli` turns it on (T-14); until then the live tests pass `--features sandbox/microsandbox`.
+# Only `cli` turns it on: a workspace build has the adapter, `-p sandbox` alone needs `--features microsandbox`.
 microsandbox = [
     "dep:guest",
     "dep:microsandbox",
     "dep:microsandbox-image",
     "dep:reqwest",
+    "dep:serde_json",
     "dep:sha2",
     "dep:tar",
     "dep:tokio",
@@ -27,6 +28,8 @@ guest = { path = "../guest", optional = true }
 microsandbox = { workspace = true, optional = true }
 microsandbox-image = { workspace = true, optional = true }
 reqwest = { workspace = true, optional = true }
+# The name of the SDK's recovery pointer to a snapshot group, which the adapter deletes with the group.
+serde_json = { workspace = true, optional = true }
 sha2 = { workspace = true, optional = true }
 # Unpacks what `copy_out` brings.
 tar = { workspace = true, optional = true }

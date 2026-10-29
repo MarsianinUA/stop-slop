@@ -18,6 +18,7 @@ Why a tool of its own and not rules in the project's linter:
    - It makes no network calls of its own. It runs `git`, and `gh` to look up pull requests.
 2. **The skill** in `skill/`, for a coding agent. The agent runs the program, judges the findings, fixes what the program cannot, and writes review comments.
 3. **The agent hook.** It checks a file right after the agent edits it, in repositories where you ran `stop-slop enable`.
+4. **The stand `stop-slop-stand`**, a second program in Rust, in its own workspace `stand/`. It runs my app from a Compose file in [microsandbox](https://github.com/superradcompany/microsandbox) VMs, before and after my change, measures both, and prints what an agent needs to look at as one line of JSON. See [The stand](#the-stand). The two programs share no code but the crates of `shared/`.
 
 ## Modes
 
@@ -467,7 +468,11 @@ max = 4
 - Each crate has its own tests. The base search runs on temporary git repositories: a stack of three branches, a descendant branch, a parent squash-merged into the base.
 - CI has two jobs, each on Ubuntu, macOS and Windows. A change in `shared/` runs both.
   - The linter's job, `ci.yml`, runs on changes outside `stand/`: `cargo fmt --check`, `rustfmt --check` on every `check.rs`, `cargo clippy --workspace --all-targets -- -D warnings` and `cargo test --workspace`.
-  - The stand's job, `stand.yml`, runs on changes in `stand/`: `cargo fmt --check`, `cargo clippy --workspace --all-targets -- -D warnings` and `cargo test --workspace` in `stand/`, with Node 22 for the tests of the preload.
+  - The stand's job, `stand.yml`, runs on changes in `stand/` and in `skill/references/`, which the stand builds in: `cargo fmt --check`, `cargo clippy --workspace --all-targets -- -D warnings` and `cargo test --workspace` in `stand/`, with Node 22 for the tests of the preload.
+- `cli` of the stand tests its commands on a fake sandbox, on all three OS.
+- The live tests run on real microsandbox VMs with `STOP_SLOP_STAND_LIVE=1`; without it they pass at once.
+  - In Linux CI, on KVM, the job `live` of `stand.yml` runs the contract set of the sandbox with the `stand-guest` of the commit, then both cases of `cli` on the pinned release. The whole case asks 3 vCPUs, so the job sets `host_share = 80`, and the runner's 4 CPUs give 3.
+  - On Windows Claude runs the whole live set before each push of the stand; on macOS I do. On Windows they run from the test binary that `cargo test --no-run` builds, never under `cargo test` or `cargo run`: cargo keeps its children in a job without breakaway, and a VM from a snapshot cannot start there.
 - I measure speed by hand with `check --all` on a real repository, read-only.
 
 ## Speed
@@ -482,6 +487,114 @@ The targets hold for Windows, Linux and macOS. I measure them on Windows, where 
 
 I measured this in October 2026 with all 103 rules, a release build, Windows 11 and git 2.47, on a clone of a NestJS monorepo after `git gc` and `git update-index --refresh`. The rules take 16 to 18 ms of that for all files; the rest is git and process start. Without the refresh, a fresh clone runs the diff in about 160 ms, because git rechecks the files its index cannot trust.
 
+## The stand
+
+### What it does
+
+`stop-slop-stand run` reads the stand file and takes the work tree as a git tree: the files on disk, tracked or not, without the ones git ignores. It puts that tree on a disk of its own in a VM, and the setup services install and build there. Then the workload runs `repeat` times, 3 by default, each time on a fresh copy of the state after setup, and the stand measures each repeat. With `--before` it does the same for the tree it compares with, and the repeats of the two versions take turns. It prints a summary or one line of JSON and the path of the report, and destroys every VM. The work tree and the index stay as they were; in `.git` the stand adds only git objects and the ref of `snapshot`.
+
+A session is one stand file in one work tree. It holds the seal of the recipe, the runs with their reports, the kept snapshots and the setup cache.
+
+The stand measures only my own branch. It never runs the code of a colleague's pull request.
+
+### Commands
+
+| Command | What it does |
+|---|---|
+| `stop-slop-stand run [--before session\|<ref>] [--json [--pretty]]` | Measures the head, and with `--before` the tree it changed. `session` is the snapshot of this work tree; a `<ref>` stands for `git merge-base HEAD <ref>`. |
+| `stop-slop-stand run --before <..> --reseal --reason "<text>"` | Seals the changed recipe again and starts the comparison over. |
+| `stop-slop-stand run --dry-run [--before ..] [--json]` | Checks the stand file, the seal, the budget and the trees as `run` does. Then it prints `cached <digest>` or `to download` for each image, and `setup <side> cached <run>` or `built` for each version. No VM starts, and nothing is pulled, sealed or dropped: `would destroy`, `would drop` and `would forget` lines name what the sweep and a low disk would take. With `--json` the line holds no facts; the exit code tells. |
+| `stop-slop-stand snapshot` | Records the work tree, uncommitted and untracked files too, as "before" of this session, in `refs/stop-slop/stand/before/<work tree key>`. Prints its sha, and `replaced <old>` when there was one. The index and the files stay. |
+| `stop-slop-stand inspect <run> <side> <service> -- <argv>` | Runs `argv` in a throwaway copy of the state the kept run ended with, see [inspect](#inspect). |
+| `stop-slop-stand accept <measure> --allow <bound> --reason "<text>"` | Accepts the shift of a measure after the fact, see [The declared cost](#the-declared-cost). |
+| `stop-slop-stand guide [topic]` | Prints the guide for agents. Without a topic: the shortest path, what to do on each exit code and the list of topics. With one: the topic `recipe`, `probes`, `expect`, `line` or `inspect`. |
+| `stop-slop-stand init` | Writes a stand file to start from, with comments, and prints its path. A stand file that is there already is exit 2. |
+| `stop-slop-stand clean [--all]` | Deletes every VM, then every snapshot, then the images, then the data of every session: runs and reports, seals, acceptances and the setup cache. It also drops the snapshot ref of this work tree. The runtime of microsandbox, `stand-guest` and the journals of the sessions stay. It takes the sessions of every work tree that uses the stand folder. `--all` deletes the whole stand folder but its lock, without asking microsandbox first: a VM that a crashed run left keeps running until its time is up. |
+
+`--help` holds at most 20 lines and ends with ``agents: run `guide` ``. The text of `guide` is `skill/references/guide.md` and `probes.md`, built into the program.
+
+`run`, `inspect`, `accept` and `clean` take the lock of the stand folder, one at a time. While another command holds it, a command prints `waiting for the stand` and waits as long as a whole run of its stand file may take, an hour for `clean` without a stand file that loads, then exits with 2. Ctrl+C stops a run: the VMs go, what it collected stays in the run folder, and it exits with 130. A second Ctrl+C leaves at once, without a line, and the next start sweeps what is left.
+
+Exit codes of `run`:
+
+- `0`: the head passed every repeat. A failed "before", diffs, grades, `needs`, flags and failed probes are facts, not failures.
+- `1`: the head failed: a setup service or the workload exited with another code than 0, a timeout, a long-running service that died, a healthcheck that never passed. No report is written. `next` names an `inspect` of each snapshot the failure kept, or `guide recipe`.
+- `2`: the stand refused its input and measured nothing: no stand file, a stand file or a `stand.toml` it refuses, a recipe changed since its seal, the budget, no snapshot for `session`, an unknown ref, no merge-base, a "before" tree equal to the head's, an image the registry does not know, a result in `/stand/out` that is not a plain file or is over 64 MiB, a run outside a git work tree, a bad flag, or waiting too long for another run.
+- `3`: the stand itself broke: microsandbox, the registry, the download or the sha256 of `stand-guest`, git, the disk, reading the host or the report.
+- `130`: Ctrl+C.
+
+On 2 and 3 stderr says why and ends with a `next: <command>` line for each command that helps. The other commands exit 0, 2, 3 or 130 the same way; `inspect` exits 0 whatever the code of `argv`.
+
+### The stand file
+
+`<git common>/info/stop-slop-stand/compose.yaml`, with the harness beside it. All work trees of the repository share it. The folder is the recipe: the stand file and every file next to it. It lives outside the repository, so nothing of it goes into the diff. It is plain Compose, a subset of it, plus `x-stand`: `STAND_REPO=<repo> docker compose -f <file> up` runs it too.
+
+- The top level takes `services`, `volumes`, `name`, `x-stand` and `x-*`. A service takes `image`, `command`, `entrypoint`, `environment`, `working_dir`, `volumes`, `expose`, `depends_on`, `healthcheck`, `stop_signal`, `stop_grace_period`, `deploy.resources.limits`, `deploy.replicas`, `x-stand` and `x-*`. Any other key is refused with its path and line; `build:` and `ports` are not in v1.
+- `deploy.resources.limits.cpus` and `.memory` are required. A VM gets whole vCPUs: `cpus: "0.5"` takes one.
+- A service another one calls needs `expose`; without it the name resolves but does not answer, and the report flags `missing-expose`.
+- A service that another one waits for with `service_completed_successfully` is a setup service: it runs once per version, before the repeats. `x-stand.workload` names the workload: its exit ends a repeat, and nothing waits for it. Both run one replica. The other services are long-running. `service_healthy` needs a `healthcheck`.
+- A service name has no `.` and is neither `stand` nor `volume`.
+- `stop_signal` defaults to the image's `STOPSIGNAL`, then `SIGTERM`, as in Docker; `stop_grace_period` to `10s`. Every repeat ends with that clean stop of each long-running service, and so does setup before each snapshot.
+- Mounts, in the short form only:
+  - `${STAND_REPO}:/w/app` mounts the tree of the measured version at `/w/app` of a disk of its own, the version disk at `/w`: always that target, without `:ro` or a subfolder. No other `$` substitution and no host path.
+  - A relative source is the harness, the same for both versions: a folder of the recipe, with `:ro`.
+  - A named volume is an ext4 disk of the one service that mounts it, without `:ro`; that service runs one replica and does not mount `${STAND_REPO}`.
+  - `/stand/` and `/w/` are the stand's: no target there but `/w/app`. No target is `/`, and no two mounts share one.
+- The prepare service is the setup service with `${STAND_REPO}` that every other service with `${STAND_REPO}` waits for. It installs and builds on the version disk, and the VM of each other service with `${STAND_REPO}` starts from its snapshot. So those services use its `image`, written the same, and it mounts nothing but `${STAND_REPO}`. Without a prepare service each VM with `${STAND_REPO}` unpacks the tree itself. Keep the store and the cache of the package manager on `/w`, outside `/w/app`, never in a bind.
+- `x-stand` at the top level: `workload`, `repeat` (3), `setup_timeout` (`10m`), `timeout` per repeat (`5m`), `probes`, `expect`, `fault`, `second_pass` (`false`). `x-stand` of a service: `profile: node` and `network: public`. `x-` keys elsewhere are refused.
+- `profile: node` profiles the Node processes of the service: their hot functions in each measured repeat, and their coverage in one more repeat of the head, outside the stats.
+- `x-stand.probes.<name>: {in, at, run, key, ignore}`: a command that runs in the first replica of a long-running service, at `after-setup`, `after-workload` or `on-failure`, under 30 seconds, as the image's user, with no network beyond its own VM. Its stdout is compared as `probe.<name>.jsonl`. `guide probes` has the keys and examples.
+- `x-stand.expect`: `cost`, a list of `{measure, change, reason}`, and `unchanged`, a list of `{file, reason}`, which needs `second_pass: true`. `change` is `none`, `+X%`, `-X%`, `down` or `unknown`, without quotes, X a whole percent from 5.
+- `x-stand.fault: {target: <service>:<port>, mode: down}` or `{target, mode: slow, delay}` adds 2 repeats per version outside the stats, where that target refuses or delays its connections. `x-stand.second_pass: true` adds one repeat per version that runs the workload twice on one state. Their results are facts; a failure there does not change the exit code.
+- Every repeat starts from the state after setup. The workload writes `*.jsonl` into `/stand/out`, which is fresh for each repeat; with `--before` each file is compared with the same file of "before", record by record. Each `*.jsonl` there, a probe's output too, is a plain file of at most 64 MiB: a link, a FIFO, a folder or a bigger file of that name is exit 2.
+
+The stand runs `id`, `tar` and `du` inside the guests, so an image without them, such as a distroless one, cannot run in it.
+
+### The seal
+
+The first `run --before` of a session seals the recipe once it fits the budget and its images are pulled: a copy of its folder goes into the session, and every run with `--before` reads that copy. A changed, new or deleted file of the live folder is exit 2 that names it, with the `--reseal` command in `next`. `--reseal --reason` seals it again and writes the reason into the session's journal. The line of every later run with `--before` shows the journal in `seal`, together with the `max_tolerance` in effect. The journal outlives `clean`, so the next seal shows `cleaned` too. `run` without `--before` reads the live folder and seals nothing: that is free exploration.
+
+### The declared cost
+
+With `--before` each measure gets a grade against its entry in `x-stand.expect.cost`: `met`, `exceeded`, `surprise` or `unmeasurable`; a measure without an entry is graded as `none`. `unknown` gets no grade and goes into `needs`, a list of `{measure, reason}` for a person. An `unmeasurable` measure without an entry stays quiet and is counted in `unmeasurable`. Apart from its grade, a measure has a verdict against "before" and against the previous run: `improved` or `regressed` where less is better, `changed` for connections and bytes, which have no better side, `within-noise` or `no-baseline`.
+
+`accept <measure> --allow <bound> --reason "<text>"` adds an acceptance for the head tree of the last passed run: `<bound>` is `none`, `+X%`, `-X%` or `down`. Acceptances only add up. The last one for the head tree of a run takes the place of the declared entry: the line shows it with `postHoc`, and `acceptances` counts them all. Once the head tree changes, no old acceptance holds, and the line marks the measure `stale`. `unknown`, a bound wider than `max_tolerance`, a reason without a bound or a bound without a reason, a measure the last passed run does not have, and no passed run yet are exit 2.
+
+Measures are named `<subject>.<metric>`: `stand.wall`, `stand.hot-owned`, `stand.hot-collateral`, `<service>.cpu`, `.memory`, `.error-lines`, `.shutdown`, `<service>:<port>.connections`, `.bytes`, `.http-5xx-share`, `volume:<name>.bytes`. The stand measures every one of them itself, so each has `src: stand`: a number of the harness never becomes a measure.
+
+### The `--json` line
+
+One line on every exit code, with only the exceptions: `run`, `report`, `seal`, `attempts`, `comparisons`, `measures`, `behaviour`, `fault`, `secondPass`, `flags`, `needs`, `failure`, `quiet`, `unmeasurable` and `next`. `quiet` counts what passed; the numbers stay in `report.json`. Runs of the same head tree, "before" tree and recipe pool their samples, and `attempts` counts them. `next` holds commands ready to paste, such as the `accept` of a `surprise`; every failure and refusal has one, Ctrl+C none. A ref of `--before` that a shell would read otherwise comes in single quotes, which a POSIX shell and PowerShell both take as typed. `--pretty` indents it by 2 spaces. `guide line` describes every field and flag; a test holds the topic and the line to each other.
+
+`report.json` (`schemaVersion` 1) lies in the run folder and is written only for a passed run. It follows the JSON of `check`: camelCase keys, kebab-case values, paths from the root with `/`, full oids. It is for people and tools; the agent reads the line.
+
+### The setup cache
+
+A setup that passed stays for the next runs of its session: the version snapshot, the snapshots of the setup volumes, the volume sizes and the `after-setup` outputs. A run uses it when its key matches: the version's tree, the `digest` of the recipe the run reads, the digest of each image after `pull`, the version of `stand-guest` and of the stand. There are two slots, `before` and `head`, one entry each; a run without `--before` changes only `head`, so a second `run --before session` without a reseal takes the setup of "before" from the cache. `setup.cached` of `head` and `before` in `report.json` names the run that built it, `null` when this run did; the summary prints it, the line does not. `clean` and the TTL of the session delete the cache, and on a low disk it goes before the kept snapshots of its session.
+
+A run whose pool already holds a passed run repeats only the measured repeats: the results of the coverage, fault and second-pass repeats come from the last passed run of the pool, with `from: "<run>"` in `report.json` and in the line. Such a repeat runs again when that run has no result for it, or when a fault category came out unknown there.
+
+### inspect
+
+`inspect <run> <side> <service> -- <argv>` takes the kept run of the session: the last run that kept snapshots, of the services with a volume, at the end of its last measured repeat or at the failure. A newer kept run drops the snapshots of the one before. `inspect` starts the snapshot of `<service>` of `<side>` (`head` or `before`) in a throwaway VM without neighbours and without network, with the command of its service. It runs `argv` under 60 seconds, prints `exit <code>` or `timeout`, at most 40 lines and 64 KiB of its stdout and the path of the whole output, and destroys the VM. When `argv` left something other than a regular file at that path, such as a link, one line says so and nothing of it is printed. A write lands in that copy only. A service that does not start alone is exit 2 with the reason. It gives no verdict.
+
+### stand.toml and the folders
+
+| Key of `stand.toml` | Default | What it does |
+|---|---|---|
+| `host_share` | 50 | The share of the host's CPUs and memory the stand may take, 1 to 80. |
+| `max_tolerance` | 25 | The widest `+X%` or `-X%` of `expect` and `accept`, 1 to 1000. Above 25 the line flags `wide-tolerance`. |
+
+A bad `stand.toml` is exit 2 that names the file and the key. It lies in the config folder of the OS, in `stop-slop-stand/stand.toml`.
+
+The stand folder is `STOP_SLOP_STAND_HOME`, or `%LOCALAPPDATA%\stop-slop-stand` on Windows, `~/.local/share/stop-slop-stand` on Linux and `~/.stop-slop-stand` on macOS. microsandbox keeps Unix sockets under it, and a socket path holds 104 bytes on macOS and 108 on Linux, so on those keep `STOP_SLOP_STAND_HOME` under about 45 characters. `STOP_SLOP_STAND_GUEST` names a build of `stand-guest` to use instead of the pinned release, unchecked; it is for developing the stand.
+
+The budget: setup goes one version after the other, and so do the repeats, so the stand asks for its peak. That is the larger of setup (the setup services and the long-running ones they wait for) and a repeat (the long-running services and the workload), for CPUs and memory each: the limits times the replicas, CPUs as whole vCPUs. The stand refuses with the numbers when the peak does not fit: CPUs over `host_share` of the logical CPUs, or memory over the lower of `host_share` of all memory and the free memory less 2 GiB. It also refuses when the disk of the stand folder has less than 20 GiB free, once it has dropped the setup cache and kept snapshots of the other sessions, then of its own; a stand that the CPUs or the memory refuse drops nothing. A session lives 3 days after its last use, with its runs, reports, kept snapshots and setup cache.
+
+### Two networks
+
+The host needs the network to download the runtime of microsandbox, the images and `stand-guest`. The guests have none to the outside: a service gets it only with `x-stand: { network: public }`, so a dependency I did not stub fails at once. Each guest reaches the other services by name.
+
 ## Repository layout
 
 ```text
@@ -490,7 +603,8 @@ stop-slop/
   .gitattributes    *.ts text eol=lf, so fixtures compare the same on Windows
   .github/workflows/
     ci.yml          the linter's checks
-    stand.yml       the stand's checks
+    stand.yml       the stand's checks and its live tests
+    guest-release.yml  builds stand-guest for a guest-v* tag and publishes it
   crates/
     cli/            commands, flags, text and JSON output, the hook
     repo/           git and the disk: a snapshot of files (the working tree or a revision)
@@ -503,12 +617,23 @@ stop-slop/
   shared/           crates that take nothing from the workspace, so a second workspace can use them too
     gitcmd/         runs git: a cleaned environment, LC_ALL=C, another try when the index is busy
     testkit/        tests only: a temporary git repository
+    fixtures/       report.json as the stand writes it, held to the code by a test of report
   stand/            the stand, a second workspace with its own Cargo.toml and Cargo.lock
     crates/
+      cli/          the command stop-slop-stand: flags, the call order of a run, the seal, the cache slots, the sweep, guide and init
+      spec/         the stand file: the allowed subset of Compose, x-stand, the recipe and its digest, the demand
+      budget/       the host's CPUs, memory and free disk against what a stand asks for
+      source/       the work tree, its snapshot and "before" as git trees, and their tar files
+      run/          one run in VMs: setup and its cache entries, repeats, probes, the clean stop, kept snapshots, inspect
+      sandbox/      the port to the VMs, the microsandbox adapter and a fake for tests
+      guest/        stand-guest, the helper inside each VM: names, counters, faults, stops, probes, trim
       profile/      the Node preload, which writes CPU profiles or coverage, and their reading
+      report/       measures, verdicts, grades, flags and diffs: report.json, the line and the summary
+      store/        the stand folder: lock, sessions, runs, the seal, acceptances, the setup cache
   rules/            the rules, a crate of their own: Cargo.toml, build.rs, lib.rs, fixtures.rs, clippy.toml, roles.toml
     <group>/<rule-id>/
   skill/            the skill: SKILL.md, fix.md, review.md, send.md, agents/openai.yaml
+    references/     guide.md and probes.md, the stand's guide, built into stop-slop-stand
   docs/
     spec.md         this file
     rules.md        every rule, by group
@@ -531,6 +656,14 @@ cargo install --path crates/cli --locked
 ```
 
 This puts `stop-slop`, or `stop-slop.exe` on Windows, into `~/.cargo/bin`, which rustup puts on `PATH`.
+
+The stand installs the same way:
+
+```sh
+cargo install --path stand/crates/cli --locked
+```
+
+It needs a hypervisor: WHP on Windows (Windows Hypervisor Platform, a Windows feature), KVM on Linux, Apple silicon on macOS. On the first run it downloads the runtime of microsandbox and the pinned `stand-guest`, checked by its sha256.
 
 The skill goes where the agent keeps its other skills. Link `skill/` there, or copy it:
 
@@ -555,3 +688,7 @@ For the hook, add the `PostToolUse` entry from [The hook](#the-hook) to `~/.clau
 - JavaScript, `.vue` and other languages.
 - Running in CI.
 - GitLab and other hosts. GitHub only.
+- The stand does not run a colleague's pull request: their code would run on my machine.
+- In the stand: `ports` in the stand file, an MCP server, recorders built in for particular databases, replicas of a service with a volume, a service with both `${STAND_REPO}` and a volume, and services of different images on the tree of a prepare service.
+- Checks a stand could do but would do badly, so it does not: soak runs and the slope of RSS, latency percentiles, event-loop delay, GC numbers, overload ramps, deterministic simulation, `kill -9` and recovery, security scanners, secrets by regex, migration locks, down migrations, fake clocks, runs of mixed versions. A check gets in only when it tells right code from wrong, repeats or has measurable noise, runs in minutes, gives the agent something to act on, is not cheaper as a rule of `stop-slop`, and gives no false calm on stub data.
+- More than one run at a time per stand folder, which by default is one per machine.

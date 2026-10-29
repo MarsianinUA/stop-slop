@@ -71,18 +71,23 @@ fn sweep(sandbox: &Microsandbox) -> Result<(), SandboxError> {
 /// check that it left nothing.
 struct Case {
     sandbox: &'static Microsandbox,
-    out: TempDir,
+    _temp: TempDir,
+    out: Utf8PathBuf,
 }
 
 impl Case {
     fn start() -> Option<Case> {
         let sandbox = live()?;
-        let out = tempfile::tempdir().unwrap();
-        Some(Case { sandbox, out })
+        let (_temp, out) = folder();
+        Some(Case {
+            sandbox,
+            _temp,
+            out,
+        })
     }
 
     fn out(&self) -> &Utf8Path {
-        Utf8Path::from_path(self.out.path()).unwrap()
+        &self.out
     }
 
     fn write(&self, name: &str, text: &str) {
@@ -224,6 +229,7 @@ shared!(
     leftovers_sees_what_was_made,
     pull_of_an_unknown_image_is_not_found,
     pull_gives_digests_in_order,
+    cached_names_the_pulled_digest_and_none_for_an_image_never_pulled,
     a_snapshot_outlives_its_vm,
     tree_lands_before_the_command,
     copy_out_brings_the_scratch_folder,
@@ -782,6 +788,38 @@ fn live_a_snapshot_carries_the_label_and_drops_before_its_image() {
     assert!(!cached(BUSYBOX), "kept after its snapshot went");
     let lost: Vec<&str> = kept.into_iter().filter(|image| !cached(image)).collect();
     assert!(lost.is_empty(), "pruned though kept: {lost:?}");
+    case.finish(&[]);
+}
+
+/// SDK 0.7.8 keeps an empty group after the remove of its last member, and its recovery pointer
+/// in the cache; `drop_snapshot` takes both along. The home holds those of runs before this
+/// change, so the case compares with what was there.
+#[test]
+fn live_a_dropped_snapshot_leaves_no_group_folder() {
+    let Some(case) = Case::start() else { return };
+    let names = |dir: Utf8PathBuf| -> Vec<String> {
+        let Ok(entries) = fs::read_dir(&dir) else {
+            return Vec::new();
+        };
+        let names = entries.map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned());
+        let mut names: Vec<String> = names.collect();
+        names.sort();
+        names
+    };
+    let groups = || names(home().join("snapshots"));
+    let pointers = || names(home().join("cache").join(".snapshot-deletion-parents"));
+    let before = (groups(), pointers());
+    for _ in 0..2 {
+        let mut snap = launch("snap", ALPINE);
+        snap.command = sh("sleep 600");
+        let id = case.create(vec![snap]).remove(0);
+        case.sandbox.stop(&id).unwrap();
+        let snapshot = case.sandbox.snapshot(&id).unwrap();
+        case.sandbox.destroy(&id).unwrap();
+        assert_ne!(groups(), before.0, "the snapshot has a group folder");
+        case.sandbox.drop_snapshot(&snapshot).unwrap();
+        assert_eq!((groups(), pointers()), before);
+    }
     case.finish(&[]);
 }
 

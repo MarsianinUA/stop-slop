@@ -14,7 +14,7 @@ use crate::context::{BeforeInfo, Intent, Journal, SealInfo, SetupFrom};
 use crate::flags::Flag;
 use crate::next::Next;
 use crate::outputs::{RECORDS, Records};
-use crate::raw::Failure;
+use crate::raw::{Failure, Side};
 use crate::{Before, ReportError};
 
 pub(crate) const SCHEMA_VERSION: u32 = 1;
@@ -387,7 +387,7 @@ pub enum PassState {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PassOpen {
     pub target: String,
-    pub side: String,
+    pub side: Side,
     pub first: u64,
     pub second: u64,
 }
@@ -603,8 +603,8 @@ pub(crate) fn duration(duration: Duration) -> String {
 }
 
 /// Every path of the report and the line has `/`, on Windows too (plan, row 45); elsewhere a `\` is
-/// part of a file name.
-pub(crate) fn slashed(path: &Utf8Path) -> String {
+/// part of a file name. `cli` prints its paths so too.
+pub fn slashed(path: &Utf8Path) -> String {
     if cfg!(windows) {
         path.as_str().replace('\\', "/")
     } else {

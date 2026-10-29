@@ -335,20 +335,67 @@ fn a_bad_value_is_refused_at_its_key() {
 }
 
 #[test]
-fn demand_adds_whole_cpus_and_memory_of_every_replica() {
+fn demand_is_the_peak_of_setup_and_repeats_in_whole_cpus_of_every_replica() {
+    // A repeat: `db`, two replicas of `api` and `load`. Setup, `db`, `prepare` and `migrate`, asks
+    // 4 vCPUs and as much memory.
     assert_eq!(
         stand("example").demand(),
         Demand {
-            cpus: 1 + 2 + 1 + 2 * 2 + 1,
-            memory: (1 << 30) + (2 << 30) + (512 << 20) + 2 * (1 << 30) + (512 << 20),
+            cpus: 1 + 2 * 2 + 1,
+            memory: (1 << 30) + 2 * (1 << 30) + (512 << 20),
         }
     );
-    // Three replicas of 0.5 CPU take a whole CPU each.
+    // No setup. Three replicas of 0.5 CPU take a whole CPU each.
     assert_eq!(
         stand("values").demand(),
         Demand {
             cpus: 3 + 1 + 2,
             memory: 3 * (1 << 30) + (1 << 30) + (512 << 20),
+        }
+    );
+    // The CPUs of setup, the memory of a repeat: `cache` runs only in repeats, `db` in both.
+    let phases = load_text(
+        r#"
+services:
+  db:
+    image: postgres:17
+    healthcheck: { test: ["CMD", "pg_isready"] }
+    deploy: { resources: { limits: { cpus: "1", memory: 1g } } }
+  cache:
+    image: redis:7
+    deploy: { resources: { limits: { cpus: "1", memory: 512m } } }
+  prepare:
+    image: node:22
+    volumes: ["${STAND_REPO}:/w/app"]
+    depends_on: { db: { condition: service_healthy } }
+    deploy: { resources: { limits: { cpus: "5.5", memory: 1g } } }
+  api:
+    image: node:22
+    volumes: ["${STAND_REPO}:/w/app"]
+    depends_on: { prepare: { condition: service_completed_successfully } }
+    deploy: { resources: { limits: { cpus: "1", memory: 3g } }, replicas: 2 }
+  load:
+    image: node:22
+    depends_on: [api, cache]
+    deploy: { resources: { limits: { cpus: "0.5", memory: 256m } } }
+x-stand: { workload: load }
+"#,
+    )
+    .unwrap();
+    assert_eq!(
+        phases.demand(),
+        Demand {
+            cpus: 1 + 6,
+            memory: (1 << 30) + (512 << 20) + 2 * (3 << 30) + (256 << 20),
+        }
+    );
+    // The demo, whose sum is 6, fits the 4 vCPUs that 8 logical CPUs give at the default share;
+    // `cli` checks the template of `init`.
+    assert_eq!(
+        stand("demo").demand(),
+        Demand {
+            cpus: 4,
+            memory: (512 << 20) + (1 << 30) + (256 << 20),
         }
     );
 }

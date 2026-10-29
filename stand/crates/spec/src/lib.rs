@@ -152,12 +152,25 @@ pub struct Stand {
 }
 
 impl Stand {
-    /// Every service and replica at once: whole vCPUs (`ceil(cpus)` per instance) and memory
-    /// limits.
+    /// The peak of a run: the larger of setup (`in_setup`) and a repeat (the long-running services
+    /// and the workload), for CPUs and memory each. `run` sets up the versions in turn and repeats
+    /// them in turn, one VM per service and replica, so no more runs at once. Whole vCPUs
+    /// (`ceil(cpus)` per instance) and memory limits, times replicas.
     pub fn demand(&self) -> Demand {
+        let in_setup = self.in_setup();
+        let setup = self.sum(|name, _| in_setup.contains(name));
+        let repeat = self.sum(|_, service| service.kind != ServiceKind::Setup);
+        Demand {
+            cpus: setup.cpus.max(repeat.cpus),
+            memory: setup.memory.max(repeat.memory),
+        }
+    }
+
+    fn sum(&self, counted: impl Fn(&ServiceName, &Service) -> bool) -> Demand {
         self.services
-            .values()
-            .fold(Demand { cpus: 0, memory: 0 }, |demand, service| {
+            .iter()
+            .filter(|(name, service)| counted(name, service))
+            .fold(Demand { cpus: 0, memory: 0 }, |demand, (_, service)| {
                 let replicas = service.replicas.get();
                 Demand {
                     cpus: demand
