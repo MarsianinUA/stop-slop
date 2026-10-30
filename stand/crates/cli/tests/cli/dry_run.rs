@@ -36,7 +36,7 @@ fn dry_run_creates_nothing_pulls_nothing_never_seals_and_names_the_cache() {
     );
     assert!(
         ran.out
-            .ends_with("\nsetup head built\nsetup before built\n"),
+            .ends_with("\nsetup head to build\nsetup before to build\n"),
         "{}",
         ran.out
     );
@@ -88,7 +88,7 @@ fn dry_run_creates_nothing_pulls_nothing_never_seals_and_names_the_cache() {
         gone.out.contains("\nimage node:22 to download\n")
             && gone
                 .out
-                .ends_with("\nsetup head built\nsetup before built\n"),
+                .ends_with("\nsetup head to build\nsetup before to build\n"),
         "{}",
         gone.out
     );
@@ -104,7 +104,7 @@ fn dry_run_creates_nothing_pulls_nothing_never_seals_and_names_the_cache() {
     assert_eq!(live.exit, Exit::Passed, "{}", live.err);
     assert!(
         live.out.contains("compose.yaml (live folder)")
-            && live.out.ends_with("\nsetup head built\n"),
+            && live.out.ends_with("\nsetup head to build\n"),
         "another recipe, another key: {}",
         live.out
     );

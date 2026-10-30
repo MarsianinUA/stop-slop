@@ -486,7 +486,7 @@ fn dry_checks(
         };
         match built_by {
             Some(run) => text.push_str(&format!("setup {side} cached {run}\n")),
-            None => text.push_str(&format!("setup {side} built\n")),
+            None => text.push_str(&format!("setup {side} to build\n")),
         }
     }
     Ok(text)

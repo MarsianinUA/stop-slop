@@ -22,7 +22,7 @@ Why a tool of its own and not rules in the project's linter:
 
 ## Modes
 
-The skill has three branches, and each run takes one: fix the user's branch, review a colleague's PR, or send a review draft the user approved. The user names stop-slop in the request: "fix my branch with stop-slop", "review PR 123 with stop-slop", then "send it".
+The skill has four branches, and each run takes one: fix the user's branch, measure it with the stand, review a colleague's PR, or send a review draft the user approved. The user names stop-slop in the request: "fix my branch with stop-slop", "measure my branch on the stop-slop stand", "review PR 123 with stop-slop", then "send it".
 
 ### Fix your branch
 
@@ -49,6 +49,25 @@ The agent fixes everything at once, with no approval step. The run ends when `ch
     - the files that renames and moves touched;
     - every ignored finding with its reason, and every rule a convention turned off;
     - the formatter, `typecheck`, `lint` and `test` results, and each `performance` or `branching` fix the tests rejected.
+
+The fix also measures itself on [the stand](#the-stand) when the user asks for it, or when the repository has a stand file: then the user set the stand up for it.
+
+- Before the first edit, after step 3, the agent takes the `snapshot` of the work tree. Without a stand file it writes one from `init`, with a workload and a probe, checks it with `run --dry-run` and runs it once: no code has changed yet, so a failure is the recipe's.
+- After the tests, it declares the cost of its fixes in `x-stand.expect`, runs `stop-slop-stand run --before session --json`, and gives every exception of the line an outcome: a fix of the code, an `accept` with a reason, or a line in the report. Then `stop-slop hot` on the report names the hot functions with findings inside and the changed functions that never ran.
+- `stop-slop-stand clean` is the last command of the task.
+
+The report then also gives the declared cost and each grade, each exception with its outcome, the measures the user must judge, what `hot` found, or that the stand did not measure, and why.
+
+### Measure your branch
+
+The agent measures what the branch costs the running app. It edits the branch's code only to remove a regression the stand shows, and leaves the commit to the user. The stand runs only my own branch, never a colleague's PR.
+
+1. `git fetch`, then `stop-slop check --json`, for `base.ref` and the findings.
+2. Without a stand file, the agent writes one, as in the fix.
+3. It declares the cost of the branch's diff against `base.ref` in `x-stand.expect`, then runs `stop-slop-stand run --before <base.ref> --json`.
+4. It gives each exception of the line an outcome, as in the fix: an edit of the code that removes a regression, an `accept` with a reason for a shift the diff intends, or a line in the report. `inspect` and `stop-slop hot` show where to look. After an edit, `check` adds no finding, the formatter, `typecheck`, `lint` and `test` run as in the fix, and the stand runs again, three times with `--before` at most.
+5. `stop-slop hot <report> --json` on the last report names the hot functions of the branch with findings inside, and the changed functions that never ran.
+6. `stop-slop-stand clean`, then the report: the base, the declared cost and each grade, each exception with its outcome, every edit by file, what the user must judge, and what `hot` found.
 
 ### Review a colleague's PR
 
@@ -544,7 +563,7 @@ The stand measures only my own branch. It never runs the code of a colleague's p
 |---|---|
 | `stop-slop-stand run [--before session\|<ref>] [--json [--pretty]]` | Measures the head, and with `--before` the tree it changed. `session` is the snapshot of this work tree; a `<ref>` stands for `git merge-base HEAD <ref>`. |
 | `stop-slop-stand run --before <..> --reseal --reason "<text>"` | Seals the changed recipe again and starts the comparison over. |
-| `stop-slop-stand run --dry-run [--before ..] [--json]` | Checks the stand file, the seal, the budget and the trees as `run` does. Then it prints `cached <digest>` or `to download` for each image, and `setup <side> cached <run>` or `built` for each version. No VM starts, and nothing is pulled, sealed or dropped: `would destroy`, `would drop` and `would forget` lines name what the sweep and a low disk would take. With `--json` the line holds no facts; the exit code tells. |
+| `stop-slop-stand run --dry-run [--before ..] [--json]` | Checks the stand file, the seal, the budget and the trees as `run` does. Then it prints `cached <digest>` or `to download` for each image, and `setup <side> cached <run>` or `to build` for each version. No VM starts, and nothing is pulled, sealed or dropped: `would destroy`, `would drop` and `would forget` lines name what the sweep and a low disk would take. With `--json` the line holds no facts; the exit code tells. |
 | `stop-slop-stand snapshot` | Records the work tree, uncommitted and untracked files too, as "before" of this session, in `refs/stop-slop/stand/before/<work tree key>`. Prints its sha, and `replaced <old>` when there was one. The index and the files stay. |
 | `stop-slop-stand inspect <run> <side> <service> -- <argv>` | Runs `argv` in a throwaway copy of the state the kept run ended with, see [inspect](#inspect). |
 | `stop-slop-stand accept <measure> --allow <bound> --reason "<text>"` | Accepts the shift of a measure after the fact, see [The declared cost](#the-declared-cost). |
@@ -673,7 +692,7 @@ stop-slop/
       store/        the stand folder: lock, sessions, runs, the seal, acceptances, the setup cache
   rules/            the rules, a crate of their own: Cargo.toml, build.rs, lib.rs, fixtures.rs, clippy.toml, roles.toml
     <group>/<rule-id>/
-  skill/            the skill: SKILL.md, fix.md, review.md, send.md, agents/openai.yaml
+  skill/            the skill: SKILL.md, fix.md, stand.md, review.md, send.md, agents/openai.yaml
     references/     guide.md and probes.md, the stand's guide, built into stop-slop-stand
   docs/
     spec.md         this file

@@ -11,7 +11,7 @@ Why I wrote my own:
 
 ## What it checks
 
-103 rules: types, naming, functions and classes, data that wanders through functions for nothing, imports, config, errors and async, logs, style, NestJS, comments and tests.
+104 rules: types, naming, functions and classes, data that wanders through functions for nothing, imports, config, errors and async, logs, style, NestJS, comments and tests.
 
 Plus 12 more that stay off until I turn them on for a repo: 9 on Node performance (lookups and copies inside loops, `await` in loops, sync I/O in handlers, regexes that hang) and 3 on branching (an `if` that checks what's already known, identical branches, functions too tangled to follow).
 
@@ -19,3 +19,9 @@ Plus 12 more that stay off until I turn them on for a repo: 9 on Node performanc
 - [How it works, how to install it, and what it skips on purpose](docs/spec.md)
 
 I ported some rules from [anti-slop](https://github.com/dmmulroy/anti-slop). Its license is in [THIRD_PARTY.md](THIRD_PARTY.md).
+
+## The stand
+
+When an agent changes my code, I want to know what the change costs the running app, not what the agent guesses. So there's a second tool, `stop-slop-stand`. It runs my app from a plain Compose file in [microsandbox](https://github.com/superradcompany/microsandbox) VMs, the version before the change and after it, a few times each, and hands the agent one line of JSON: what got slower or heavier, what now answers or writes differently, and which changed code never ran. It only ever runs my own branch, never a colleague's PR: their code would run on my machine.
+
+Windows: the live tests pass on my machine. Linux: CI runs them on every PR. Mac: not checked yet; on Apple silicon this one runs them: `STOP_SLOP_STAND_LIVE=1 cargo test --locked --manifest-path stand/Cargo.toml --workspace -- --test-threads=1`.

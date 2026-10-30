@@ -458,8 +458,8 @@ fn the_stand_measures_a_change_against_its_session_and_cleans_up() {
     for expected in [
         format!("image {POSTGRES} to download"),
         format!("image {NODE} to download"),
-        "setup head built".to_owned(),
-        "setup before built".to_owned(),
+        "setup head to build".to_owned(),
+        "setup before to build".to_owned(),
     ] {
         assert!(
             dry.lines().any(|line| line == expected),

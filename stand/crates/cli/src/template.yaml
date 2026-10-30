@@ -17,9 +17,10 @@ services:
     working_dir: /w/app
     volumes: ["${STAND_REPO}:/w/app"]   # the measured tree
     # The package manager's cache and store go on /w, outside /w/app, never in a bind:
-    # npm ci --cache /w/.npm, pnpm install --store-dir /w/.pnpm-store. pnpm 10 skips the build
-    # scripts of dependencies: allow them here. Native modules build here, in the guest. Nothing
-    # goes global: the snapshot keeps every block of the root disk.
+    # npm ci --cache /w/.npm, pnpm install --store-dir /w/.pnpm-store. npm ci needs a lockfile:
+    # without one, npm install --cache /w/.npm. pnpm 10 skips the build scripts of dependencies:
+    # allow them here. Native modules build here, in the guest. Nothing goes global: the snapshot
+    # keeps every block of the root disk.
     command: ["sh", "-c", "npm ci --cache /w/.npm && npm run build"]
     deploy: { resources: { limits: { cpus: "2", memory: 2g } } }
     x-stand: { network: public }   # only what downloads gets the network
