@@ -265,7 +265,7 @@ fn the_slots_follow_the_last_run_and_a_head_entry_serves_the_next_before() {
     fake.drop_snapshot(&before_ids[0]).unwrap();
     let dry = world.run(&fake, &["run", "--before", "session", "--dry-run"]);
     let plain_run = plain["run"].as_str().unwrap();
-    let said = format!("\nsetup head cached {plain_run}\nsetup before built\n");
+    let said = format!("\nsetup head cached {plain_run}\nsetup before to build\n");
     assert!(dry.out.ends_with(&said), "{}", dry.out);
     let prepares = creates(&fake, "prepare");
     let missed = world
