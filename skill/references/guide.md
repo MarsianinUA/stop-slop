@@ -29,7 +29,7 @@ The recipe is the folder `<git common>/info/stop-slop-stand/`: the stand file `c
   - A guest has no outside network unless its service says `x-stand: { network: public }`. Give it only to what downloads, such as the prepare service.
   - An outside API the app calls, such as payments or mail, becomes a stub: a long-running service of the harness that answers as the real one does, the same way every repeat. The app finds it by a name in `environment`; the stub at the end of this topic also tells a probe what the app sent.
   - `service_healthy` needs a `healthcheck`. A service name has no `.` and is not `stand` or `volume`.
-  - Each variable of `environment` has its value in the file: the stand takes none from the host.
+  - Each variable of `environment` has its value in the file: the stand takes none from the host. The variables of the `init` template, such as `DATABASE_URL`, are examples: keep the ones this app reads.
 - Mounts, in the short form `source:target` or `source:target:ro`.
   - `${STAND_REPO}:/w/app` mounts the measured version's tree on its own disk, the version disk at `/w`, whole and writable: for a subfolder, set `working_dir`.
   - The harness: a folder of the recipe, such as `.` or `./load`, with `:ro`. A harness file goes into a folder, and the bind takes the folder. The folder exists inside the recipe folder, with no link on the way.
@@ -42,7 +42,7 @@ The recipe is the folder `<git common>/info/stop-slop-stand/`: the stand file `c
   - The package manager's store and cache go on `/w`, outside `/w/app`, never in a bind, where an install takes minutes instead of seconds: `npm ci --cache /w/.npm`, `pnpm install --store-dir /w/.pnpm-store`. `npm ci` needs a lockfile: without one, `npm install --cache /w/.npm`. pnpm 10 skips the build scripts of dependencies: allow them in the prepare command. Native modules build in the guest, never come from the host.
   - Keep the guest's root disk clean, with no global installs or caches: the snapshot keeps every block of it.
 - The stand runs `id`, `tar` and `du` in the guests. An image without them, such as a distroless one, cannot run in it.
-- `x-stand`: `workload`, `repeat` (3), `setup_timeout` (`10m`), `timeout` per repeat (`5m`), `probes` (`guide probes`), `expect` (`guide expect`), `fault` and `second_pass`. A service's `x-stand` takes `profile: node` for hot functions and coverage, and `network: public`. `stop_signal` and `stop_grace_period` (`10s`) work as in Compose; every repeat ends with that clean stop.
+- `x-stand`: `workload`, `repeat` (3), `setup_timeout` (`10m`), `timeout` per repeat (`5m`), `probes` (`guide probes`), `expect` (`guide expect`), `fault` and `second_pass`. A service's `x-stand` takes `profile: node` for hot functions and coverage, on the services that serve the workload rather than on setup services, and `network: public`. `stop_signal` and `stop_grace_period` (`10s`) work as in Compose; every repeat ends with that clean stop.
 - The workload writes `*.jsonl` into `/stand/out`. With `--before`, each file is compared record by record with the same file of "before"; fields that differ between repeats of "before" are noise.
 - A value that changes every run, such as a time or a random id, stays out of a record, or goes into `ignore` of its probe (`guide probes`): otherwise the stand takes its whole field path for noise in every record of the file, and the data at that path no longer compares.
 - Each `*.jsonl` of `/stand/out`, a probe's output too, is a plain file of at most 64 MiB: a link, a FIFO, a folder or a bigger file there is exit 2 with its path.
@@ -108,7 +108,7 @@ createServer(async (request, response) => {
 - A `surprise` or an `exceeded` comes with an `accept` command in `next`, its bound the shift rounded up to 5%. Accept only a shift you can explain: `stop-slop-stand accept <measure> --allow <bound> --reason "<why>"`.
   - `--allow` takes the grammar of `change` but `unknown`, and the measure must be in the last passed run of this work tree.
   - An acceptance holds for this head tree only: the line shows it as `postHoc`, and as `stale` after the next edit.
-- An `unmeasurable` entry: give the workload more to do, or raise `repeat`, or declare a wider bound if the change allows it.
+- An `unmeasurable` entry: give each repeat more work, which narrows the spread (more `repeat` does not), or declare a wider bound if the change allows it.
 - `unchanged` (with `second_pass: true`) lists `{file, reason}`, one entry per file: what must come out the same after both passes. A file is a `*.jsonl` of `/stand/out` by its path there, such as `orders.jsonl`, or `probe.<name>.jsonl` of an `after-workload` probe.
 
 ## line
@@ -127,8 +127,8 @@ createServer(async (request, response) => {
   - `journal` lists every seal, reseal and `clean` of the session, oldest first, and outlives `clean`.
 - A measure has `name`, `unit`, `src` and `median`, then `before`, `previous` and `expect`.
   - `name` is `<subject>.<metric>`: the subject is `stand`, a service, a port `<service>:<port>` or a volume `volume:<name>`. `unit` is `ms`, `bytes`, `count` or `share`. `src` is `stand`: the stand measured it, the harness cannot.
-  - `stand.hot-owned` is the own time of the profiled functions in the files that differ between "before" and the head, `stand.hot-collateral` that of the functions in the other files. They exist with `--before` and `x-stand.profile`.
-  - `median` is of the samples of every run of the same trees and recipe: running again adds samples instead of starting over.
+  - `stand.hot-owned` is the own time of the profiled functions in the files that differ between "before" and the head, `stand.hot-collateral` that of the functions in the other files. They exist with `--before` and `x-stand.profile`. A fix that gives a changed file back its base content moves that file's time into `stand.hot-collateral`.
+  - `median` is of the samples of every run of the same trees and recipe: running again adds samples instead of starting over. In `report.json`, `samples` lists this run's own values only, while `median` and the spread cover every pooled run.
 - `before` and `previous` of a measure have `median` and `verdict`. `before` is `null` without `--before`; `previous` compares with the last passed run of other trees or recipe.
   - `verdict` is `improved` or `regressed` when a measure where less is better moved beyond its noise, `changed` when a measure with no better side (connections, bytes) moved, `within-noise`, or `no-baseline` when there is nothing to compare with.
 - `expect` of a measure has `change`, `reason`, `grade`, `postHoc`, `stale` and `acceptances`.
@@ -157,7 +157,7 @@ createServer(async (request, response) => {
   - `phase` is where it stopped: `setup`, `ready` or `workload` when the app failed (exit 1), another step on a refusal or a breakage. `cause` is `exit-<code>`, `setup-timeout`, `timeout`, `died`, `unhealthy` or `cancelled`, or the error of a refusal or a breakage.
   - `logs` is the folder with the logs of the failed setup or repeat; `probes` are the outputs of the `on-failure` probes.
 - A flag has `kind` and the facts of its kind. No flag is a failure; each says what to know before trusting the numbers:
-  - `high-noise` (`measure`): a version's samples spread more than 20% between repeats, so a smaller shift does not show. Give the workload more to do, or raise `repeat`.
+  - `high-noise` (`measure`): a version's samples spread more than 20% between repeats, so a smaller shift does not show. Give each repeat more work: that narrows the spread, more `repeat` does not.
   - `first-repeat-outlier` (`measure`): the first repeat lies far from the others, as a warm-up does; the median already sets it aside.
   - `low-repeats` (`samples`): a version has fewer than 3 samples. Run again: runs of the same trees and recipe pool their samples.
   - `no-profile` (`service`): a repeat of this profiled service wrote no profile; it needs Node 20 or later.

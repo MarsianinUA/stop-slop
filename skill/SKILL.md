@@ -28,6 +28,7 @@ Run `stop-slop` inside the repository. If the command is missing, tell the user 
 - `stop-slop rules --json` lists the rules: `id`, `group`, `description`, `kind` (`error`, `candidate` or `agent`), `fix`, `files` (`code`, `tests` or `all`), `source`, `message`, `agent` (how to judge, fix or check the rule; `null` when the `message` says enough) and `active` (on in this repository). It is the only list of rules: read it once per run.
   - An `agent` rule has no code in the program. You check it yourself, as its `agent` text says, in the branch files its `files` covers.
   - Test files end in `.spec`, `.test` or `.e2e-spec` before the extension, or sit under `__tests__/`. Every other file is code.
+  - `enabled` in `<common>/info/stop-slop/config.toml` turns opt-in groups on for this repository, such as `performance` and `branching`; a rule `disabled` names stays off even then. `disabled` is the one key you change, as [Project conventions win](#project-conventions-win) says.
 
 ## The stand
 
