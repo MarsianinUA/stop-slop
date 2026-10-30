@@ -8,19 +8,19 @@ The shortest path, in the fix flow:
 4. After the tests pass: declare the cost of the change in `x-stand.expect` (`guide expect`), then `stop-slop-stand run --before session --json`. The first such run seals the recipe.
 5. Read the line (`guide line`). On an exception: `inspect` the kept state (`guide inspect`), fix the code, `accept` a shift you can explain, or hand `needs` to the user.
 6. `stop-slop hot <report> --json` for the hot functions of the branch and the changed code that never ran.
-7. `stop-slop-stand clean` once, as the last step of the task, when no other task uses the stand: it drops the snapshots, seals and caches of every work tree, not only this one's.
+7. `stop-slop-stand clean` once, as the last step of the task, unless the user says another task uses the stand now, also when the stand did not measure: it drops the snapshots, seals, caches and run folders of every work tree, not only this one's. Copy the numbers you report first, and take the task's `cost` out of `x-stand.expect`.
 
 The exit code says what to do:
 
 - `0`: the head passed every repeat. Flags and diffs are facts, not failures: read the line.
 - `1`: the head failed. Read `failure` (phase, service, cause, logs, the `on-failure` probes), run what `next` names (an `inspect` of the failed state, or `guide recipe`), then fix the code or the recipe.
-- `2`: the stand refused its input and measured nothing. stderr says why and ends with `next:` commands; follow them. What only the user can change, such as the disk, `host_share` in `stand.toml` or another run that holds the stand, goes to the user.
+- `2`: the stand refused its input and measured nothing. stderr says why and ends with `next:` commands; follow them. What only the user can change, such as the disk, `host_share` in `stand.toml` or another run that holds the stand, goes to the user. A missing snapshot after the first edit is the one `next` to pass over: compare with `--before <ref>` instead.
 - `3`: the stand itself broke. Show stderr and the line to the user and stop measuring: no retry, and no change to the recipe or the code for it. The task goes on, and its summary says the stand did not measure, and why.
 - `130`: Ctrl+C stopped it; the VMs are gone and what it collected is in the run folder. Run it again only when the user asks.
 
 ## recipe
 
-The recipe is the folder `<git common>/info/stop-slop-stand/`: the stand file `compose.yaml` and the harness beside it. It lives outside the repository, so nothing of it lands in the diff, and both versions mount the same harness. The file is plain Compose: `STAND_REPO=<the repo> docker compose -f <the file> up` runs it too.
+The recipe is the folder `<git common>/info/stop-slop-stand/`: the stand file `compose.yaml` and the harness beside it. It lives outside the repository, so nothing of it lands in the diff, and both versions mount the same harness.
 
 - Services. Each has an `image` and `deploy.resources.limits.cpus` and `.memory`. A key the stand does not know is exit 2 with its path, `build` and `ports` among them: name a built image, and reach a service by its name and `expose`.
   - A service others wait for with `service_completed_successfully` is a setup service: it runs once per version, before the repeats. `x-stand.workload: <service>` names the workload: its exit ends a repeat, and nothing waits for it. The rest are long-running. All that wait for one service wait the same way: it is setup or long-running, not both.
@@ -39,7 +39,7 @@ The recipe is the folder `<git common>/info/stop-slop-stand/`: the stand file `c
 - The prepare service: the setup service with `${STAND_REPO}` that every other `${STAND_REPO}` service waits for. It installs and builds on the version disk, nothing else. Its snapshot then seeds every other service with `${STAND_REPO}` in every repeat.
   - It mounts only `${STAND_REPO}`, and every other service with `${STAND_REPO}` uses its `image`, written the same: a VM from a snapshot keeps the snapshot's image.
   - Migrations and data go in a setup service of their own after it, as `migrate` in the template.
-  - The package manager's store and cache go on `/w`, outside `/w/app`, never in a bind, where an install takes minutes instead of seconds: `npm ci --cache /w/.npm`, `pnpm install --store-dir /w/.pnpm-store`. pnpm 10 skips the build scripts of dependencies: allow them in the prepare command. Native modules build in the guest, never come from the host.
+  - The package manager's store and cache go on `/w`, outside `/w/app`, never in a bind, where an install takes minutes instead of seconds: `npm ci --cache /w/.npm`, `pnpm install --store-dir /w/.pnpm-store`. `npm ci` needs a lockfile: without one, `npm install --cache /w/.npm`. pnpm 10 skips the build scripts of dependencies: allow them in the prepare command. Native modules build in the guest, never come from the host.
   - Keep the guest's root disk clean, with no global installs or caches: the snapshot keeps every block of it.
 - The stand runs `id`, `tar` and `du` in the guests. An image without them, such as a distroless one, cannot run in it.
 - `x-stand`: `workload`, `repeat` (3), `setup_timeout` (`10m`), `timeout` per repeat (`5m`), `probes` (`guide probes`), `expect` (`guide expect`), `fault` and `second_pass`. A service's `x-stand` takes `profile: node` for hot functions and coverage, and `network: public`. `stop_signal` and `stop_grace_period` (`10s`) work as in Compose; every repeat ends with that clean stop.
@@ -127,6 +127,7 @@ createServer(async (request, response) => {
   - `journal` lists every seal, reseal and `clean` of the session, oldest first, and outlives `clean`.
 - A measure has `name`, `unit`, `src` and `median`, then `before`, `previous` and `expect`.
   - `name` is `<subject>.<metric>`: the subject is `stand`, a service, a port `<service>:<port>` or a volume `volume:<name>`. `unit` is `ms`, `bytes`, `count` or `share`. `src` is `stand`: the stand measured it, the harness cannot.
+  - `stand.hot-owned` is the own time of the profiled functions in the files that differ between "before" and the head, `stand.hot-collateral` that of the functions in the other files. They exist with `--before` and `x-stand.profile`.
   - `median` is of the samples of every run of the same trees and recipe: running again adds samples instead of starting over.
 - `before` and `previous` of a measure have `median` and `verdict`. `before` is `null` without `--before`; `previous` compares with the last passed run of other trees or recipe.
   - `verdict` is `improved` or `regressed` when a measure where less is better moved beyond its noise, `changed` when a measure with no better side (connections, bytes) moved, `within-noise`, or `no-baseline` when there is nothing to compare with.
@@ -191,5 +192,6 @@ createServer(async (request, response) => {
 - The copy runs alone, without its neighbours and without network, with the command of its service; a service that cannot start that way is exit 2 with the reason.
 - `argv` runs under 60 seconds. The first line is `exit <code>` or `timeout`, then at most 40 lines and 64 KiB of its stdout, then `full output <path>`; its stderr is in `<path>.err`. The code of `argv` never becomes the exit code.
   - When `argv` left something other than a regular file at that path, such as a link, one line says so and nothing of it is printed.
+  - Windows PowerShell 5.1 drops the double quotes inside an argument it passes on, so an `argv` such as `sh -c` with `"` in its script reaches the guest broken and may still exit 0. Keep `"` out of `argv`: single quotes, as in `-- psql -U postgres -At -c 'select count(*) from orders'`, or a script of the harness.
 - A write lands in the copy only: the kept snapshot stays as it was.
 - After a failed head (exit 1), `next` names the `inspect` of each volume service with the state of the failure. A probe (`guide probes`) is what turns a look into a measured fact.

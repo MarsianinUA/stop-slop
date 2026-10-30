@@ -35,8 +35,7 @@ x-stand:
 
 - The slot comes after setup, so it lists only what the workload did; `after-setup` runs before the setup snapshot, so every repeat starts with it. `select slot_name` prints only the name: where the slot starts differs between the versions.
 - `checkpoint` before the peek: without it the last changes may not be decoded yet.
-- A change is `{table, op}`, and `BEGIN` and `COMMIT` mark the transactions: a write more or less, a write to another table or a transaction split in two is a diff. The values stay out: a time or a random id in a row would turn the field into noise in every record. The rows of a table compare in the probe below.
-- To see the values here anyway, print `data` itself, for tables whose rows hold no such value. `ALTER TABLE <t> REPLICA IDENTITY FULL` in a migration puts the old row into each update and delete.
+- A change is `{table, op}`, and `BEGIN` and `COMMIT` mark the transactions: a write more or less, a write to another table or a transaction split in two is a diff. The values stay out, since a time in a row is noise; the rows of a table compare in the probe below.
 - A workload that writes in parallel commits in another order each repeat, and the changes turn into noise. Count them instead: `select json_build_object('table', m[1], 'op', m[2], 'count', count(*)) from pg_logical_slot_peek_changes('stand', null, null) c, regexp_match(c.data, '^table ([^:]+): ([A-Z]+):') m where m is not null group by m[1], m[2] order by m[1], m[2]`.
 
 The rows of a table, paired by id, without their times:
@@ -74,7 +73,6 @@ x-stand:
 
 - The counts outlive the clean stop before the setup snapshot, so the reset runs at the end of setup, as an `after-setup` probe: every repeat starts from the same, nearly empty counts. It prints `reset`, not the time `pg_stat_statements_reset()` returns.
 - The probes' own statements count too, the same on both versions; the filter takes out the ones that read the counts. When the app has a role of its own, `where userid = 'app'::regrole` keeps only its statements.
-- With the slot as well, both settings go into one `command`: `["postgres", "-c", "wal_level=logical", "-c", "shared_preload_libraries=pg_stat_statements"]`.
 
 ## Redis: the writes a run made
 
@@ -103,13 +101,12 @@ x-stand:
 - `after-setup` runs only in a service setup waits for: a setup service, such as `migrate`, waits for `cache` with `service_healthy`.
 - `aof-start` notes on the volume which file the tail is in and where it starts, so every repeat starts with the note. `--auto-aof-rewrite-percentage 0` keeps Redis from rewriting the log into a new file; a rewrite since setup fails the probe (`probe-failed`).
 - Redis answers a write before it is in the file: the script waits until `INFO persistence` shows the buffer written and synced, before the note and before the tail.
-- Redis logs `EXPIRE` as `PEXPIREAT` and `SET .. EX` as `SET .. PXAT`, with an absolute time, new each run: the script prints `<time>` in its place. A key or value that is random each run, such as a session id, would turn its field into noise the same way: map it too.
+- Redis logs `EXPIRE` as `PEXPIREAT` and `SET .. EX` as `SET .. PXAT`, with an absolute time, which is noise: the script prints `<time>` in its place, and a random key or value, such as a session id, needs the same.
 
 `probes/aof.sh`, beside the stand file:
 
 ```sh
 #!/bin/sh
-# `aof.sh start` notes where the tail of the AOF starts; `aof.sh` prints that tail.
 set -eu
 dir=/data/appendonlydir
 note=/data/stand-aof-start
@@ -168,7 +165,7 @@ function quote(text,  out, i, c) {
 }
 ```
 
-## Redis: calls, keys and memory
+## Redis: calls and keys
 
 ```yaml
     redis-calls:
@@ -192,7 +189,7 @@ redis-cli info commandstats | tr -d '\r' |
   grep -Ev '"cmd":"(ping|info|llen|zcard)"'
 ```
 
-`probes/redis-keys.sh`: the keys that never expire, counted by the prefix before their first `:`. A change that adds keys without a TTL grows the store for good. The memory Redis takes is the stand's own measure `<service>.memory`; `used_memory` moves with every allocation, so the probe leaves it out.
+`probes/redis-keys.sh`: the keys that never expire, counted by the prefix before their first `:`. A change that adds keys without a TTL grows the store for good.
 
 ```sh
 #!/bin/sh
@@ -241,7 +238,7 @@ redis-cli --scan --pattern 'bull:*:meta' | sed 's/^bull:\(.*\):meta$/\1/' | sort
   done
 ```
 
-`probes/streams.sh`: the messages of each JetStream stream and the pending and redelivered counts of each consumer, one field a record, in the order of the answer. Its times and ids change every run, so the script keeps only these lines of it.
+`probes/streams.sh`: the messages of each JetStream stream and the pending and redelivered counts of each consumer, one field a record, in the order of the answer; its times and ids are noise, so the script keeps only these lines.
 
 ```sh
 #!/bin/sh
@@ -284,8 +281,7 @@ Path, size and sha256 of every file under a folder, one JSON record each, paired
 ```
 
 - Busybox `stat` and `sha256sum` do this too, in alpine images.
-- A file whose content changes every run, such as a log, stays out of the `find`: its `sha256` would make `/sha256` noise for every file.
-- The volume is an ext4 disk of the VM, so names, case and links are Linux's.
+- A file whose content is noise, such as a log, stays out of the `find`.
 
 ## What the workload records
 
@@ -305,7 +301,6 @@ const parse = (text) => {
   }
 };
 
-// Read every body: Node's fetch reuses a connection only after that.
 async function call(path, init) {
   const answer = await fetch(`${base}${path}`, init);
   return { status: answer.status, body: parse(await answer.text()) };
@@ -324,7 +319,7 @@ write("race.jsonl", { statuses: answers.map((answer) => answer.status).sort() })
 write("openapi.jsonl", (await call("/docs-json")).body);
 ```
 
-- The answers of the routes the branch reaches, a record `{route, status, body}` each, show a changed answer field by field. A workload file has no `ignore`: the workload leaves out a time or a random id of a body before it writes the record.
+- The answers of the routes the branch reaches, a record `{route, status, body}` each, show a changed answer field by field. A workload file has no `ignore`, so the workload leaves the noise of a body, a time or a random id, out of the record.
 - `/docs-json` is where NestJS serves the document with `SwaggerModule`; another app has its own path.
 - A job on a schedule, a cron or an interval, runs inside a repeat only with a short schedule. When the app takes its schedule from config, give it one such as every 5 seconds in `environment`, and let the workload wait for the job to run.
 - Guests run in UTC, where local and UTC dates agree. `TZ: Pacific/Kiritimati` (UTC+14) in the app's `environment` makes a change that mixes the two show in the records.
