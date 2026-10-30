@@ -18,9 +18,9 @@ The run also measures its fixes on the stand ([stand.md](stand.md)) when the use
 10. With the stand: [Measure](stand.md#measure), steps 5-7 of stand.md, on the code as steps 4-9 left it.
 11. With the stand, `stop-slop-stand clean` ([Clean](stand.md#clean)) first: it is the last command of the task. Leave the commit to the user. Report:
     - the base and why the program picked it;
-    - what you fixed in the user's own lines, by rule;
+    - what you fixed in the user's own lines, by rule, and plainly each fix that undoes a hunk of the user's own;
     - cleanup: what changed in old code (the `inHunk: false` findings of step 2), by file and line, so the user can commit it apart (`git add -p` where a file holds both kinds);
-    - files touched by moved or renamed files and exported names;
+    - files touched by moved or renamed files and exported names, and the state of the index: `git mv` staged the renames, other edits are unstaged and new files untracked, so the user can split the commit;
     - every ignored finding with its reason, and every rule a convention disabled;
     - the formatter, `typecheck`, `lint` and `test` results, and each reverted `performance` or `branching` fix with its finding and the failing test;
     - with the stand, its part ([stand.md](stand.md#report)).
