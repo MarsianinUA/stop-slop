@@ -2,7 +2,8 @@
 //! snapshot of the namespace, kept and cached ones too, before the images, then the data of every
 //! session; the journals, the runtime of microsandbox and `stand-guest` stay, so the next seal
 //! shows `cleaned`. `clean --all` deletes the whole folder but the lock and a `stand.toml` in it.
-//! Either way the snapshot ref of the work tree it runs in goes.
+//! Either way the snapshot ref of the work tree it runs in goes, and one line says what went:
+//! `cleaned 1 session, 3 snapshots`.
 
 use sandbox::Sandbox;
 use store::Clean;
@@ -27,19 +28,34 @@ pub(crate) fn run(
         env.cancel,
         &mut *env.err,
     )?;
-    match what {
+    let left = match what {
         Clean::Sessions => {
-            sweep::clear(sandbox, &sandbox.leftovers()?)?;
+            let left = sandbox.leftovers()?;
+            sweep::clear(sandbox, &left)?;
             sandbox.prune_images(&[])?;
+            Some(left)
         }
         // Without the adapter: a microsandbox home that no longer opens is wiped too, and this
         // process holds no file of the SDK's database open, which Windows would refuse to delete.
         // A VM a crashed run left holds its files until its `max_duration`; then run it again.
-        Clean::All => {}
-    }
-    env.store.clean(what)?;
+        Clean::All => None,
+    };
+    let sessions = sweep::count(env.store.clean(what)?, "session", "sessions");
     if let Some(worktree) = &worktree {
         source::forget(worktree)?;
     }
+    // The images it prunes go uncounted: the port lists none.
+    let text = match left {
+        Some(left) => {
+            let mut parts = vec![sessions];
+            if !left.sandboxes.is_empty() {
+                parts.push(sweep::count(left.sandboxes.len(), "VM", "VMs"));
+            }
+            parts.push(sweep::count(left.snapshots.len(), "snapshot", "snapshots"));
+            format!("cleaned {}", parts.join(", "))
+        }
+        None => format!("cleaned {sessions} and the rest of the stand folder"),
+    };
+    writeln!(env.out, "{text}").map_err(StandError::io("stdout"))?;
     Ok(Exit::Passed)
 }

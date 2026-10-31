@@ -542,7 +542,7 @@ fn clean_sessions_keeps_the_install_and_the_journals_and_clean_all_keeps_the_loc
     let trees = home.store.trees().unwrap();
     fs::write(&trees.head, "tar").unwrap();
 
-    home.store.clean(Clean::Sessions).unwrap();
+    assert_eq!(home.store.clean(Clean::Sessions).unwrap(), 2);
     assert_eq!(
         names_in(&root),
         BTreeSet::from(["guest", "journal", "lock", "msb"].map(str::to_owned))

@@ -228,8 +228,16 @@ fn clean_drops_snapshots_before_images_and_keeps_the_journal() {
     let sealed = world.run(&fake, &["run", "--before", "session"]);
     assert_eq!(sealed.exit, Exit::Passed, "{}", sealed.err);
     assert!(!snapshots_left(&fake).is_empty());
+    // A VM a crashed run left.
+    fake.create(&[db_launch(&fake)]).unwrap();
+    let snapshots = snapshots_left(&fake).len();
     let ran = world.run(&fake, &["clean"]);
     assert_eq!(ran.exit, Exit::Passed, "{}", ran.err);
+    assert_eq!(
+        ran.out,
+        format!("cleaned 1 session, 1 VM, {snapshots} snapshots\n")
+    );
+    assert!(snapshots > 1);
     let journal = fake.journal();
     let last_drop = journal
         .iter()
@@ -274,7 +282,12 @@ fn clean_drops_snapshots_before_images_and_keeps_the_journal() {
     assert_eq!(verbs, ["sealedAt", "cleanedAt", "sealedAt"], "{line}");
     // `--all` leaves the lock and nothing else of the folder (`stand.toml` lies outside it here).
     let mark = fake.journal().len();
-    assert_eq!(world.run(&fake, &["clean", "--all"]).exit, Exit::Passed);
+    let all = world.run(&fake, &["clean", "--all"]);
+    assert_eq!(all.exit, Exit::Passed, "{}", all.err);
+    assert_eq!(
+        all.out,
+        "cleaned 1 session and the rest of the stand folder\n"
+    );
     assert!(fake.journal().len() == mark, "no call of the adapter");
     let left: Vec<String> = fs::read_dir(&world.paths.root)
         .unwrap()
@@ -285,5 +298,12 @@ fn clean_drops_snapshots_before_images_and_keeps_the_journal() {
     assert_eq!(
         world.repo.git(&["for-each-ref", "refs/stop-slop/stand"]),
         ""
+    );
+    // The fake keeps its snapshots through `--all`; a clean then drops them.
+    let snapshots = snapshots_left(&fake).len();
+    let again = world.run(&fake, &["clean"]);
+    assert_eq!(
+        again.out,
+        format!("cleaned 0 sessions, {snapshots} snapshots\n")
     );
 }

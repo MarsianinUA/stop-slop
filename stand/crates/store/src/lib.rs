@@ -141,14 +141,16 @@ impl Store {
     }
 
     /// `Sessions` also appends `{cleanedAt}` to the journal of every session. `All` leaves only
-    /// `lock`, and `stand.toml` when it lies in `root`.
-    pub fn clean(&self, what: Clean) -> Result<(), StoreError> {
+    /// `lock`, and `stand.toml` when it lies in `root`. Returns how many session folders went.
+    pub fn clean(&self, what: Clean) -> Result<usize, StoreError> {
         let root = &self.paths.root;
+        // Folders, not `session.json` files: one that no longer reads must not stop `clean`.
+        let sessions = session::folders(&root.join(SESSIONS))?.len();
         match what {
             Clean::Sessions => {
                 seal::append_cleaned(&root.join(JOURNAL), SystemTime::now())?;
                 remove(&root.join(SESSIONS))?;
-                self.clear_trees()
+                self.clear_trees()?;
             }
             Clean::All => {
                 for entry in root.read_dir_utf8().map_err(StoreError::io(root))? {
@@ -157,9 +159,9 @@ impl Store {
                         remove(entry.path())?;
                     }
                 }
-                Ok(())
             }
         }
+        Ok(sessions)
     }
 }
 

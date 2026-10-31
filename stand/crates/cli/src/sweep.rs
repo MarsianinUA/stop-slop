@@ -181,6 +181,6 @@ fn named(entries: &[Utf8PathBuf], runs: &[RunPaths]) -> Result<Vec<SnapshotId>, 
     Ok(ids)
 }
 
-fn count(n: usize, one: &str, many: &str) -> String {
+pub(crate) fn count(n: usize, one: &str, many: &str) -> String {
     format!("{n} {}", if n == 1 { one } else { many })
 }
