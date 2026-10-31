@@ -59,7 +59,7 @@ Measure once the code differs from the snapshot. With no edit, go to [Clean](#cl
 
 ## Clean
 
-8. `stop-slop-stand clean`, once, as the last command of the task, also when the stand did not measure. It drops the VMs, snapshots, images, seals, setup caches and run folders of every work tree that uses the stand, so leave it out only when the user says another task uses the stand now. Before it, copy into the report the numbers it needs, since the `report.json` files go too, and take this task's `cost` out of the stand file: the file is shared, and the next task declares its own. A workload the task enlarged stays as it is; its reason is in the journal of the seal. It prints what it removed, such as `cleaned 1 session, 3 snapshots`. Done when it exits 0; on 2 or 3 its stderr goes to the report.
+8. `stop-slop-stand clean`, once, as the last command of a task that used the stand: one that ran any `stop-slop-stand` command other than `guide` or `--help`, also when the stand did not measure. It drops the VMs, snapshots, images, seals, setup caches and run folders of every work tree that uses the stand, so a task that never used the stand runs no `clean`, and one that did leaves it out when the user says another task uses the stand now. Before it, copy into the report the numbers it needs, since the `report.json` files go too, and take this task's `cost` out of the stand file: the file is shared, and the next task declares its own. A workload the task enlarged stays as it is; its reason is in the journal of the seal. It prints what it removed, such as `cleaned 1 session, 3 snapshots`. Done when it exits 0; on 2 or 3 its stderr goes to the report.
 
 ## Report
 

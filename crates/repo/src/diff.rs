@@ -7,9 +7,47 @@ struct Section {
     path: Option<Vec<u8>>,
     change: Change,
     lines: Vec<LineRange>,
-    cuts: Vec<Cut>,
-    /// The hunk being read, until a line of code it takes out moves it to `cuts`.
-    open: Option<Cut>,
+    hunks: Vec<Hunk>,
+}
+
+/// What a hunk takes out, for its `Cut`.
+struct Hunk {
+    new_side: Cut,
+    /// `None` until it takes out a line of code; then whether every such line belongs to a
+    /// decorator on lines of its own, such as `@IsOptional()` or `@ApiProperty({` .. `})`.
+    decorators: Option<bool>,
+    /// The parentheses that the decorators taken out so far leave open.
+    open: usize,
+}
+
+impl Hunk {
+    /// A line of a decorator starts with `@` or goes on in its open parentheses, and ends with
+    /// `)` or leaves some open: `@Get(':id')`, not `@Input() name: string;`.
+    fn take_out(&mut self, code: &[u8]) {
+        let line = code.trim_ascii();
+        let starts = self.open > 0 || line.starts_with(b"@");
+        let count = |byte: u8| line.iter().filter(|&&each| each == byte).count();
+        let closed = (self.open + count(b'(')).checked_sub(count(b')'));
+        self.open = closed.unwrap_or(0);
+        let ends = self.open > 0 || line.ends_with(b")");
+        let decorator = starts && ends && closed.is_some();
+        self.decorators = Some(self.decorators.unwrap_or(true) && decorator);
+    }
+
+    /// A hunk that takes out only decorators changed the code they were on: the line after it.
+    fn cut(&self) -> Option<Cut> {
+        let decorators = self.decorators?;
+        Some(
+            if self.new_side.count == 0 && decorators && self.open == 0 {
+                Cut {
+                    start: self.new_side.start + 1,
+                    count: 1,
+                }
+            } else {
+                self.new_side
+            },
+        )
+    }
 }
 
 /// The output format `parse` relies on. The user's config could drop or swap the `a/` `b/`
@@ -42,8 +80,7 @@ pub(crate) fn parse(out: &[u8]) -> Result<Vec<ChangedFile>, RepoError> {
                 path: header_path(header),
                 change: Change::Modified,
                 lines: Vec::new(),
-                cuts: Vec::new(),
-                open: None,
+                hunks: Vec::new(),
             });
             continue;
         }
@@ -69,12 +106,16 @@ pub(crate) fn parse(out: &[u8]) -> Result<Vec<ChangedFile>, RepoError> {
                     end: start + count - 1,
                 });
             }
-            section.open = Some(Cut { start, count });
+            section.hunks.push(Hunk {
+                new_side: Cut { start, count },
+                decorators: None,
+                open: 0,
+            });
         } else if let Some(removed) = line.strip_prefix(b"-")
             && holds_code(removed)
-            && let Some(cut) = section.open.take()
+            && let Some(hunk) = section.hunks.last_mut()
         {
-            section.cuts.push(cut);
+            hunk.take_out(removed);
         }
     }
     let mut files = Vec::with_capacity(sections.len());
@@ -85,7 +126,7 @@ pub(crate) fn parse(out: &[u8]) -> Result<Vec<ChangedFile>, RepoError> {
                 path: Utf8PathBuf::from(path),
                 change: section.change,
                 lines: section.lines,
-                cuts: section.cuts,
+                cuts: section.hunks.iter().filter_map(Hunk::cut).collect(),
             });
         }
     }
@@ -137,14 +178,25 @@ fn unquote(text: &[u8]) -> Option<Vec<u8>> {
     }
 }
 
-/// The old file is not parsed, so a removed line counts as a comment when it starts with `//`,
-/// `/*` or `*` (inside a block comment) after its indent.
+/// The old file is not parsed, so a removed line counts as a comment when, after its indent, it
+/// starts with `//`, or with `/*` or `*` (inside a block comment) and holds no code after a `*/`
+/// on it: `/* istanbul ignore next */ cleanup();` holds code. A guess both ways: a line `* rate`
+/// of a product reads as a comment, a line of a block comment that starts otherwise as code.
 fn holds_code(line: &[u8]) -> bool {
     let line = line.trim_ascii();
-    !(line.is_empty()
-        || line.starts_with(b"//")
-        || line.starts_with(b"/*")
-        || line.starts_with(b"*"))
+    if line.is_empty() || line.starts_with(b"//") {
+        return false;
+    }
+    // Past `/*`, so that `/*/` does not close.
+    let inside = match line.strip_prefix(b"/*") {
+        Some(rest) => rest,
+        None if line.starts_with(b"*") => line,
+        None => return true,
+    };
+    inside
+        .windows(2)
+        .position(|pair| pair == b"*/")
+        .is_some_and(|end| holds_code(&inside[end + 2..]))
 }
 
 /// `(c, d)` from `-a[,b] +c[,d] @@ ...`; without `,d` one line.
@@ -256,6 +308,61 @@ mod tests {
                 Change::Modified,
                 &[(2, 2), (18, 18)],
                 &[(8, 0), (18, 1)]
+            )]
+        );
+    }
+
+    #[test]
+    fn code_after_a_block_comment_on_its_line_is_code() {
+        let out = concat!(
+            "diff --git a/a.ts b/a.ts\n",
+            "@@ -2 +1,0 @@\n",
+            "-  /* istanbul ignore next */ cleanup();\n",
+            "@@ -4 +2,0 @@\n",
+            "-   */ }\n",
+            "@@ -6 +3,0 @@\n",
+            "-  /* one */ /* two */ // three\n",
+            "@@ -8 +4,0 @@\n",
+            "-  /*/ still a comment */\n",
+        );
+
+        assert_eq!(
+            parse(out.as_bytes()).unwrap(),
+            [file("a.ts", Change::Modified, &[], &[(1, 0), (2, 0)])]
+        );
+    }
+
+    #[test]
+    fn a_hunk_that_takes_out_only_decorators_cuts_the_line_after_it() {
+        let out = concat!(
+            "diff --git a/a.dto.ts b/a.dto.ts\n",
+            "@@ -3,2 +2,0 @@\n",
+            "-  @IsOptional()\n",
+            "-  @ApiProperty({ required: false })\n",
+            "@@ -9,2 +6,0 @@\n",
+            "-  @Get()\n",
+            "-  list() {}\n",
+            "@@ -12 +8,0 @@\n",
+            "-  @Input() name: string;\n",
+            "@@ -14 +10 @@\n",
+            "-  @Get()\n",
+            "+  @Post()\n",
+            "@@ -20,4 +16,0 @@\n",
+            "-  @ApiProperty({\n",
+            "-    description: 'price (net)',\n",
+            "-    type: () => Number,\n",
+            "-  })\n",
+            "@@ -30 +22,0 @@\n",
+            "-  @Column({\n",
+        );
+
+        assert_eq!(
+            parse(out.as_bytes()).unwrap(),
+            [file(
+                "a.dto.ts",
+                Change::Modified,
+                &[(10, 10)],
+                &[(3, 1), (6, 0), (8, 0), (10, 1), (17, 1), (22, 0)]
             )]
         );
     }

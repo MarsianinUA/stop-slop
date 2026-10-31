@@ -28,8 +28,11 @@ pub(crate) struct Draft<'t> {
 
 /// What a finding is about, for `Finding::function` and `Finding::touched`.
 pub(crate) enum Owner {
-    /// The file itself: its path, or a text that does not parse.
-    File,
+    /// The file's path: only adding or renaming the file touches it.
+    Path,
+    /// A text that does not parse: none of its lines is known to be a comment, so a change of
+    /// any of them touches it, the line of the error among them.
+    Text,
     /// `touched` is `None` without a base.
     Code { name: String, touched: Option<bool> },
 }
@@ -50,7 +53,13 @@ impl FileFindings<'_> {
         }
         let line = draft.start.line;
         let (function, touched) = match draft.owner {
-            Owner::File => (None, self.changed.map(|changed| changed.new_path)),
+            Owner::Path => (None, self.changed.map(|changed| changed.new_path)),
+            Owner::Text => (
+                None,
+                self.changed.map(|changed| {
+                    changed.new_path || !changed.lines.is_empty() || !changed.cuts.is_empty()
+                }),
+            ),
             Owner::Code { name, touched } => (Some(name), touched),
         };
         self.findings.push(Finding {

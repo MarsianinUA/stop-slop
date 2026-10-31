@@ -2,12 +2,12 @@ use std::borrow::Cow;
 use std::iter;
 
 use kit::oxc::ast::ast::{
-    BindingPattern, Declaration, ExportDefaultDeclarationKind, PropertyKey, Statement,
+    BindingPattern, Declaration, ExportDefaultDeclarationKind, Expression, PropertyKey, Statement,
 };
 use kit::oxc::semantic::{AstNodes, NodeId, Semantic};
 use kit::oxc::span::{GetSpan, Span};
 use kit::prelude::AstKind;
-use kit::{LineIndex, line_start, one_line};
+use kit::{LineIndex, line_start, one_line, skip_trivia};
 
 use crate::Changed;
 
@@ -43,30 +43,18 @@ impl<'t> Places<'t> {
         let nodes = semantic.nodes();
         let mut inner = Vec::new();
         for node in nodes.iter() {
-            match node.kind() {
-                AstKind::Function(_) | AstKind::ArrowFunctionExpression(_) => {
-                    inner.push(function_unit(nodes, node.id(), text));
-                }
-                AstKind::PropertyDefinition(field)
-                    if !field
-                        .value
-                        .as_ref()
-                        .is_some_and(|value| value.get_inner_expression().is_function()) =>
-                {
-                    let name = member_name(nodes, node.id(), &field.key, text);
-                    inner.push(Unit {
-                        span: field.span,
-                        name,
-                    });
-                }
-                AstKind::AccessorProperty(accessor) => {
-                    let name = member_name(nodes, node.id(), &accessor.key, text);
-                    inner.push(Unit {
-                        span: accessor.span,
-                        name,
-                    });
-                }
-                _ => {}
+            let kind = node.kind();
+            if matches!(
+                kind,
+                AstKind::Function(_) | AstKind::ArrowFunctionExpression(_)
+            ) {
+                inner.push(function_unit(nodes, node.id(), text));
+            } else if let Some((span, key, value)) = field(kind)
+                // A field that holds a function is that function's unit.
+                && !holds_function(value)
+            {
+                let name = member_name(nodes, node.id(), key, text);
+                inner.push(Unit { span, name });
             }
         }
         let top = nodes
@@ -111,12 +99,11 @@ impl<'t> Places<'t> {
             Some(unit) => (unit.name.clone(), unit.span),
             None => (TOP_LEVEL.to_owned(), span),
         };
-        let first = lines.position(reach.start).line;
-        let last = lines.position(reach.end).line;
-        (
-            name,
-            changed.map(|changed| self.touched(changed, first, last)),
-        )
+        let touched = changed.map(|changed| {
+            let first = lines.position(reach.start).line;
+            self.touched(changed, first, lines.position(reach.end).line)
+        });
+        (name, touched)
     }
 
     /// For an offset in a comment, the code the comment is about: the code before it on its
@@ -137,17 +124,9 @@ impl<'t> Places<'t> {
         if !before.is_empty() {
             return (line_start + before.len() - 1) as u32;
         }
-        let mut at = comment.end as usize;
-        let mut rest = self.comments[index + 1..].iter().peekable();
-        loop {
-            at += self.text[at..].len() - self.text[at..].trim_start().len();
-            match rest.next_if(|next| next.start as usize == at) {
-                Some(next) => at = next.end as usize,
-                None => break,
-            }
-        }
-        if at < self.text.len() {
-            at as u32
+        let at = skip_trivia(self.text, comment.end);
+        if (at as usize) < self.text.len() {
+            at
         } else {
             offset
         }
@@ -213,9 +192,6 @@ fn function_unit(nodes: &AstNodes<'_>, id: NodeId, text: &str) -> Unit {
             method.span,
             member_name(nodes, holder_id, &method.key, text),
         ),
-        AstKind::PropertyDefinition(field) => {
-            (field.span, member_name(nodes, holder_id, &field.key, text))
-        }
         AstKind::ObjectProperty(property) => (property.span, key_text(&property.key, text)),
         AstKind::VariableDeclarator(declarator) => {
             (declarator.span, binding_text(&declarator.id, text))
@@ -224,24 +200,43 @@ fn function_unit(nodes: &AstNodes<'_>, id: NodeId, text: &str) -> Unit {
             assignment.span,
             one_line(assignment.left.span().source_text(text)),
         ),
-        AstKind::ExportDeclaration(export) => (export.span, anonymous(own_name)),
-        AstKind::ExportDefaultDeclaration(export) => (export.span, anonymous(own_name)),
-        _ => (own.span(), anonymous(own_name)),
+        AstKind::ExportDeclaration(_) | AstKind::ExportDefaultDeclaration(_) => {
+            (holder.span(), anonymous(own_name))
+        }
+        kind => match field(kind) {
+            Some((span, key, _)) => (span, member_name(nodes, holder_id, key, text)),
+            None => (own.span(), anonymous(own_name)),
+        },
     };
     Unit { span, name }
+}
+
+/// A class field, plain or `accessor`: its span, key and value.
+fn field<'a>(kind: AstKind<'a>) -> Option<(Span, &'a PropertyKey<'a>, Option<&'a Expression<'a>>)> {
+    match kind {
+        AstKind::PropertyDefinition(field) => Some((field.span, &field.key, field.value.as_ref())),
+        AstKind::AccessorProperty(accessor) => {
+            Some((accessor.span, &accessor.key, accessor.value.as_ref()))
+        }
+        _ => None,
+    }
+}
+
+fn holds_function(value: Option<&Expression<'_>>) -> bool {
+    value.is_some_and(|value| value.get_inner_expression().is_function())
 }
 
 fn anonymous(name: Option<String>) -> String {
     name.unwrap_or_else(|| ANONYMOUS.to_owned())
 }
 
-/// The node that holds the function or class at `id`, past parentheses and type assertions.
+/// The node that holds the function or class at `id`, past type assertions. Parentheses are
+/// already gone: the engine parses without `preserve_parens`.
 fn holder<'a>(nodes: &AstNodes<'a>, mut id: NodeId) -> (NodeId, AstKind<'a>) {
     loop {
         let parent = nodes.parent_id(id);
         match nodes.kind(parent) {
-            AstKind::ParenthesizedExpression(_)
-            | AstKind::TSAsExpression(_)
+            AstKind::TSAsExpression(_)
             | AstKind::TSSatisfiesExpression(_)
             | AstKind::TSNonNullExpression(_)
             | AstKind::TSTypeAssertion(_) => id = parent,

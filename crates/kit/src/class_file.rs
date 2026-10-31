@@ -222,7 +222,7 @@ pub fn start_after_decorators(file: &File<'_>, span: Span, decorators: &[Decorat
 
 /// The first offset from `at` that is not whitespace or a comment. Only for a stretch between
 /// tokens, where `//` and `/*` can only open a comment.
-fn skip_trivia(text: &str, at: u32) -> u32 {
+pub fn skip_trivia(text: &str, at: u32) -> u32 {
     let mut rest = &text[at as usize..];
     loop {
         rest = rest.trim_start();

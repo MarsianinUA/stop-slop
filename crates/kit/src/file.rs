@@ -65,7 +65,7 @@ pub fn suffix_of(path: &Utf8Path) -> Option<&str> {
 /// Where a finding about the file's path sits: an empty span where the code starts. The path has
 /// no text in the file; a fixture's `// expect:` mark can reach that line, and a hunk that adds
 /// the file covers it.
-pub fn path_span(file: &File<'_>) -> Span {
+pub(crate) fn path_span(file: &File<'_>) -> Span {
     let program = file.semantic.nodes().program();
     let start = program
         .directives

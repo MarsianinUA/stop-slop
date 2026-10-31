@@ -796,12 +796,7 @@ fn in_hunk_checks_the_first_line_of_the_finding() {
             .map(|f| f.in_hunk)
             .collect::<Vec<_>>()
     };
-    let lines = |start, end| {
-        Some(Changed {
-            lines: vec![LineRange { start, end }],
-            ..Changed::default()
-        })
-    };
+    let lines = |start, end| diff(&[(start, end)], &[]);
 
     assert_eq!(in_hunk(None), [None, None]);
     assert_eq!(in_hunk(lines(1, 1)), [Some(true), Some(false)]);
@@ -837,6 +832,9 @@ const o = { key() { f(); }, value: (() => f()) as Fn };
 exports.handler = function () { f(); };
 export default function () { f(); }
 export const { a, b } = f();
+class Auto {
+  accessor handler = () => f();
+}
 ";
     let findings = check_files(&engine(&["call"]), vec![source("src/a.ts", text)]);
     let functions: Vec<(u32, &str)> = findings
@@ -862,6 +860,7 @@ export const { a, b } = f();
             (19, "exports.handler"),
             (20, "(anonymous)"),
             (21, "{ a, b }"),
+            (23, "Auto.handler"),
         ]
     );
 }
@@ -1012,6 +1011,30 @@ fn a_finding_about_the_file_is_touched_when_the_diff_adds_or_renames_it() {
         Some(false),
         "an edit of its lines is not enough"
     );
+}
+
+#[test]
+fn a_parse_error_is_touched_by_a_change_of_any_line() {
+    let touched = |changed: Option<Changed>| {
+        let file = SourceFile {
+            changed,
+            ..source("src/a.ts", "f();\nlet = ;\n")
+        };
+        let findings = check_files(&engine(&["call"]), vec![file]);
+        assert_eq!(brief(&findings), ["src/a.ts:2:7 parse-error"]);
+        (findings[0].in_hunk, findings[0].touched)
+    };
+    let (yes, no) = (Some(true), Some(false));
+
+    assert_eq!(touched(None), (None, None));
+    assert_eq!(touched(diff(&[(2, 2)], &[(2, 1)])), (yes, yes));
+    assert_eq!(
+        touched(diff(&[(1, 1)], &[])),
+        (no, yes),
+        "the error may lie elsewhere"
+    );
+    assert_eq!(touched(diff(&[], &[(1, 0)])), (no, yes));
+    assert_eq!(touched(diff(&[], &[])), (no, no), "a mode change");
 }
 
 #[test]

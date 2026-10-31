@@ -58,7 +58,8 @@ pub struct ChangedFile {
 }
 
 /// A hunk on its new side: `count` lines from `start` stand where the old lines were, or with
-/// `count = 0` the old lines went out after line `start`.
+/// `count = 0` the old lines went out after line `start`. A hunk that took out only decorators
+/// stands on the line after it, the code they were on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Cut {
     pub start: u32,

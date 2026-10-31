@@ -179,15 +179,15 @@ fn rescope(
         base: Some(base.oid.to_string()),
     };
     let again = scope::resolve(repo, snapshot, &GhPrBase, request)?;
-    let mut changed: BTreeMap<_, _> = again
+    let mut by_path: BTreeMap<_, _> = again
         .files
         .into_iter()
         .map(|file| (file.path, file.changed))
         .collect();
     // A file that became as in the base drops out; `Fix` creates no files, so none comes in.
-    sources.retain_mut(|source| match changed.remove(&source.path) {
-        Some(lines) => {
-            source.changed = lines.map(engine_changed);
+    sources.retain_mut(|source| match by_path.remove(&source.path) {
+        Some(changed) => {
+            source.changed = changed.map(engine_changed);
             true
         }
         None => false,

@@ -7,7 +7,7 @@ Draft review comments for a colleague's PR `<n>`. The run ends when the draft fi
 3. Judge every finding against the PR's code (`git show <pr.head>:<file>`) and its diff (`git diff origin/<pr.base>...<pr.head> -- <file>`). Drop:
    - false positives: a `candidate` its `agent` hint clears (where a hint says to ignore a finding, a review drops it), or an `error` the code proves wrong;
    - what a convention allows ([Project conventions win](SKILL.md#project-conventions-win));
-   - what is not the author's: an `inHunk: false` finding with `touched: false`, unless the PR made it worse: its changed lines add uses of what the finding flags, such as new calls to an old function with too many parameters. A finding about the file itself (`function: null`), such as `file-name-pattern`, is the author's only when the PR adds or renames the file: `touched` says so, whatever `inHunk` says.
+   - what is not the author's: an `inHunk: false` finding with `touched: false`, unless the PR made it worse: its changed lines add uses of what the finding flags, such as new calls to an old function with too many parameters. A finding about the file's path (`file-name-pattern`, `kebab-case-dirs`) is the author's only when the PR adds or renames the file: `touched` says so, whatever `inHunk` says.
 
    When most of the codebase follows a habit a rule flags and no convention says so (every handler names its context `c`), keep the author's finding all the same and point it out to the user. A `parse-error` goes to the user, not into a comment.
 4. Check each `agent` rule of the check's `rules`, as its `agent` text says, in what the PR adds or changes in the files its `files` covers. This scope wins where the `agent` text names another one, such as the branch files.

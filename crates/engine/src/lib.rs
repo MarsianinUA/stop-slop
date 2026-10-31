@@ -127,7 +127,8 @@ pub struct Finding {
     pub function: Option<String>,
     /// `None` when there is no base. Otherwise whether the diff changed a line of code of
     /// `function`, a comment or a blank line not counted, or took code out of it; for a
-    /// finding about the file, whether it added or renamed the file.
+    /// finding about the path, whether it added or renamed the file; for a `parse-error`,
+    /// whether it changed any line of the file or took code out of it.
     pub touched: Option<bool>,
     pub fixable: bool,
     pub fingerprint: Fingerprint,

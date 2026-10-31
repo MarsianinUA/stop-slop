@@ -2,7 +2,8 @@ use std::fmt::Display;
 
 use oxc_span::Span;
 
-use crate::{Facts, File, path_span};
+use crate::file::path_span;
+use crate::{Facts, File};
 
 pub struct Cx<'s, 'a> {
     file: &'s File<'a>,
@@ -29,8 +30,9 @@ impl<'s, 'a> Cx<'s, 'a> {
         self.push(span, false)
     }
 
-    /// A finding about the file's path rather than its code, at [`path_span`]: it belongs to no
-    /// function, and a diff touches it only by adding or renaming the file.
+    /// A finding about the file's path rather than its code, at an empty span where the code
+    /// starts: it belongs to no function, and a diff touches it only by adding or renaming the
+    /// file. The one way to make one, so no rule reports the path as code.
     pub fn report_path(&mut self) -> Reported<'_> {
         self.push(path_span(self.file), true)
     }

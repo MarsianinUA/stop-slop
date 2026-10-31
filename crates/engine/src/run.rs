@@ -107,7 +107,7 @@ impl Engine {
                     RuleKind::Agent => unreachable!("agent rules are never built"),
                 };
                 let owner = if report.on_path {
-                    Owner::File
+                    Owner::Path
                 } else {
                     let places = places.get_or_insert_with(|| {
                         Places::new(source.semantic, text, changed.is_some())
@@ -232,7 +232,7 @@ fn parse_error(message: String) -> Draft<'static> {
         kind: FindingKind::ParseError,
         args: vec![("error", message.clone())],
         message,
-        owner: Owner::File,
+        owner: Owner::Text,
         start: start(),
         end: start(),
         fixable: false,
