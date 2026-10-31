@@ -95,13 +95,13 @@ createServer(async (request, response) => {
 
 ## line
 
-`stop-slop-stand run --json` prints one line on every exit code. It holds only the exceptions: what passed is counted in `quiet`, and every number stays in `report.json` for `stop-slop hot` and people.
+`stop-slop-stand run --json` prints one line on every exit code. It holds the declared measures and the exceptions: what else passed is counted in `quiet`, and every number stays in `report.json` for `stop-slop hot` and people.
 
 - The line has `run`, `report`, `seal`, `attempts`, `comparisons`, `measures`, `behaviour`, `fault`, `secondPass`, `flags`, `needs`, `failure`, `quiet`, `unmeasurable` and `next`.
   - `run` is the id of the run for `inspect`, `null` when the run never started. `report` is the path of `report.json`, `null` when the run failed.
   - `attempts` counts the runs whose samples this one pools, itself included. `comparisons` counts the passed runs with `--before` since the last seal, this one included. Both come with a report; `comparisons` is `null` without `--before`.
   - `behaviour` is `null` without `--before` or when "before" failed.
-  - `quiet` counts the measures and files with no exception. `unmeasurable` counts, among them, the measures without an `expect` entry graded `unmeasurable`: the noise could hide a shift of 5%.
+  - `quiet` counts the measures and files not in the line. `unmeasurable` counts, among them, the measures without an `expect` entry graded `unmeasurable`: the noise could hide a shift of 5%.
   - `next` holds the commands to run next, ready to paste. A failure and a refusal always have one.
 - `seal` has `sealedAt`, `maxTolerance` and `journal`.
   - The first `run --before` of a session seals the recipe, and the comparisons run on that copy. `sealedAt` is the time of the last seal or reseal, `maxTolerance` is `max_tolerance` of `stand.toml`. `seal` is `null` without `--before` or without a report.
@@ -115,9 +115,9 @@ createServer(async (request, response) => {
   - `verdict` is `improved` or `regressed` when a measure where less is better moved beyond its noise, `changed` when a measure with no better side (connections, bytes) moved, `within-noise`, or `no-baseline` when there is nothing to compare with.
 - `expect` of a measure has `change`, `reason`, `grade`, `postHoc`, `stale` and `acceptances`.
   - `expect` is `null` unless "before" passed. `change` is the cost `x-stand.expect.cost` declared, or the bound of an acceptance that replaced it; a measure without an entry is `none`, with `reason` `null`.
-  - `grade` is `met` when the shift stays within `change`; `exceeded` when it goes further the declared way; `surprise` when it goes the other way, shows under `none`, or does not show under `down`; `unmeasurable` when the noise is wider than `change` allows (5% for `none` and `down`): a shift of that size would not show. `grade` is `null` for `unknown`. `stand.hot-owned` rising from 0, the own time of new functions, is `unmeasurable` with `reason` `new-code`, quiet and counted in `unmeasurable`: `stand.wall` and `stand.hot-collateral` carry the check.
+  - `grade` is `met` when the shift stays within `change`; `exceeded` when it goes further the declared way; `surprise` when it goes the other way, shows under `none`, or does not show under `down`; `unmeasurable` when the noise is wider than `change` allows (5% for `none` and `down`): a shift of that size would not show. `grade` is `null` for `unknown`. `stand.hot-owned` rising from 0, the own time of new functions, is `unmeasurable` with `reason` `new-code` and needs nothing: `stand.wall` and `stand.hot-collateral` carry the check. Without an entry it is quiet and counted in `unmeasurable`.
   - `postHoc` is `true` when an `accept` of this head replaced the declared cost. `stale` is `true` when the measure has acceptances, but only of another head: none of them holds now. `acceptances` counts them all.
-  - A measure is in the line when its grade is not `met`, when `change` is `unknown`, or with `postHoc` or `stale`; an `unmeasurable` one without an entry stays quiet. Without `--before` it is there when `previous` moved. A `surprise` or an `exceeded` gets an `accept` command in `next` when its bound fits `maxTolerance`; an `unmeasurable` entry gets `guide expect`.
+  - A measure an entry of `x-stand.expect.cost` names is in the line on every run, whatever its grade. Any other is there when its grade is not `met`, or with `postHoc` or `stale`; an `unmeasurable` one without an entry stays quiet. Without `--before` it is there when `previous` moved. A `surprise` or an `exceeded` gets an `accept` command in `next` when its bound fits `maxTolerance`; an `unmeasurable` entry gets `guide expect`, but for `new-code`.
 - A need has `measure` and `reason`.
   - `needs` lists the measures with `change` `unknown`: a person judges their cost.
 - A behaviour file has `file`, `src`, `noiseKnown`, `diffs`, `sample` and `path`.
@@ -139,7 +139,7 @@ createServer(async (request, response) => {
   - `phase` is where it stopped: `setup`, `ready` or `workload` when the app failed (exit 1), another step on a refusal or a breakage. `cause` is `exit-<code>`, `setup-timeout`, `timeout`, `died`, `unhealthy` or `cancelled`, or the error of a refusal or a breakage.
   - `logs` is the folder with the logs of the failed setup or repeat; `probes` are the outputs of the `on-failure` probes.
 - A flag has `kind` and the facts of its kind. No flag is a failure; each says what to know before trusting the numbers:
-  - `high-noise` (`measure`): a version's samples spread more than 20% between repeats, so a smaller shift does not show. Give each repeat more work. On the head alone, for a measure graded `met` whose shift is far wider than the spread, it asks for nothing.
+  - `high-noise` (`measure`): a version's samples spread more than 20% between repeats, so a smaller shift does not show. Give each repeat more work. With `--before`, only a measure of `measures` gets it. On the head alone, for a measure graded `met` whose shift is far wider than the spread, it asks for nothing.
   - `first-repeat-outlier` (`measure`): the first repeat lies far from the others, as a warm-up does; the median already sets it aside.
   - `low-repeats` (`samples`): a version has fewer than 3 samples. Run again.
   - `no-profile` (`service`): a repeat of this profiled service wrote no profile; it needs Node 20 or later.

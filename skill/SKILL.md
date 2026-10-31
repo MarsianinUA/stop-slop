@@ -22,10 +22,12 @@ Run `stop-slop` inside the repository. If the command is missing, tell the user 
   - `base` has `ref`, `sha` and `reason`: `flag` (given with `--base`), `pr` (the base of the PR: of `--pr`, or of the branch), `ancestor` (the nearest ancestor branch) or `default` (`origin/HEAD`).
 - A finding has `rule`, `kind`, `file`, `line`, `column`, `endLine`, `endColumn`, `function`, `inHunk`, `touched`, `fixable`, `fingerprint` and `detail` (the values of its rule's `message`, only when it has some).
   - `kind`: `error` means the rule is sure; `candidate` is a heuristic you decide with the rule's `agent` hint; `parse-error` means the file did not parse, so no rule ran on it.
-  - `inHunk: true` puts the finding on a line the branch changed; `false` is old code in a touched file.
-  - `message` says why the code is a problem and how to fix it.
+  - `function` names the code around the finding: the innermost function (for a parameter, the one that declares it), else the class field, else the top-level statement. A method reads `Class.method`, an arrow its variable, a callback `(anonymous)`, and code outside any declaration, such as an import, `(top level)`. A finding in a comment belongs to the code the comment is about. It is `null` for a finding about the file itself: `file-name-pattern`, `kebab-case-dirs` and `parse-error`.
+  - `touched: true` means the diff changes or removes a line of that code, not only comments or blank lines; for a finding about the file itself, that the branch adds or renames the file.
+  - `inHunk: true` puts the finding on a line the branch changed; `false` is old code in a file the branch changed.
+  - `detail` fills its rule's `message`: each `{key}` there stands for `detail.<key>`, such as `{example}`, the file name that `file-name-pattern` suggests.
   - `fixable: true` means `--fix` applies the rule's fix at this place. Every other finding you fix by hand, even when the rule has `fix: true`: there the program judged its fix unsafe.
-- `stop-slop rules --json` lists the rules: `id`, `group`, `description`, `kind` (`error`, `candidate` or `agent`), `fix`, `files` (`code`, `tests` or `all`), `source`, `message`, `agent` (how to judge, fix or check the rule; `null` when the `message` says enough) and `active` (on in this repository).
+- A rule in `rules` has `id`, `group`, `description`, `kind` (`error`, `candidate` or `agent`), `fix`, `files` (`code`, `tests` or `all`), `source`, `message` (why the code is a problem and how to fix it), `agent` (how to judge, fix or check the rule; `null` when the `message` says enough) and `active` (on in this repository).
   - An `agent` rule has no code in the program. You check it yourself, as its `agent` text says, in the branch files its `files` covers.
   - Test files end in `.spec`, `.test` or `.e2e-spec` before the extension, or sit under `__tests__/`. Every other file is code.
   - `enabled` in `<common>/info/stop-slop/config.toml` turns opt-in groups on for this repository, such as `performance` and `branching`; a rule `disabled` names stays off even then. `disabled` is the one key you change, as [Project conventions win](#project-conventions-win) says.
