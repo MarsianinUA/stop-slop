@@ -29,11 +29,11 @@ The skill has four branches, and each run takes one: fix the user's branch, meas
 The agent fixes everything at once, with no approval step. The run ends when `check` is clean, with no `error` left and every `candidate` either fixed or ignored with a reason. A `performance` or `branching` fix the project's tests reject is the exception: it is reverted, and its finding goes to the report.
 
 1. `git fetch`, so the base is fresh. With no remote, or when the fetch fails, the run goes on and the report says so.
-2. `stop-slop check --json`. The agent keeps this first list for the report, outside the repository. Its `inHunk` tells the user's own lines from cleanup in old code.
-3. The agent reads `stop-slop rules --json` and the project's conventions, see [Project conventions win](#project-conventions-win).
+2. `stop-slop check --json`. The agent keeps this first list for the report, outside the repository. Its `inHunk` tells the user's own lines from cleanup in old code. Its `rules` hold the rules of the findings and the active `agent` rules.
+3. The agent reads the project's conventions, see [Project conventions win](#project-conventions-win).
 4. `stop-slop check --fix --json`. The program applies its safe fixes and prints what is left.
 5. The agent goes through the findings:
-   - it fixes an `error` as its `message` says and the rule's `agent` text advises;
+   - it fixes an `error` as its rule's `message` says and the rule's `agent` text advises;
    - it judges a `candidate`, which is a heuristic, by the rule's `agent` hint. It fixes a real problem and ignores a false one at the end, with a reason;
    - it fixes a `parse-error` when the branch broke the syntax, and reports it otherwise.
 
@@ -74,7 +74,7 @@ The agent measures what the branch costs the running app. It edits the branch's 
 The working tree stays as it is. The run ends on a draft that the user edits.
 
 1. `stop-slop check --pr <n> --json`. The program asks `gh pr view <n>` for the head, the base and the title of the PR, fetches the head into `refs/stop-slop/pr-<n>` and the base into `origin/<base>` without a checkout, and reads the files straight from git. When the fetched head is not the one `gh` named, the PR moved during the fetch: the program exits with 2, and the agent runs it again.
-2. The agent reads `stop-slop rules --json`, and the project's conventions as they are at the PR head. `active` in `rules --json` still comes from the `package.json` files of the working tree, not of the PR.
+2. The agent takes the rules from the `rules` of `check`, and reads the project's conventions as they are at the PR head. `active` there comes from the `package.json` files of the PR's files at its head.
 3. The agent drops:
    - false positives: a candidate its hint clears, or an error the code proves wrong;
    - what the project's conventions allow;
@@ -248,15 +248,18 @@ A finding is `file:line:column rule message`. Lines and columns start at 1, and 
       "kind": "error",
       "file": "src/modules/markets/markets.service.ts",
       "line": 42, "column": 18, "endLine": 42, "endColumn": 33,
-      "message": "`process.env.API_URL` reads the environment outside a config file: ...",
       "function": "MarketsService.fetchPrices",
       "inHunk": false,
       "touched": true,
       "fixable": false,
-      "fingerprint": "no-process-env:3f9a1c"
+      "fingerprint": "no-process-env:3f9a1c",
+      "detail": { "access": "process.env.API_URL" }
     }
   ],
-  "fixed": [{ "rule": "node-protocol", "file": "src/main.ts", "count": 2 }]
+  "fixed": [{ "rule": "node-protocol", "file": "src/main.ts", "count": 2 }],
+  "rules": [
+    { "id": "no-process-env", "group": "config", "kind": "error", "message": "`{access}` reads the environment outside a config file: ...", "...": "..." }
+  ]
 }
 ```
 
@@ -267,12 +270,13 @@ The program prints it on one line, because indents cost an agent tokens. `--pret
 - `files` lists the files the program checked, and `skipped` the ones it left out and why.
 - `findings` go in order of file, line, column and rule.
   - `kind` is `error` when the rule is sure, `candidate` for a heuristic the agent judges, and `parse-error` when the file did not parse, so no rule ran on it. A `parse-error` finding has `parse-error` as its `rule` too.
-  - `message` says why the code is a problem and what to do, not only what the rule found.
   - `function` names the code the finding belongs to: the innermost function or arrow around it, a parameter's function among them, else the class member, else the top-level statement it sits in. It is written as the code names it: `Class.method` (`Class.#field`, `Class.[key]`), an arrow or function expression by its variable, property or assignment target, `(anonymous)` for a function without one, a declaration by its name, and `(top level)` for code outside any declaration, such as an import. A finding in a comment belongs to the code the comment is about: the code before it on its line, else the code after it, such as the method under a doc comment. `function` is `null` for a finding about the file itself: its path (`file-name-pattern`, `kebab-case-dirs`) or a `parse-error`.
   - `touched` is true when the diff changes a line of that code, not counting lines that hold only comments or spaces, or takes out a line of code inside it. A removed line counts as a comment when it starts with `//`, `/*` or `*`. For a finding about the file itself, `touched` is true when the branch adds the file, untracked files too, or renames it.
+  - `detail` holds the values of the `{placeholders}` of the rule's `message`, such as the `name` of `file-name-pattern`, and for a `parse-error` its `error`. A finding without such values has no `detail`.
   - `fixable` is true when `--fix` applies the rule's fix at this place. A rule with a fix still leaves a finding without one where it cannot prove the fix is safe; the agent fixes those by hand.
   - `fingerprint`: see [Exceptions](#exceptions).
 - `fixed` counts the fixes `--fix` applied, per rule and file.
+- `rules` holds the entries of [`rules --json`](#json-output-of-rules) for every rule with a finding and every active `agent` rule, in the order of `rules`, so the agent needs no list of its own. The findings do not repeat a rule's `message`: the message with its placeholders filled from `detail` says why the code is a problem and what to do. `active` here holds for the checked files, with the `package.json` files of the revision `check` read.
 
 `skill/SKILL.md` lists the top-level fields and the fields of `pr`, `base` and a finding. A test holds that list to this output both ways, so a field added or dropped on one side fails it.
 
@@ -301,7 +305,8 @@ On exit 2 and 3, `check --json` prints one line instead, even with `--pretty`, a
   "unexercised": [
     { "file": "src/orders/orders.service.ts", "function": "formatRefund", "line": 12, "endLine": 20, "stale": false }
   ],
-  "coverage": "collected"
+  "coverage": "collected",
+  "rules": [{ "id": "no-lookup-in-loop", "...": "..." }]
 }
 ```
 
@@ -317,6 +322,7 @@ On exit 2 and 3, `check --json` prints one line instead, even with `--pretty`, a
 - `unexercised` lists the functions on changed lines of the branch that the coverage repeat never entered, outside test files: the stand runs the app, not its tests. A function inside a listed one is not listed again. The repeat covers only the services with `profile: node`, so a function that only other code runs, such as a script or a service without a profile, is listed too.
 - `stale` is true when the file on disk differs from the report's head tree: its lines may have moved since, so run the stand again.
 - `coverage` is `collected`, `not-collected` when no service had `x-stand.profile`, or `unknown` when the report has a `coverage-unknown` flag. Without coverage `unexercised` is `null`, since no function can be said to have never run, and a branch with files outside tests exits with 1.
+- `rules` holds the entries of `rules --json` for the rules of the findings in `hot`, as in `check`, without the `agent` rules.
 
 Without `--json`, `hot` prints the `base` line of `check` and a line per row, with the service after the name as in the stand's summary and ` stale` at the end where it applies. Without coverage and with files outside tests in the branch, the last line is `coverage: not collected`, or `coverage: unknown: ` and the reason.
 
@@ -338,6 +344,8 @@ One object per rule:
 - `message`: the text of its findings, with `{placeholders}` the rule fills in;
 - `agent`: how to judge, fix or check the rule, or `null` when the message says enough;
 - `active`: whether the rule runs in this repository, after `disabled`, `enabled` and the group conditions. In a monorepo, a group condition holds when any `package.json` meets it.
+
+`check --json` and `hot --json` carry the entries of the rules they need in their own `rules`.
 
 Without `--json`, `rules` prints `id  kind  fix  description`, one rule per line, and works outside a repository too.
 

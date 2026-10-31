@@ -3,7 +3,7 @@ use std::panic::resume_unwind;
 use std::thread;
 
 use camino::{Utf8Path, Utf8PathBuf};
-use engine::{Changed, Cut, Engine, Finding, FixCount, LineRange, Mode, SourceFile};
+use engine::{Changed, Cut, Engine, Finding, FixCount, LineRange, Mode, RuleState, SourceFile};
 use kit::{EnumIndex, Fact, Facts, Package};
 use project::ProjectFacts;
 use repo::{Repo, Snapshot, WorkTree};
@@ -24,6 +24,8 @@ pub(crate) struct Checked {
     pub(crate) skipped: Vec<Skipped>,
     pub(crate) findings: Vec<Finding>,
     pub(crate) fixed: Vec<FixCount>,
+    /// Every rule of the set; active when its group condition holds for one of `files`.
+    pub(crate) rules: Vec<RuleState>,
 }
 
 pub(crate) fn run(args: CheckArgs) -> Result<Exit, CliError> {
@@ -108,7 +110,8 @@ pub(crate) fn scan(repo: &Repo, engine: &Engine, mut args: CheckArgs) -> Result<
             scope.skipped = rescope(repo, &snapshot, base, &mut sources)?;
         }
     }
-    let files = sources.iter().map(|source| source.path.clone()).collect();
+    let files: Vec<Utf8PathBuf> = sources.iter().map(|source| source.path.clone()).collect();
+    let rules = engine.rule_states(&joined, &files);
     let changed = sources
         .iter()
         .filter_map(|source| Some((source.path.clone(), source.changed.as_ref()?.lines.clone())))
@@ -122,6 +125,7 @@ pub(crate) fn scan(repo: &Repo, engine: &Engine, mut args: CheckArgs) -> Result<
         skipped: scope.skipped,
         findings: report.findings,
         fixed,
+        rules,
     })
 }
 

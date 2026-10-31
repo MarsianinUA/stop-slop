@@ -17,10 +17,10 @@ Run `stop-slop` inside the repository. If the command is missing, tell the user 
 - Exit codes: `0` nothing found, `1` findings, `2` the program refused its input (a bad `config.toml` names the key), `3` the program itself broke, `130` Ctrl+C stopped it. On 2 and 3, show its stderr to the user and stop: it ends with a `next:` line for each command that may help. `--json` then prints `{"failure": {"phase", "cause"}, "next": [..]}` instead of its usual line.
   - The one 2 you answer yourself is `no base branch ...; pass --base`, as on a branch that sits on the tip of `main`: give `--base` the branch the user's branch started from, such as `main`, to `check`, `ignore` and `hot` alike, and name it in the report.
 - `--json` prints one line. Leave `--pretty` off: it indents the same JSON by 2 spaces for a person, and the indents cost you tokens.
-- `stop-slop check --json` prints `pr` (`null` without `--pr`), `base`, `files` (the branch files it checked: commits, uncommitted edits and untracked files), `skipped`, `findings` and `fixed` (`rule`, `file`, `count` of the fixes `--fix` applied).
+- `stop-slop check --json` prints `pr` (`null` without `--pr`), `base`, `files` (the branch files it checked: commits, uncommitted edits and untracked files), `skipped`, `findings`, `fixed` (`rule`, `file`, `count` of the fixes `--fix` applied) and `rules` (the entries of `stop-slop rules --json` for the rules of its findings and the active `agent` rules).
   - `pr` has `number`, `head` (the full sha), `base` (the branch name, without `origin/`) and `title`.
   - `base` has `ref`, `sha` and `reason`: `flag` (given with `--base`), `pr` (the base of the PR: of `--pr`, or of the branch), `ancestor` (the nearest ancestor branch) or `default` (`origin/HEAD`).
-- A finding has `rule`, `kind`, `file`, `line`, `column`, `endLine`, `endColumn`, `message`, `function`, `inHunk`, `touched`, `fixable`, `fingerprint`.
+- A finding has `rule`, `kind`, `file`, `line`, `column`, `endLine`, `endColumn`, `function`, `inHunk`, `touched`, `fixable`, `fingerprint` and `detail` (the values of its rule's `message`, only when it has some).
   - `kind`: `error` means the rule is sure; `candidate` is a heuristic you decide with the rule's `agent` hint; `parse-error` means the file did not parse, so no rule ran on it.
   - `inHunk: true` puts the finding on a line the branch changed; `false` is old code in a touched file.
   - `message` says why the code is a problem and how to fix it.

@@ -387,7 +387,9 @@ fn check_reports_findings_of_the_branch_as_json() {
         .collect();
     assert_eq!(
         keys,
-        BTreeSet::from(["pr", "base", "files", "skipped", "findings", "fixed"])
+        BTreeSet::from([
+            "pr", "base", "files", "skipped", "findings", "fixed", "rules"
+        ])
     );
     assert_eq!(report["pr"], Value::Null);
     assert_eq!(
@@ -416,7 +418,6 @@ fn check_reports_findings_of_the_branch_as_json() {
             "column": 20,
             "endLine": 2,
             "endColumn": 23,
-            "message": meta("no-any").message,
             "function": "BETA",
             "inHunk": false,
             "touched": false,
@@ -434,13 +435,28 @@ fn check_reports_findings_of_the_branch_as_json() {
             "column": 4,
             "endLine": 1,
             "endColumn": 12,
-            "message": meta("todo-owner").message,
             "function": "FRESH",
             "inHunk": true,
             "touched": true,
             "fixable": false,
             "fingerprint": todo["fingerprint"],
         })
+    );
+
+    // The entries of `rules --json` for the rules of the findings and the active agent rules.
+    let all = json(&run(t.path(), &["rules", "--json"]));
+    let expected: Vec<&Value> = list(&all)
+        .iter()
+        .filter(|rule| {
+            ["no-any", "todo-owner"].contains(&rule["id"].as_str().unwrap())
+                || (rule["kind"] == "agent" && rule["active"] == true)
+        })
+        .collect();
+    let carried: Vec<&Value> = list(&report["rules"]).iter().collect();
+    assert_eq!(carried, expected);
+    assert!(
+        carried.iter().any(|rule| rule["kind"] == "agent"),
+        "{report}"
     );
 }
 
@@ -1118,7 +1134,7 @@ fn check_finds_a_raw_value_of_an_enum_from_outside_the_diff() {
     );
     let finding = &findings(&report)[0];
     assert_eq!(finding["kind"], "candidate");
-    let message = finding["message"].as_str().expect("a message");
+    let message = message(&report, finding);
     assert!(message.contains("`Source.Dashboard`"), "{message}");
 }
 
@@ -1247,11 +1263,41 @@ fn check_holds_cognitive_complexity_to_the_max_of_config_toml() {
 fn messages(t: &TempRepo, file: &str, rule: &str) -> Vec<String> {
     let out = run(t.path(), &["check", "--files", file, "--json"]);
     assert!(code(&out) <= 1, "{}", stderr(&out));
-    findings(&json(&out))
+    let report = json(&out);
+    findings(&report)
         .iter()
         .filter(|finding| finding["rule"] == rule)
-        .map(|finding| finding["message"].as_str().expect("a message").to_owned())
+        .map(|finding| message(&report, finding))
         .collect()
+}
+
+/// The rule's message from `rules` with the finding's `detail` in its placeholders, as an
+/// agent reads it.
+fn message(report: &Value, finding: &Value) -> String {
+    let message = rule(&report["rules"], finding["rule"].as_str().expect("rule"))["message"]
+        .as_str()
+        .expect("a message");
+    let detail = finding["detail"].as_object().cloned().unwrap_or_default();
+    let mut filled = String::new();
+    let mut rest = message;
+    while let Some(open) = rest.find('{') {
+        filled.push_str(&rest[..open]);
+        let after = &rest[open + 1..];
+        let value = after
+            .find('}')
+            .and_then(|close| Some((close, detail.get(&after[..close])?)));
+        match value {
+            Some((close, value)) => {
+                filled.push_str(value.as_str().expect("a string"));
+                rest = &after[close + 1..];
+            }
+            None => {
+                filled.push('{');
+                rest = after;
+            }
+        }
+    }
+    filled + rest
 }
 
 const IO_FEAT: &str = "import { readFileSync } from 'fs'; export const read: any = readFileSync;\n\
@@ -2102,6 +2148,17 @@ fn hot_lists_the_hot_functions_of_the_branch_with_the_findings_inside() {
         .cloned()
         .collect();
     assert_eq!(*inside, on_its_lines);
+    // The rules of those findings, without the agent rules of `check`.
+    let ids: BTreeSet<&str> = inside
+        .iter()
+        .map(|finding| finding["rule"].as_str().unwrap())
+        .collect();
+    let carried: Vec<&Value> = list(&found["rules"]).iter().collect();
+    let expected: Vec<&Value> = list(&checked["rules"])
+        .iter()
+        .filter(|rule| ids.contains(rule["id"].as_str().unwrap()))
+        .collect();
+    assert_eq!(carried, expected);
 
     let mut row = row.clone();
     row["findings"] = json!([]);
@@ -2185,6 +2242,7 @@ fn hot_without_coverage_names_no_function_unexercised_and_exits_with_1() {
             "hot": [],
             "unexercised": null,
             "coverage": "unknown",
+            "rules": [],
         })
     );
     let out = hot(&t, &unknown, &[]);
@@ -2232,6 +2290,7 @@ fn hot_of_a_branch_without_files_outside_tests_finds_nothing() {
             "hot": [],
             "unexercised": [],
             "coverage": "collected",
+            "rules": [],
         })
     );
 

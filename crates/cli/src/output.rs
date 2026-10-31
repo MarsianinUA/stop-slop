@@ -1,8 +1,9 @@
+use std::collections::BTreeSet;
 use std::fmt::{Display, Write as _};
 use std::io::{self, Write as _};
 
 use engine::{Finding, RuleState};
-use kit::serde::Serialize;
+use kit::serde::{Serialize, Serializer};
 use kit::{Files, FindingKind, RuleKind, Ruleset, Source};
 use repo::RepoError;
 use scope::{Base, BaseReason, SkipReason};
@@ -53,6 +54,7 @@ struct CheckJson<'c> {
     skipped: Vec<SkippedJson<'c>>,
     findings: Vec<FindingJson<'c>>,
     fixed: Vec<FixedJson<'c>>,
+    rules: Vec<RuleJson>,
 }
 
 #[derive(Serialize)]
@@ -90,12 +92,22 @@ struct FindingJson<'c> {
     column: u32,
     end_line: u32,
     end_column: u32,
-    message: &'c str,
     function: Option<&'c str>,
     in_hunk: Option<bool>,
     touched: Option<bool>,
     fixable: bool,
     fingerprint: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    detail: Option<Detail<'c>>,
+}
+
+/// The values of a finding's placeholders as an object, in the order the rule gave them.
+struct Detail<'c>(&'c [(&'static str, String)]);
+
+impl Serialize for Detail<'_> {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.collect_map(self.0.iter().map(|(key, value)| (key, value)))
+    }
 }
 
 #[derive(Serialize)]
@@ -113,6 +125,7 @@ struct HotJson<'c> {
     hot: Vec<HotRowJson<'c>>,
     unexercised: Option<Vec<UnexercisedJson<'c>>>,
     coverage: &'static str,
+    rules: Vec<RuleJson>,
 }
 
 #[derive(Serialize)]
@@ -176,25 +189,42 @@ pub(crate) fn rules_text(set: &Ruleset) -> String {
 }
 
 pub(crate) fn rules_json(states: &[RuleState], layout: JsonLayout) -> String {
-    let rules: Vec<RuleJson> = states
-        .iter()
-        .map(|state| {
-            let meta = state.meta;
-            RuleJson {
-                id: meta.id,
-                group: meta.group,
-                description: meta.description,
-                kind: rule_kind(meta.kind),
-                fix: meta.fix,
-                files: files(meta.files),
-                source: meta.source.iter().copied().map(source).collect(),
-                message: meta.message,
-                agent: meta.agent,
-                active: state.active,
-            }
-        })
-        .collect();
+    let rules: Vec<RuleJson> = states.iter().map(rule_json).collect();
     json_text(&rules, layout)
+}
+
+fn rule_json(state: &RuleState) -> RuleJson {
+    let meta = state.meta;
+    RuleJson {
+        id: meta.id,
+        group: meta.group,
+        description: meta.description,
+        kind: rule_kind(meta.kind),
+        fix: meta.fix,
+        files: files(meta.files),
+        source: meta.source.iter().copied().map(source).collect(),
+        message: meta.message,
+        agent: meta.agent,
+        active: state.active,
+    }
+}
+
+/// The rules of `findings` and, with `agents`, the active `agent` rules, in the order of
+/// `stop-slop rules`: the findings no longer carry their rule's message.
+fn rules_for<'f>(
+    states: &[RuleState],
+    findings: impl IntoIterator<Item = &'f Finding>,
+    agents: bool,
+) -> Vec<RuleJson> {
+    let found: BTreeSet<&str> = findings.into_iter().map(|finding| finding.rule).collect();
+    states
+        .iter()
+        .filter(|state| {
+            found.contains(state.meta.id)
+                || (agents && state.active && state.meta.kind == RuleKind::Agent)
+        })
+        .map(rule_json)
+        .collect()
 }
 
 pub(crate) fn check_json(checked: &Checked, layout: JsonLayout) -> String {
@@ -225,6 +255,7 @@ pub(crate) fn check_json(checked: &Checked, layout: JsonLayout) -> String {
                 count: fixed.count,
             })
             .collect(),
+        rules: rules_for(&checked.rules, &checked.findings, true),
     };
     json_text(&report, layout)
 }
@@ -251,7 +282,12 @@ pub(crate) fn check_text(checked: &Checked) -> String {
     text
 }
 
-pub(crate) fn hot_json(base: Option<&Base>, found: &Found<'_>, layout: JsonLayout) -> String {
+pub(crate) fn hot_json(
+    base: Option<&Base>,
+    found: &Found<'_>,
+    states: &[RuleState],
+    layout: JsonLayout,
+) -> String {
     let report = HotJson {
         base: base.map(base_json),
         hot: found
@@ -290,6 +326,14 @@ pub(crate) fn hot_json(base: Option<&Base>, found: &Found<'_>, layout: JsonLayou
             Coverage::NotCollected => "not-collected",
             Coverage::Unknown(_) => "unknown",
         },
+        rules: rules_for(
+            states,
+            found
+                .hot
+                .iter()
+                .flat_map(|row| row.findings.iter().copied()),
+            false,
+        ),
     };
     json_text(&report, layout)
 }
@@ -429,12 +473,12 @@ fn finding_json(finding: &Finding) -> FindingJson<'_> {
         column: finding.start.column,
         end_line: finding.end.line,
         end_column: finding.end.column,
-        message: &finding.message,
         function: finding.function.as_deref(),
         in_hunk: finding.in_hunk,
         touched: finding.touched,
         fixable: finding.fixable,
         fingerprint: finding.fingerprint.to_string(),
+        detail: (!finding.args.is_empty()).then(|| Detail(&finding.args)),
     }
 }
 

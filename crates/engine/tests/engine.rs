@@ -725,6 +725,10 @@ fn the_message_fills_args_from_the_report() {
         findings[0].message, "{depth} deeper than 3",
         "a value is not filled again"
     );
+    assert_eq!(
+        findings[0].args,
+        [("name", "{depth}".to_owned()), ("depth", "3".to_owned())]
+    );
 }
 
 #[test]

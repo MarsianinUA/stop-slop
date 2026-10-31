@@ -115,6 +115,9 @@ pub struct Finding {
     pub start: Position,
     pub end: Position,
     pub message: String,
+    /// The values of the `{placeholders}` of the rule's message, in the order the rule gave
+    /// them; for a `parse-error` its `error`.
+    pub args: Vec<(&'static str, String)>,
     /// `None` when there is no base; otherwise whether the first line of the finding changed.
     pub in_hunk: Option<bool>,
     /// The innermost function or class member around the finding, else its top-level

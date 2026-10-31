@@ -78,7 +78,14 @@ fn skill_md_lists_the_fields_of_check_json() {
 
     assert_eq!(keys(&report), listed("- `stop-slop check --json` prints"));
     assert_eq!(keys(&report["base"]), listed("- `base` has"));
-    assert_eq!(keys(&report["findings"][0]), listed("- A finding has"));
+    // `detail` only on a finding with values of its own: `no-any` has none, `A` gets one.
+    let findings = report["findings"].as_array().expect("findings");
+    let with_detail = findings
+        .iter()
+        .filter(|finding| finding.get("detail").is_some());
+    assert!(with_detail.count() < findings.len(), "{report}");
+    let fields: BTreeSet<&str> = findings.iter().flat_map(keys).collect();
+    assert_eq!(fields, listed("- A finding has"));
 }
 
 /// `Command` looks only for `gh.exe` on Windows, so a script stands in for `gh` on Linux and

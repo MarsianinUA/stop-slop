@@ -15,6 +15,7 @@ pub(crate) struct Draft<'t> {
     pub rule: &'static str,
     pub kind: FindingKind,
     pub message: String,
+    pub args: Vec<(&'static str, String)>,
     pub start: Position,
     pub end: Position,
     pub fixable: bool,
@@ -59,6 +60,7 @@ impl FileFindings<'_> {
             start: draft.start,
             end: draft.end,
             message: draft.message,
+            args: draft.args,
             in_hunk: self.changed.map(|changed| {
                 changed
                     .lines
@@ -119,6 +121,20 @@ pub(crate) fn fill(message: &str, args: &[(&'static str, String)]) -> String {
     }
     filled.push_str(rest);
     filled
+}
+
+/// The args that fill a `{key}` of `message`, each key once, as `fill` takes them.
+pub(crate) fn named(
+    message: &str,
+    args: Vec<(&'static str, String)>,
+) -> Vec<(&'static str, String)> {
+    let mut named: Vec<(&'static str, String)> = Vec::with_capacity(args.len());
+    for (key, value) in args {
+        if message.contains(&format!("{{{key}}}")) && !named.iter().any(|(seen, _)| *seen == key) {
+            named.push((key, value));
+        }
+    }
+    named
 }
 
 /// The name for findings inside `kind`: a named function, or a method, class field, object

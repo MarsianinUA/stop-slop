@@ -119,6 +119,7 @@ impl Engine {
                     rule: meta.id,
                     kind,
                     message: finding::fill(meta.message, &report.args),
+                    args: finding::named(meta.message, report.args),
                     owner,
                     start: source.lines.position(report.span.start),
                     end: source.lines.position(report.span.end),
@@ -229,6 +230,7 @@ fn parse_error(message: String) -> Draft<'static> {
     Draft {
         rule: PARSE_ERROR,
         kind: FindingKind::ParseError,
+        args: vec![("error", message.clone())],
         message,
         owner: Owner::File,
         start: start(),

@@ -172,7 +172,7 @@ pub(crate) fn run(args: HotArgs) -> Result<Exit, CliError> {
     };
     let base = checked.base.as_ref();
     let text = if args.json {
-        output::hot_json(base, &found, JsonLayout::new(args.pretty))
+        output::hot_json(base, &found, &checked.rules, JsonLayout::new(args.pretty))
     } else {
         output::hot_text(base, &found)
     };
