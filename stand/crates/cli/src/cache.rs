@@ -1,0 +1,216 @@
+//! The setup cache of a session (plan, row 88): the key of each version after `pull`, the entry
+//! `run` takes, and the slots after the run. `run` lays out an entry, `store` keeps the slots;
+//! the decisions are here.
+
+use report::SetupFrom;
+use run::SetupCache;
+use sandbox::{Cached, Leftovers, Pulled, Sandbox, SnapshotId};
+use source::Tree;
+use spec::Stand;
+use store::{CacheEntry, Session, SetupKey, Slot, Store};
+
+use crate::error::StandError;
+use crate::sweep;
+
+/// The entry of one version for this run.
+#[derive(Debug, Clone)]
+pub(crate) struct Planned {
+    pub slot: Slot,
+    pub key: SetupKey,
+    pub entry: CacheEntry,
+    pub hit: bool,
+}
+
+impl Planned {
+    pub(crate) fn setup(&self) -> SetupCache {
+        let dir = self.entry.dir.clone();
+        if self.hit {
+            SetupCache::Hit(dir)
+        } else {
+            SetupCache::Build(dir)
+        }
+    }
+}
+
+/// `recipe` is the digest of the recipe the run reads: the sealed copy with `--before`.
+pub(crate) fn key(stand: &Stand, tree: &Tree, pulled: &Pulled) -> SetupKey {
+    SetupKey {
+        tree: tree.to_string(),
+        recipe: stand.recipe.digest.clone(),
+        images: pulled
+            .digests
+            .iter()
+            .map(|(image, digest)| (image.as_str().to_owned(), digest.clone()))
+            .collect(),
+        guest: pulled.guest.clone(),
+        tool: env!("CARGO_PKG_VERSION").to_owned(),
+    }
+}
+
+/// What `pull` would give, when every image is in the home already: the key of `--dry-run`.
+pub(crate) fn known(cached: &Cached) -> Option<Pulled> {
+    let digests = cached
+        .digests
+        .iter()
+        .map(|(image, digest)| Some((image.clone(), digest.clone()?)))
+        .collect::<Option<Vec<_>>>()?;
+    Some(Pulled {
+        digests,
+        guest: cached.guest.clone(),
+    })
+}
+
+/// The entry of `key` with the snapshots its `entry.json` names, and whether every one of them is
+/// among `left`: a hit.
+fn lookup(
+    session: &Session,
+    key: &SetupKey,
+    left: &Leftovers,
+) -> Result<Option<(CacheEntry, Vec<SnapshotId>, bool)>, StandError> {
+    let Some(entry) = session.cached(key)? else {
+        return Ok(None);
+    };
+    let Some(ids) = run::cached_ids(&entry.dir)? else {
+        return Ok(None);
+    };
+    let whole = ids.iter().all(|id| left.snapshots.contains(id));
+    Ok(Some((entry, ids, whole)))
+}
+
+/// The run that built the entry of `key`, when `plan` would take it now; drops and writes
+/// nothing.
+pub(crate) fn would_hit(
+    session: &Session,
+    key: &SetupKey,
+    left: &Leftovers,
+) -> Result<Option<String>, StandError> {
+    let found = lookup(session, key, left)?;
+    Ok(found.and_then(|(entry, _, whole)| whole.then_some(entry.built_by)))
+}
+
+/// On a miss the snapshots of the key's entry still there go, and its folder starts empty for
+/// this run's setup.
+pub(crate) fn plan(
+    session: &Session,
+    slot: Slot,
+    key: SetupKey,
+    left: &Leftovers,
+    run: &str,
+    sandbox: &impl Sandbox,
+) -> Result<Planned, StandError> {
+    if let Some((entry, ids, whole)) = lookup(session, &key, left)? {
+        if whole {
+            return Ok(Planned {
+                slot,
+                key,
+                entry,
+                hit: true,
+            });
+        }
+        for id in ids.iter().filter(|id| left.snapshots.contains(id)) {
+            sandbox.drop_snapshot(id)?;
+        }
+    }
+    let dir = session.new_entry(&key)?;
+    let entry = CacheEntry {
+        dir,
+        built_by: run.to_owned(),
+    };
+    Ok(Planned {
+        slot,
+        key,
+        entry,
+        hit: false,
+    })
+}
+
+pub(crate) fn setup_from(head: &Planned, before: Option<&Planned>) -> SetupFrom {
+    let from = |planned: &Planned| planned.hit.then(|| planned.entry.built_by.clone());
+    SetupFrom {
+        head: from(head),
+        before: before.and_then(from),
+    }
+}
+
+/// After exit 0 or 1: each slot points at its version's entry when that setup passed whole;
+/// the entries no slot names lose their snapshots, then their folders. "Before" goes first: the
+/// entry the head slot held may serve "before" now, and the head slot let go of first would give
+/// it up with its snapshots. An entry the before slot let go of may serve the head now (the two
+/// trees swapped): it stays too (batch review 6).
+pub(crate) fn keep(
+    session: &Session,
+    plans: &[Planned],
+    sandbox: &impl Sandbox,
+    store: &Store,
+) -> Result<(), StandError> {
+    let mut gone = Vec::new();
+    let mut slotted = Vec::new();
+    let of = |slot: Slot| plans.iter().filter(move |planned| planned.slot == slot);
+    for planned in of(Slot::Before).chain(of(Slot::Head)) {
+        if run::cached_ids(&planned.entry.dir)?.is_some() {
+            gone.extend(session.cache(planned.slot, &planned.key, planned.entry.clone())?);
+            slotted.push(&planned.entry.dir);
+        }
+    }
+    gone.retain(|entry| !slotted.contains(&entry));
+    sweep::drop_snapshots(sandbox, &gone, &[])?;
+    store.clear_unused_entries()?;
+    Ok(())
+}
+
+/// After exit 2, 3 or 130 the slots stay; what this run built goes, its snapshots first.
+pub(crate) fn discard(
+    plans: &[Planned],
+    sandbox: &impl Sandbox,
+    store: &Store,
+) -> Result<(), StandError> {
+    let built: Vec<_> = plans
+        .iter()
+        .filter(|planned| !planned.hit)
+        .map(|planned| planned.entry.dir.clone())
+        .collect();
+    sweep::drop_snapshots(sandbox, &built, &[])?;
+    store.clear_unused_entries()?;
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use sandbox::ImageRef;
+
+    use super::*;
+
+    #[test]
+    fn the_key_takes_the_tree_the_recipe_each_digest_the_guest_and_the_tool() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = camino::Utf8Path::from_path(dir.path())
+            .unwrap()
+            .join("compose.yaml");
+        std::fs::write(
+            &file,
+            "services:\n  w:\n    image: alpine\n    deploy: { resources: { limits: { cpus: \"1\", memory: 64m } } }\n\
+             x-stand: { workload: w }\n",
+        )
+        .unwrap();
+        let stand = spec::load(&file, &spec::Policy::new(None).unwrap()).unwrap();
+        let pulled = |digest: &str, guest: &str| Pulled {
+            digests: vec![(ImageRef::new("alpine"), digest.to_owned())],
+            guest: guest.into(),
+        };
+        // `source` makes a `Tree` only from a repo.
+        let repo = testkit::TempRepo::new();
+        repo.write("a.txt", "a").commit("a");
+        let worktree = source::open(camino::Utf8Path::from_path(repo.path()).unwrap()).unwrap();
+        let tree = source::snapshot(&worktree).unwrap();
+        let key = key(&stand, &tree, &pulled("sha256:1", "0.1.0"));
+        assert_eq!(key.tree, tree.to_string());
+        assert_eq!(key.recipe, stand.recipe.digest);
+        assert_eq!(key.images, [("alpine".to_owned(), "sha256:1".to_owned())]);
+        assert_eq!(key.guest, "0.1.0");
+        assert_eq!(key.tool, env!("CARGO_PKG_VERSION"));
+        let other_digest = super::key(&stand, &tree, &pulled("sha256:2", "0.1.0"));
+        let other_guest = super::key(&stand, &tree, &pulled("sha256:1", "dev-1"));
+        assert_ne!(key.digest(), other_digest.digest());
+        assert_ne!(key.digest(), other_guest.digest());
+    }
+}

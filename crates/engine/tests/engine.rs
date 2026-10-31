@@ -2,7 +2,8 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use camino::{Utf8Path, Utf8PathBuf};
 use engine::{
-    ConfigError, Engine, Finding, FixCount, LineRange, Mode, RunConfig, RunReport, SourceFile,
+    Changed, ConfigError, Cut, Engine, Finding, FixCount, LineRange, Mode, RunConfig, RunReport,
+    SourceFile,
 };
 use kit::prelude::*;
 use kit::{
@@ -35,6 +36,28 @@ struct PerFile {}
 impl Rule for PerFile {
     fn on_file<'a>(&self, cx: &mut Cx<'_, 'a>) {
         cx.report(Span::empty(0));
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(crate = "kit::serde", deny_unknown_fields)]
+struct Comments {}
+
+impl Rule for Comments {
+    fn on_file<'a>(&self, cx: &mut Cx<'_, 'a>) {
+        for comment in cx.file().semantic.comments() {
+            cx.report(comment.span);
+        }
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(crate = "kit::serde", deny_unknown_fields)]
+struct OnPath {}
+
+impl Rule for OnPath {
+    fn on_file<'a>(&self, cx: &mut Cx<'_, 'a>) {
+        cx.report_path();
     }
 }
 
@@ -274,6 +297,14 @@ static SET: Ruleset = Ruleset {
         }),
         check::<PerFile>(RuleMeta {
             id: "per-file",
+            ..META
+        }),
+        check::<OnPath>(RuleMeta {
+            id: "on-path",
+            ..META
+        }),
+        check::<Comments>(RuleMeta {
+            id: "comment",
             ..META
         }),
         check::<PerFile>(RuleMeta {
@@ -694,6 +725,10 @@ fn the_message_fills_args_from_the_report() {
         findings[0].message, "{depth} deeper than 3",
         "a value is not filled again"
     );
+    assert_eq!(
+        findings[0].args,
+        [("name", "{depth}".to_owned()), ("depth", "3".to_owned())]
+    );
 }
 
 #[test]
@@ -751,7 +786,7 @@ fn positions_skip_the_bom_and_count_crlf_lines() {
 fn in_hunk_checks_the_first_line_of_the_finding() {
     let engine = engine(&["call"]);
     // `f()` on line 1; `g(\n1)` on lines 2-3.
-    let in_hunk = |changed: Option<Vec<LineRange>>| {
+    let in_hunk = |changed: Option<Changed>| {
         let file = SourceFile {
             changed,
             ..source("src/a.ts", "f();\ng(\n1);\n")
@@ -761,7 +796,7 @@ fn in_hunk_checks_the_first_line_of_the_finding() {
             .map(|f| f.in_hunk)
             .collect::<Vec<_>>()
     };
-    let lines = |start, end| Some(vec![LineRange { start, end }]);
+    let lines = |start, end| diff(&[(start, end)], &[]);
 
     assert_eq!(in_hunk(None), [None, None]);
     assert_eq!(in_hunk(lines(1, 1)), [Some(true), Some(false)]);
@@ -771,6 +806,235 @@ fn in_hunk_checks_the_first_line_of_the_finding() {
         [Some(false), Some(false)],
         "only a later line of `g` changed"
     );
+}
+
+#[test]
+fn a_finding_names_the_function_member_or_statement_around_it() {
+    let text = "\
+f();
+function named(x = f()) {
+  f();
+}
+const arrow = () => f();
+class Orders {
+  field = f();
+  #secret = () => f();
+  @dec
+  method() {
+    items.map(() => f());
+  }
+  static [key()]() {}
+}
+const Anon = class {
+  run() { f(); }
+};
+const o = { key() { f(); }, value: (() => f()) as Fn };
+exports.handler = function () { f(); };
+export default function () { f(); }
+export const { a, b } = f();
+class Auto {
+  accessor handler = () => f();
+}
+";
+    let findings = check_files(&engine(&["call"]), vec![source("src/a.ts", text)]);
+    let functions: Vec<(u32, &str)> = findings
+        .iter()
+        .map(|f| (f.start.line, f.function.as_deref().unwrap()))
+        .collect();
+
+    assert_eq!(
+        functions,
+        [
+            (1, "(top level)"),
+            (2, "named"),
+            (3, "named"),
+            (5, "arrow"),
+            (7, "Orders.field"),
+            (8, "Orders.#secret"),
+            (11, "Orders.method"),
+            (11, "(anonymous)"),
+            (13, "Orders.[key()]"),
+            (16, "Anon.run"),
+            (18, "key"),
+            (18, "value"),
+            (19, "exports.handler"),
+            (20, "(anonymous)"),
+            (21, "{ a, b }"),
+            (23, "Auto.handler"),
+        ]
+    );
+}
+
+#[test]
+fn a_finding_in_a_comment_belongs_to_the_code_the_comment_is_about() {
+    let text = "\
+/** Totals. */
+class Orders {
+  /** Sums. */
+  @dec
+  sum() {
+    return 1; // why
+  }
+  // loose
+}
+f(); // after a call
+// at the end
+";
+    let findings = check_files(&engine(&["comment"]), vec![source("src/a.ts", text)]);
+    let functions: Vec<(u32, &str)> = findings
+        .iter()
+        .map(|f| (f.start.line, f.function.as_deref().unwrap()))
+        .collect();
+
+    assert_eq!(
+        functions,
+        [
+            (1, "Orders"),
+            (3, "Orders.sum"),
+            (6, "Orders.sum"),
+            (8, "Orders"),
+            (10, "(top level)"),
+            (11, "(top level)"),
+        ]
+    );
+}
+
+#[test]
+fn a_finding_about_the_file_has_no_function() {
+    let findings = check_files(
+        &engine(&["on-path"]),
+        vec![source("src/a.ts", "f();"), source("src/b.ts", "let = ;")],
+    );
+
+    assert_eq!(
+        brief(&findings),
+        ["src/a.ts:1:1 on-path", "src/b.ts:1:7 parse-error"]
+    );
+    assert!(findings.iter().all(|f| f.function.is_none()));
+}
+
+/// `(x, y, z)`: whether the diff touched the function of the call on each of them.
+fn touched(changed: Option<Changed>) -> Vec<Option<bool>> {
+    let text = "\
+function a() {
+  /* one
+     two */
+  x();
+}
+function b() {
+  y();
+
+  z();
+}
+";
+    let file = SourceFile {
+        changed,
+        ..source("src/a.ts", text)
+    };
+    check_files(&engine(&["call"]), vec![file])
+        .iter()
+        .map(|f| f.touched)
+        .collect()
+}
+
+fn diff(lines: &[(u32, u32)], cuts: &[(u32, u32)]) -> Option<Changed> {
+    Some(Changed {
+        lines: lines
+            .iter()
+            .map(|&(start, end)| LineRange { start, end })
+            .collect(),
+        cuts: cuts
+            .iter()
+            .map(|&(start, count)| Cut { start, count })
+            .collect(),
+        new_path: false,
+    })
+}
+
+#[test]
+fn touched_counts_a_changed_line_of_code_of_the_function() {
+    let (yes, no) = (Some(true), Some(false));
+
+    assert_eq!(touched(None), [None, None, None]);
+    assert_eq!(touched(diff(&[(4, 4)], &[])), [yes, no, no]);
+    assert_eq!(
+        touched(diff(&[(5, 6)], &[])),
+        [yes, yes, yes],
+        "the braces are code"
+    );
+    assert_eq!(touched(diff(&[(1, u32::MAX)], &[])), [yes, yes, yes]);
+    assert_eq!(
+        touched(diff(&[(2, 3), (8, 8)], &[])),
+        [no, no, no],
+        "a comment and a blank line are not code"
+    );
+}
+
+#[test]
+fn touched_counts_code_the_diff_took_out_of_the_function() {
+    let (yes, no) = (Some(true), Some(false));
+
+    assert_eq!(touched(diff(&[], &[(7, 0)])), [no, yes, yes]);
+    assert_eq!(
+        touched(diff(&[], &[(5, 0)])),
+        [no, no, no],
+        "between the functions"
+    );
+    assert_eq!(
+        touched(diff(&[(2, 3)], &[(2, 2)])),
+        [yes, no, no],
+        "code turned into a comment"
+    );
+}
+
+#[test]
+fn a_finding_about_the_file_is_touched_when_the_diff_adds_or_renames_it() {
+    let touched = |changed: Option<Changed>| {
+        let file = SourceFile {
+            changed,
+            ..source("src/a.ts", "f();\n")
+        };
+        check_files(&engine(&["on-path"]), vec![file])[0].touched
+    };
+    let new_path = |new_path| {
+        Some(Changed {
+            lines: vec![LineRange { start: 1, end: 1 }],
+            new_path,
+            ..Changed::default()
+        })
+    };
+
+    assert_eq!(touched(None), None);
+    assert_eq!(touched(new_path(true)), Some(true));
+    assert_eq!(
+        touched(new_path(false)),
+        Some(false),
+        "an edit of its lines is not enough"
+    );
+}
+
+#[test]
+fn a_parse_error_is_touched_by_a_change_of_any_line() {
+    let touched = |changed: Option<Changed>| {
+        let file = SourceFile {
+            changed,
+            ..source("src/a.ts", "f();\nlet = ;\n")
+        };
+        let findings = check_files(&engine(&["call"]), vec![file]);
+        assert_eq!(brief(&findings), ["src/a.ts:2:7 parse-error"]);
+        (findings[0].in_hunk, findings[0].touched)
+    };
+    let (yes, no) = (Some(true), Some(false));
+
+    assert_eq!(touched(None), (None, None));
+    assert_eq!(touched(diff(&[(2, 2)], &[(2, 1)])), (yes, yes));
+    assert_eq!(
+        touched(diff(&[(1, 1)], &[])),
+        (no, yes),
+        "the error may lie elsewhere"
+    );
+    assert_eq!(touched(diff(&[], &[(1, 0)])), (no, yes));
+    assert_eq!(touched(diff(&[], &[])), (no, no), "a mode change");
 }
 
 #[test]
@@ -1154,6 +1418,48 @@ fn an_edit_that_changes_nothing_is_no_fix() {
         .map(|f| (f.rule, f.fixable))
         .collect();
     assert_eq!(fixable, [("same", false), ("unwrap", true)]);
+}
+
+#[test]
+fn functions_gives_each_function_with_a_body_and_where_v8_may_start_it() {
+    let text = "export function total(xs: number[]) {\n  return xs.map((x) => x * 2);\n}\n\
+                const label = () => \"a\";\n\
+                class Report {\n  build() {\n    function inner() {}\n    return inner;\n  }\n  static async load() {}\n}\n\
+                const e = \"é😀\", f = () => 1;\n\
+                run(function () {});\n\
+                declare function gone(): void;\n";
+
+    let spans = Engine::functions(&source("src/a.ts", text));
+    let seen: Vec<String> = spans
+        .iter()
+        .map(|span| {
+            let (start, end) = (&span.start, &span.end);
+            let name = span.name.as_deref().unwrap_or("-");
+            format!(
+                "{name} {}:{}-{}:{}",
+                start.line, start.column, end.line, end.column
+            )
+        })
+        .collect();
+    assert_eq!(
+        seen,
+        [
+            // From `export`, where coverage starts it.
+            "total 1:1-3:2",
+            // An anonymous callback takes the name of the function around it.
+            "total 2:17-2:29",
+            "label 4:15-4:24",
+            // From the name of the method.
+            "build 6:3-9:4",
+            "inner 7:5-7:24",
+            // From `static`: coverage starts it at `async`.
+            "load 10:3-10:25",
+            // Columns count characters: `é` is 2 bytes, the emoji 4 bytes and 2 UTF-16 units.
+            "f 12:21-12:28",
+            "- 13:5-13:19",
+        ]
+    );
+    assert!(Engine::functions(&source("src/b.ts", "function (")).is_empty());
 }
 
 #[test]

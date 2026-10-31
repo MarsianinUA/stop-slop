@@ -1,0 +1,11 @@
+services:
+  api:
+    image: node:22
+    deploy: { resources: { limits: { cpus: "1", memory: 512m } } }
+  Api:
+    image: node:22
+    deploy: { resources: { limits: { cpus: "1", memory: 512m } } }
+  load:
+    image: node:22
+    deploy: { resources: { limits: { cpus: "1", memory: 512m } } }
+x-stand: { workload: load }

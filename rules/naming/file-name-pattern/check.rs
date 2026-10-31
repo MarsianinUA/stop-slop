@@ -23,7 +23,29 @@ impl Rule for Check {
         }
         let no_role = !stem.contains('.') && !self.names.iter().any(|n| n == stem);
         if no_role || !stem.split('.').all(|part| Case::Kebab.matches(part)) {
-            cx.report(path_span(file)).arg("name", name);
+            cx.report_path()
+                .arg("name", name)
+                .arg("example", self.example(stem, file.path.extension()));
         }
+    }
+}
+
+impl Check {
+    /// The name in kebab-case, with a `<role>` the agent picks where it has none:
+    /// `orderTotals.ts` -> `order-totals.<role>.ts`.
+    fn example(&self, stem: &str, extension: Option<&str>) -> String {
+        let mut parts: Vec<String> = stem
+            .split('.')
+            .map(|part| Case::Kebab.apply(part).unwrap_or_else(|| part.to_owned()))
+            .collect();
+        if let [only] = parts.as_slice()
+            && !self.names.contains(only)
+        {
+            parts.push("<role>".to_owned());
+        }
+        if let Some(extension) = extension {
+            parts.push(extension.to_owned());
+        }
+        parts.join(".")
     }
 }

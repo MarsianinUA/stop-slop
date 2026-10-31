@@ -2,6 +2,7 @@ mod args;
 mod check;
 mod error;
 mod hook;
+mod hot;
 mod ignore;
 mod list;
 mod output;
@@ -9,7 +10,7 @@ mod toggle;
 
 use std::collections::BTreeSet;
 use std::env;
-use std::process::ExitCode;
+use std::process::{self, ExitCode};
 
 use camino::Utf8PathBuf;
 use clap::Parser;
@@ -23,7 +24,26 @@ use error::{CliError, Exit};
 use output::JsonLayout;
 
 fn main() -> ExitCode {
-    let result = match Command::parse() {
+    // A handler that cannot be set leaves Ctrl+C as it was: the signal ends the process.
+    let _ = ctrlc::set_handler(|| process::exit(Exit::Interrupted as i32));
+    let exit = match Command::try_parse() {
+        Ok(command) => run(command),
+        Err(error) => refuse_args(&error),
+    };
+    ExitCode::from(exit as u8)
+}
+
+fn run(command: Command) -> Exit {
+    let json = wants_json(&command);
+    let is_hook = matches!(command, Command::Hook);
+    let with_base = match &command {
+        Command::Ignore { .. } => {
+            "stop-slop ignore <fingerprint> --reason \"<reason>\" --base <ref>"
+        }
+        Command::Hot(_) => "stop-slop hot <report.json> --base <ref> --json",
+        _ => "stop-slop check --base <ref> --json",
+    };
+    let result = match command {
         Command::Check(args) => check::run(args),
         Command::Hook => hook::run(),
         Command::Ignore {
@@ -33,13 +53,57 @@ fn main() -> ExitCode {
         } => ignore::run(fingerprint, reason, base),
         Command::Enable => toggle::enable(),
         Command::Disable => toggle::disable(),
+        Command::Hot(args) => hot::run(args),
         Command::Rules { json, pretty } => list::run(json, JsonLayout::new(pretty)),
     };
-    let exit = result.unwrap_or_else(|error| {
-        eprintln!("stop-slop: {error}");
-        Exit::Failure
-    });
-    ExitCode::from(exit as u8)
+    result.unwrap_or_else(|error| {
+        let cause = error.to_string();
+        let next = error.next(with_base);
+        output::print_err(&output::failure_text(&cause, &next));
+        if json {
+            print_failure(error.phase(), &cause, &next);
+        }
+        // The agent reads a hook's stderr only on 2.
+        if is_hook { Exit::Refused } else { error.exit() }
+    })
+}
+
+fn wants_json(command: &Command) -> bool {
+    match command {
+        Command::Check(args) => args.json,
+        Command::Hot(args) => args.json,
+        Command::Rules { json, .. } => *json,
+        Command::Hook | Command::Ignore { .. } | Command::Enable | Command::Disable => false,
+    }
+}
+
+/// `--help` and `--version` come here too, as errors that print to stdout with code 0.
+fn refuse_args(error: &clap::Error) -> Exit {
+    // An error printing the message has nowhere to be reported.
+    let _ = error.print();
+    if !error.use_stderr() {
+        return Exit::Clean;
+    }
+    // Nothing parsed, so the command and `--json` are looked for among the raw arguments.
+    let mut args = env::args_os().skip(1);
+    let prints_json = args
+        .next()
+        .is_some_and(|command| matches!(command.to_str(), Some("check" | "hot" | "rules")));
+    if prints_json && args.any(|arg| arg == "--json") {
+        // The error runs to the first empty line: a missing flag has a line of its own after
+        // `the following required arguments were not provided:`. Usage and tips for a person
+        // follow, and stderr keeps them.
+        let text = error.to_string();
+        let message = text.split("\n\n").next().unwrap_or_default();
+        let message = message.strip_prefix("error: ").unwrap_or(message);
+        print_failure("args", message, &[]);
+    }
+    Exit::Refused
+}
+
+fn print_failure(phase: &'static str, cause: &str, next: &[String]) {
+    // A stdout that fails here has nowhere left to report it; the exit code still tells.
+    let _ = output::print(&output::failure_json(phase, cause, next));
 }
 
 fn cwd_repo() -> Result<Repo, CliError> {

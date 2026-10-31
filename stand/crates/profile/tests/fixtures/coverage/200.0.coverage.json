@@ -1,0 +1,14 @@
+[
+  {"scriptId":"31","url":"file:///w/app/src/add.js","functions":[
+    {"functionName":"","ranges":[{"startOffset":0,"endOffset":70,"count":1}],"isBlockCoverage":false,"line":0,"column":0},
+    {"functionName":"add","ranges":[{"startOffset":0,"endOffset":38,"count":3}],"isBlockCoverage":false,"line":0,"column":0}
+  ]},
+  {"scriptId":"32","url":"file:///w/app-tools/run.js","functions":[
+    {"functionName":"","ranges":[{"startOffset":0,"endOffset":60,"count":1}],"isBlockCoverage":false,"line":0,"column":0},
+    {"functionName":"run","ranges":[{"startOffset":14,"endOffset":50,"count":1}],"isBlockCoverage":false,"line":1,"column":0}
+  ]},
+  {"scriptId":"33","url":"file:///w/app/src/legacy.ts","functions":[
+    {"functionName":"","ranges":[{"startOffset":0,"endOffset":90,"count":1}],"isBlockCoverage":false,"line":0,"column":0},
+    {"functionName":"parse","ranges":[{"startOffset":30,"endOffset":80,"count":2}],"isBlockCoverage":false,"line":2,"column":0}
+  ]}
+]

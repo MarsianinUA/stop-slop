@@ -4,13 +4,13 @@ use std::path::{Path, PathBuf};
 use std::thread;
 
 use camino::{Utf8Path, Utf8PathBuf};
-use repo::{LineRange, Oid, Repo, RepoError, Snapshot};
+use repo::{Cut, LineRange, Oid, Repo, RepoError, Snapshot};
 
 mod base;
 mod files;
 mod pr_base;
 
-pub use pr_base::{GhPrBase, PrBase};
+pub use pr_base::{GhPrBase, PrBase, pull_request};
 
 #[derive(Debug)]
 pub enum ScopeRequest {
@@ -50,7 +50,16 @@ pub enum BaseReason {
 #[derive(Debug, PartialEq, Eq)]
 pub struct ScopedFile {
     pub path: Utf8PathBuf,
-    pub changed: Option<Vec<LineRange>>,
+    pub changed: Option<Changed>,
+}
+
+/// What the diff of the branch did to a file.
+#[derive(Debug, PartialEq, Eq)]
+pub struct Changed {
+    pub lines: Vec<LineRange>,
+    pub cuts: Vec<Cut>,
+    /// The diff adds the file, untracked too, or renames it.
+    pub new_path: bool,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -65,6 +74,17 @@ pub enum SkipReason {
     AlreadyInBase,
 }
 
+#[derive(Debug, PartialEq, Eq)]
+pub struct PullRequest {
+    pub number: u32,
+    /// `headRefOid`, full.
+    pub head: String,
+    /// `baseRefName`: `dev`, not `origin/dev`.
+    pub base: String,
+    /// The review draft header takes it.
+    pub title: String,
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum ScopeError {
     #[error(transparent)]
@@ -75,6 +95,17 @@ pub enum ScopeError {
     NoBase,
     #[error("a revision needs a base")]
     RevWithoutBase,
+    /// No `gh`, no network, or no such pull request.
+    #[error("pull request {number}: {message}")]
+    PullRequest { number: u32, message: String },
+    /// A path of `--files` that does not exist, is a folder or lies outside the repository.
+    /// Every `source` names the path already.
+    #[error("{source}")]
+    BadFile {
+        path: PathBuf,
+        #[source]
+        source: RepoError,
+    },
 }
 
 /// The base and the files to check. Only `.ts`, `.tsx`, `.mts` and `.cts` files, without
@@ -97,7 +128,12 @@ pub fn resolve(
         }
         ScopeRequest::Files(paths) => paths
             .iter()
-            .map(|path| listed_file(repo, path))
+            .map(|path| {
+                listed_file(repo, path).map_err(|source| ScopeError::BadFile {
+                    path: path.clone(),
+                    source,
+                })
+            })
             .collect::<Result<_, _>>()?,
         ScopeRequest::All => snapshot.files()?,
     };

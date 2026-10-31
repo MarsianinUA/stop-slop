@@ -3,11 +3,11 @@ use std::panic::resume_unwind;
 use std::thread;
 
 use camino::{Utf8Path, Utf8PathBuf};
-use engine::{Engine, Finding, FixCount, LineRange, Mode, SourceFile};
+use engine::{Changed, Cut, Engine, Finding, FixCount, LineRange, Mode, RuleState, SourceFile};
 use kit::{EnumIndex, Fact, Facts, Package};
 use project::ProjectFacts;
 use repo::{Repo, Snapshot, WorkTree};
-use scope::{Base, GhPrBase, Scope, ScopeRequest, ScopedFile, Skipped};
+use scope::{Base, BaseReason, GhPrBase, PullRequest, Scope, ScopeRequest, ScopedFile, Skipped};
 use state::State;
 
 use crate::args::CheckArgs;
@@ -16,11 +16,16 @@ use crate::output::{self, JsonLayout};
 
 /// `files` holds only the files that were read.
 pub(crate) struct Checked {
+    pub(crate) pr: Option<PullRequest>,
     pub(crate) base: Option<Base>,
     pub(crate) files: Vec<Utf8PathBuf>,
+    /// The changed lines of each file of `files`; empty without a base.
+    pub(crate) changed: BTreeMap<Utf8PathBuf, Vec<LineRange>>,
     pub(crate) skipped: Vec<Skipped>,
     pub(crate) findings: Vec<Finding>,
     pub(crate) fixed: Vec<FixCount>,
+    /// Every rule of the set; active when its group condition holds for one of `files`.
+    pub(crate) rules: Vec<RuleState>,
 }
 
 pub(crate) fn run(args: CheckArgs) -> Result<Exit, CliError> {
@@ -48,7 +53,17 @@ fn check(args: CheckArgs) -> Result<Checked, CliError> {
     scan(&repo, &engine, args)
 }
 
-pub(crate) fn scan(repo: &Repo, engine: &Engine, args: CheckArgs) -> Result<Checked, CliError> {
+pub(crate) fn scan(repo: &Repo, engine: &Engine, mut args: CheckArgs) -> Result<Checked, CliError> {
+    let pr = args
+        .pr
+        .map(|number| pull_request(repo, number))
+        .transpose()?;
+    if let Some(pr) = &pr {
+        // The head oid rather than `refs/stop-slop/pr-<n>`: the commit `fetch_pr` checked,
+        // whatever moves the ref later.
+        args.rev = Some(pr.head.clone());
+        args.base = Some(format!("origin/{}", pr.base));
+    }
     let snapshot = match &args.rev {
         Some(rev) => repo.at_rev(rev)?,
         None => repo.worktree(),
@@ -72,6 +87,12 @@ pub(crate) fn scan(repo: &Repo, engine: &Engine, args: CheckArgs) -> Result<Chec
     // A `scope` error names the base or the path the user gave, so it goes first.
     let (mut scope, facts, mut sources) = prepared?;
     let index = index.transpose()?;
+    // `--pr` gave the base as a flag, but it is the base of the pull request.
+    if pr.is_some()
+        && let Some(base) = &mut scope.base
+    {
+        base.reason = BaseReason::Pr;
+    }
     let joined = Joined {
         files: &facts,
         // Without `Fact::Enums` no thread ran, and the empty index of `facts` stands in.
@@ -89,15 +110,29 @@ pub(crate) fn scan(repo: &Repo, engine: &Engine, args: CheckArgs) -> Result<Chec
             scope.skipped = rescope(repo, &snapshot, base, &mut sources)?;
         }
     }
-    let files = sources.iter().map(|source| source.path.clone()).collect();
+    let files: Vec<Utf8PathBuf> = sources.iter().map(|source| source.path.clone()).collect();
+    let rules = engine.rule_states(&joined, &files);
+    let changed = sources
+        .iter()
+        .filter_map(|source| Some((source.path.clone(), source.changed.as_ref()?.lines.clone())))
+        .collect();
     let report = engine.run(sources, &joined, Mode::Check);
     Ok(Checked {
+        pr,
         base: scope.base,
         files,
+        changed,
         skipped: scope.skipped,
         findings: report.findings,
         fixed,
+        rules,
     })
+}
+
+fn pull_request(repo: &Repo, number: u32) -> Result<PullRequest, CliError> {
+    let pr = scope::pull_request(repo.root(), number)?;
+    repo.fetch_pr(number, &pr.base, &pr.head)?;
+    Ok(pr)
 }
 
 /// Writes only the files `Fix` changed. Their `sources` get the written bytes, so `Check`
@@ -144,15 +179,15 @@ fn rescope(
         base: Some(base.oid.to_string()),
     };
     let again = scope::resolve(repo, snapshot, &GhPrBase, request)?;
-    let mut changed: BTreeMap<_, _> = again
+    let mut by_path: BTreeMap<_, _> = again
         .files
         .into_iter()
         .map(|file| (file.path, file.changed))
         .collect();
     // A file that became as in the base drops out; `Fix` creates no files, so none comes in.
-    sources.retain_mut(|source| match changed.remove(&source.path) {
-        Some(lines) => {
-            source.changed = lines.map(engine_lines);
+    sources.retain_mut(|source| match by_path.remove(&source.path) {
+        Some(changed) => {
+            source.changed = changed.map(engine_changed);
             true
         }
         None => false,
@@ -194,20 +229,32 @@ fn sources(files: Vec<ScopedFile>, bytes: Vec<Option<Vec<u8>>>) -> Vec<SourceFil
             Some(SourceFile {
                 path: file.path,
                 bytes: bytes?,
-                changed: file.changed.map(engine_lines),
+                changed: file.changed.map(engine_changed),
             })
         })
         .collect()
 }
 
-fn engine_lines(lines: Vec<repo::LineRange>) -> Vec<LineRange> {
-    lines
-        .into_iter()
-        .map(|line| LineRange {
-            start: line.start,
-            end: line.end,
-        })
-        .collect()
+fn engine_changed(changed: scope::Changed) -> Changed {
+    Changed {
+        lines: changed
+            .lines
+            .into_iter()
+            .map(|line| LineRange {
+                start: line.start,
+                end: line.end,
+            })
+            .collect(),
+        cuts: changed
+            .cuts
+            .into_iter()
+            .map(|cut| Cut {
+                start: cut.start,
+                count: cut.count,
+            })
+            .collect(),
+        new_path: changed.new_path,
+    }
 }
 
 struct Joined<'f> {

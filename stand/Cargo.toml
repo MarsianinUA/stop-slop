@@ -1,0 +1,36 @@
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.97"
+
+[workspace.dependencies]
+camino = "1"
+clap = { version = "4", features = ["derive"] }
+ctrlc = "3"
+dirs = "7"
+humantime = "2"
+libc = "0.2"
+microsandbox = { version = "=0.7.8", default-features = false, features = ["local", "net"] }
+# The SDK's own image cache, which holds the `STOPSIGNAL` the SDK's `Image::inspect` drops.
+microsandbox-image = "=0.7.8"
+oxc_sourcemap = "9"
+# 0.13 defaults to rustls, the TLS stack the SDK already pulls in.
+reqwest = "0.13"
+saphyr = { version = "0.3", default-features = false }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.11"
+shlex = "2"
+sysinfo = { version = "0.39", default-features = false, features = ["disk", "system"] }
+tar = { version = "0.4", default-features = false }
+tempfile = "3"
+thiserror = "2"
+tokio = { version = "1.52", features = ["rt-multi-thread", "sync", "time"] }
+toml = "1"
+tracing = "0.1"
+# `fmt` without `ansi`: the adapter's warnings on stderr; `registry` and `std` for the target filter.
+tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "registry", "std"] }

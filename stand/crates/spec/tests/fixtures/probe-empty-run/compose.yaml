@@ -1,0 +1,25 @@
+services:
+  db:
+    image: postgres:17
+    healthcheck: { test: ["CMD", "pg_isready"] }
+    deploy: { resources: { limits: { cpus: "1", memory: 512m } } }
+  seed:
+    image: postgres:17
+    depends_on: { db: { condition: service_healthy } }
+    deploy: { resources: { limits: { cpus: "1", memory: 512m } } }
+  api:
+    image: node:22
+    depends_on:
+      seed: { condition: service_completed_successfully }
+    deploy: { resources: { limits: { cpus: "1", memory: 512m } } }
+  load:
+    image: node:22
+    depends_on: [api]
+    deploy: { resources: { limits: { cpus: "1", memory: 512m } } }
+x-stand:
+  workload: load
+  probes:
+    rows:
+      in: db
+      at: after-workload
+      run: []

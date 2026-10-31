@@ -1,0 +1,13 @@
+services:
+  prepare:
+    image: node:22
+    volumes:
+      - ${STAND_REPO}:/w/app
+      - .:/scripts:ro
+    deploy: { resources: { limits: { cpus: "1", memory: 512m } } }
+  load:
+    image: node:22
+    depends_on:
+      prepare: { condition: service_completed_successfully }
+    deploy: { resources: { limits: { cpus: "1", memory: 512m } } }
+x-stand: { workload: load }

@@ -1344,16 +1344,20 @@ export {};";
 }
 
 #[test]
-fn path_span_is_empty_where_the_code_starts() {
+fn a_path_report_is_empty_where_the_code_starts() {
+    let facts = no_facts();
     for (text, start) in [
         ("'use strict';\nconst a = 1;", 0),
         ("// note\nconst a = 1;", 8),
         ("// only a comment", 0),
         ("", 0),
     ] {
+        let mut out = Vec::new();
         with_file(text, |file| {
-            assert_eq!(path_span(file), Span::empty(start), "{text:?}");
+            Cx::new(file, &facts, &mut out).report_path();
         });
+        assert_eq!(out[0].span, Span::empty(start), "{text:?}");
+        assert!(out[0].on_path);
     }
 }
 

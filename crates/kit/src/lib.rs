@@ -28,8 +28,8 @@ pub use callback::{is_callback, is_di_constructor, is_public, is_signature_given
 pub use callee::{call_of, local_callee, returns_promise, this_class};
 pub use case::{Case, words};
 pub use class_file::{
-    TopBinding, TopClass, TopKind, class_file_classes, start_after_decorators, top_bindings,
-    top_classes,
+    TopBinding, TopClass, TopKind, class_file_classes, skip_trivia, start_after_decorators,
+    top_bindings, top_classes,
 };
 pub use code_comment::{CommentBlock, CommentKind, CommentPart, comment_blocks};
 pub use cx::{Cx, Edit, Report, Reported};
@@ -38,9 +38,7 @@ pub use def::{
 };
 pub use exported::{is_exported, is_exported_node};
 pub use facts::{EnumIndex, EnumMember, Fact, Facts, Package, StaticFacts};
-pub use file::{
-    File, Role, RoleDef, Roles, file_name_has_word, is_cli_script, path_span, suffix_of,
-};
+pub use file::{File, Role, RoleDef, Roles, file_name_has_word, is_cli_script, suffix_of};
 pub use import_block::{import_blocks, import_group};
 pub use import_kind::{
     ImportKind, import_kind, imported_from, imported_name, module_source, package_name,
@@ -90,7 +88,7 @@ pub mod prelude {
         is_script_global, is_signature_given, is_similar_name, keeps_primitive, lib_type,
         line_start, line_tail, local_callee, loop_around, member_use, member_write, module_source,
         mutator_call, narrows_to_literal, nest_role, one_line, opens_region, outer_assertion,
-        package_name, path_span, private_member, related_symbols, relies_on_wide_type, rename,
+        package_name, private_member, related_symbols, relies_on_wide_type, rename,
         returns_promise, start_after_decorators, static_text, this_class, top_bindings,
         top_classes, type_assertion, unwrapped_type, words,
     };

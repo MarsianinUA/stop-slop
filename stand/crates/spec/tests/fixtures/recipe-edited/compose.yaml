@@ -1,0 +1,8 @@
+services:
+  load:
+    image: node:22
+    working_dir: /harness
+    volumes: [".:/harness:ro"]
+    command: ["node", "load.js"]
+    deploy: { resources: { limits: { cpus: "1", memory: 512m } } }
+x-stand: { workload: load }

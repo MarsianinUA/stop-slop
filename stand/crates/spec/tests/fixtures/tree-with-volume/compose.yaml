@@ -1,0 +1,9 @@
+services:
+  load:
+    image: node:22
+    volumes:
+      - ${STAND_REPO}:/w/app
+      - data:/data
+    deploy: { resources: { limits: { cpus: "1", memory: 512m } } }
+volumes: { data: {} }
+x-stand: { workload: load }

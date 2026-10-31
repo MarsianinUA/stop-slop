@@ -18,7 +18,7 @@ impl Rule for Check {
         // One finding for all folders: they have no text in the file, so findings of their own
         // would share one fingerprint.
         if !dirs.is_empty() {
-            cx.report(path_span(file)).arg("dirs", dirs.join(", "));
+            cx.report_path().arg("dirs", dirs.join(", "));
         }
     }
 }

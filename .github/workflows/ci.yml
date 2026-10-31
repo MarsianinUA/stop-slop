@@ -1,6 +1,10 @@
 name: CI
 on:
   pull_request:
+    paths-ignore:
+      - stand/**
+      - .github/workflows/stand.yml
+      - .github/workflows/guest-release.yml
   workflow_dispatch:
 permissions:
   contents: read
@@ -22,10 +26,6 @@ jobs:
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
-      - name: Node for the tests of crates/profile, which start it
-        uses: actions/setup-node@v7
-        with:
-          node-version: 22
       - run: cargo fmt --check
       - name: rustfmt on rule checks (cargo fmt does not see files behind include!)
         shell: bash

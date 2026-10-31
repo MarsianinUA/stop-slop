@@ -122,6 +122,7 @@ impl Snapshot {
                 start: 1,
                 end: u32::MAX,
             }],
+            cuts: Vec::new(),
         }));
         // A path comes twice when it is `Deleted` and is also on disk now: `git rm --cached`
         // leaves it untracked, a symlink turned into a file is also `Added`. The other entry

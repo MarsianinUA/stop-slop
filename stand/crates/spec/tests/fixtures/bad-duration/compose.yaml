@@ -1,0 +1,6 @@
+services:
+  load:
+    image: node:22
+    stop_grace_period: 5 parsecs
+    deploy: { resources: { limits: { cpus: "1", memory: 512m } } }
+x-stand: { workload: load }

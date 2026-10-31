@@ -1,0 +1,8 @@
+x-limits: &limits { cpus: "1", memory: 512m }
+name: demo
+services:
+  load:
+    image: node:22
+    x-notes: anything
+    deploy: { resources: { limits: *limits } }
+x-stand: { workload: load }

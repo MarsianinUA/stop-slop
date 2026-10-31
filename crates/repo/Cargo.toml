@@ -7,8 +7,9 @@ publish = false
 
 [dependencies]
 camino.workspace = true
+gitcmd = { path = "../../shared/gitcmd" }
 tempfile.workspace = true
 thiserror.workspace = true
 
 [dev-dependencies]
-testkit = { path = "../testkit" }
+testkit = { path = "../../shared/testkit" }

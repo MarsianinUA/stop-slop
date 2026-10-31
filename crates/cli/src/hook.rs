@@ -44,7 +44,7 @@ pub(crate) fn run() -> Result<Exit, CliError> {
         return Ok(Exit::Clean);
     }
     output::print_err(&output::hook_text(&findings));
-    Ok(Exit::Failure)
+    Ok(Exit::Refused)
 }
 
 fn input_error(error: impl Display) -> CliError {
@@ -78,7 +78,10 @@ fn errors(set: &'static Ruleset, file: &Path) -> Result<Vec<Finding>, CliError> 
     let needed = engine.facts_needed(Mode::Hook);
     let (_, facts, sources) = match check::prepare(&repo, &repo.worktree(), request, &needed) {
         // A symlink that leads out of the repo.
-        Err(CliError::Scope(ScopeError::Repo(RepoError::OutsideRepo(_)))) => {
+        Err(CliError::Scope(ScopeError::BadFile {
+            source: RepoError::OutsideRepo(_),
+            ..
+        })) => {
             return Ok(Vec::new());
         }
         prepared => prepared?,

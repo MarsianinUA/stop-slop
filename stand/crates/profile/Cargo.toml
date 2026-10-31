@@ -1,0 +1,16 @@
+[package]
+name = "profile"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+camino.workspace = true
+oxc_sourcemap.workspace = true
+serde.workspace = true
+serde_json = { workspace = true, features = ["raw_value"] }
+thiserror.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

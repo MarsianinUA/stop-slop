@@ -1,0 +1,16 @@
+[package]
+name = "budget"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+camino.workspace = true
+# Without `linux-tmpfs` sysinfo lists no tmpfs, and a folder on one (`/tmp` on Fedora or
+# Debian 13) would get the free disk of `/`.
+sysinfo = { workspace = true, features = ["linux-tmpfs"] }
+thiserror.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

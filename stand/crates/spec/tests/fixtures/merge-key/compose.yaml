@@ -1,0 +1,7 @@
+x-env: &env { MODE: fast }
+services:
+  load:
+    image: node:22
+    environment: { <<: *env, DEBUG: "1" }
+    deploy: { resources: { limits: { cpus: "1", memory: 512m } } }
+x-stand: { workload: load }

@@ -1,0 +1,157 @@
+name: Stand
+on:
+  pull_request:
+    paths:
+      - stand/**
+      - shared/**
+      - skill/references/**
+      - .github/workflows/stand.yml
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: stand-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+env:
+  CARGO_TERM_COLOR: always
+jobs:
+  stand:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        working-directory: stand
+    steps:
+      - uses: actions/checkout@v7
+      # rust-cache takes the target folder relative to the workspace, and the checkout may be on
+      # another drive than C:, so the target goes to the root of the checkout's drive.
+      - name: Short paths on Windows, where aws-lc-sys hits MAX_PATH
+        id: paths
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          drive=$(pwd -W | cut -c1)
+          echo 'CARGO_HOME=C:\c' >> "$GITHUB_ENV"
+          echo "CARGO_TARGET_DIR=$drive:\\t" >> "$GITHUB_ENV"
+          echo "target=$(realpath --relative-to=. "/${drive,,}/t")" >> "$GITHUB_OUTPUT"
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: stand -> ${{ steps.paths.outputs.target || 'target' }}
+      - name: Node for the preload tests of profile, which start it
+        uses: actions/setup-node@v7
+        with:
+          node-version: 22
+      - run: cargo fmt --check
+      - run: cargo clippy --locked --workspace --all-targets -- -D warnings
+      # guest-release.yml builds this on a tag; here a break shows on the PR instead.
+      - name: Build stand-guest for musl, as the release does
+        if: runner.os == 'Linux'
+        run: |
+          rustup target add x86_64-unknown-linux-musl
+          cargo build --locked -p guest --release --target x86_64-unknown-linux-musl
+      # Ubuntu 24.04 gives an unprivileged user namespace no capabilities, so the netfilter tests
+      # of guest could only skip; with them allowed, a namespace that still fails is a failure.
+      - name: Let the netfilter tests run in their own namespaces
+        if: runner.os == 'Linux'
+        run: |
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          echo STAND_GUEST_NF_REQUIRED=1 >> "$GITHUB_ENV"
+      - run: cargo test --locked --workspace
+      # The root case of `run` starts the test's stand-guest as another user, who must pass through
+      # every folder above it; the runner's home is not open to other users.
+      - name: Let other users reach the test build
+        if: runner.os == 'Linux'
+        run: |
+          dir="$PWD/target/debug"
+          while [ "$dir" != / ]; do
+            if [ -O "$dir" ]; then chmod o+x "$dir"; fi
+            dir=$(dirname "$dir")
+          done
+          namei -l "$PWD/target/debug/stand-guest"
+      # The root cases of guest (the probe's privilege drop, a service's stdio of another user, FITRIM
+      # on a loop-mounted ext4 and on one whose disk takes no discard) skipped above; here they run
+      # as root, where a skip fails, and the count shows the filter matched each.
+      # `--workspace` rather than `-p guest` keeps the features of the build above, so nothing is rebuilt.
+      - name: Run the root cases of guest under sudo
+        if: runner.os == 'Linux'
+        shell: bash
+        env:
+          # sudo on ubuntu-26.04 ignores -E, so the switch goes through env.
+          CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUNNER: sudo env STAND_GUEST_ROOT_REQUIRED=1
+        run: |
+          cargo test --locked --workspace --test guest -- --exact \
+            process::exec_under_root_takes_the_probe_group_and_the_user \
+            process::run_gives_a_command_of_another_user_stdio_it_can_reopen \
+            trim::trim_under_root_frees_the_blocks_of_deleted_files \
+            trim::trim_under_root_tells_a_disk_without_discard_from_a_failure | tee "$RUNNER_TEMP/root.log"
+          grep -q ' 4 passed;' "$RUNNER_TEMP/root.log"
+
+  # The contract set runs the stand-guest of this commit, so a change to the guest shows here before
+  # it is released; the cli set runs the pinned release.
+  live:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    defaults:
+      run:
+        working-directory: stand
+    env:
+      STOP_SLOP_STAND_LIVE: "1"
+    steps:
+      - uses: actions/checkout@v7
+      # /dev/kvm belongs to root and the kvm group, and the runner's user, who starts the VMs, is in
+      # neither.
+      - name: Let the runner's user open /dev/kvm
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+          ls -l /dev/kvm
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: stand -> target
+      - name: Build stand-guest for the guest
+        run: |
+          rustup target add x86_64-unknown-linux-musl
+          cargo build --locked -p guest --release --target x86_64-unknown-linux-musl
+          echo "STOP_SLOP_STAND_GUEST=$PWD/target/x86_64-unknown-linux-musl/release/stand-guest" >> "$GITHUB_ENV"
+      # The SDK's runtime and the images of the set download once per key, not per run (Docker Hub
+      # limits anonymous pulls). The SDK takes whatever runtime its home holds without checking its
+      # version, so a home only comes back to the same Cargo.lock; images.rs names the images.
+      - name: Keep the microsandbox home between runs
+        uses: actions/cache@v6
+        with:
+          path: /tmp/stop-slop-stand-live
+          key: stand-live-${{ hashFiles('stand/Cargo.lock') }}-${{ hashFiles('stand/crates/sandbox/tests/contract/images.rs') }}
+          restore-keys: stand-live-${{ hashFiles('stand/Cargo.lock') }}-
+      # One case at a time: `leftovers` sees every VM of the home, another case's too.
+      - name: The contract set on microsandbox VMs
+        run: cargo test --locked -p sandbox --features microsandbox --test contract -- --test-threads=1
+      # stop-slop-stand keeps 20 GiB free on the disk of its folder, more than the root disk has.
+      # Its folder is outside the cache: the set's `clean` drops the images, and a cached
+      # stand-guest would skip the download the next step checks. The link also checks that the
+      # stand resolves its folder: microsandbox refuses a bind through a link.
+      - name: Put the stand folder of the cli set on the temporary disk
+        run: |
+          sudo install -d -o "$(id -u)" -g "$(id -g)" /mnt/stop-slop-stand-cli
+          ln -sfn /mnt/stop-slop-stand-cli /tmp/stop-slop-stand-cli
+          nproc
+          df -h / /mnt
+      # The pinned stand-guest from the release, as a user gets it: without STOP_SLOP_STAND_GUEST
+      # the adapter downloads it and checks its sha256. The runner's 4 CPUs give a stand 2 vCPUs, and
+      # 3 with host_share = 80, which the whole case asks.
+      - name: The stand command on microsandbox VMs
+        run: |
+          config="${XDG_CONFIG_HOME:-$HOME/.config}/stop-slop-stand"
+          mkdir -p "$config"
+          echo 'host_share = 80' > "$config/stand.toml"
+          env -u STOP_SLOP_STAND_GUEST cargo test --locked -p cli --test live -- --test-threads=1
+      - name: Notes of the live run for the PR description
+        if: always()
+        run: cat /tmp/stop-slop-stand-live/notes.txt /tmp/stop-slop-stand-cli/notes.txt || true

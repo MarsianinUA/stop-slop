@@ -1,0 +1,15 @@
+[
+  {"scriptId":"119","url":"file:///w/app/main.js","functions":[
+    {"functionName":"","ranges":[{"startOffset":0,"endOffset":212,"count":1}],"isBlockCoverage":false,"line":0,"column":0},
+    {"functionName":"","ranges":[{"startOffset":155,"endOffset":203,"count":0}],"isBlockCoverage":false,"line":4,"column":11}
+  ]},
+  {"scriptId":"120","url":"file:///w/app/dist/orders.js","functions":[
+    {"functionName":"","ranges":[{"startOffset":0,"endOffset":1281,"count":1}],"isBlockCoverage":false,"line":0,"column":0},
+    {"functionName":"__decorate","ranges":[{"startOffset":61,"endOffset":590,"count":1}],"isBlockCoverage":false,"line":1,"column":46},
+    {"functionName":"logged","ranges":[{"startOffset":753,"endOffset":824,"count":1}],"isBlockCoverage":false,"line":12,"column":0},
+    {"functionName":"list","ranges":[{"startOffset":846,"endOffset":881,"count":0}],"isBlockCoverage":false,"line":16,"column":4},
+    {"functionName":"total","ranges":[{"startOffset":975,"endOffset":1110,"count":2}],"isBlockCoverage":false,"line":24,"column":0},
+    {"functionName":"report","ranges":[{"startOffset":1112,"endOffset":1174,"count":1}],"isBlockCoverage":false,"line":31,"column":0},
+    {"functionName":"fib","ranges":[{"startOffset":1176,"endOffset":1245,"count":0}],"isBlockCoverage":false,"line":34,"column":0}
+  ]}
+]

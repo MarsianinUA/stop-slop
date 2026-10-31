@@ -1,0 +1,17 @@
+{
+  "nodes": [
+    {"id":1,"callFrame":{"functionName":"(root)","scriptId":"0","url":"","lineNumber":-1,"columnNumber":-1},"hitCount":0,"children":[2,4,5,6,8,9,7]},
+    {"id":2,"callFrame":{"functionName":"","scriptId":"21","url":"file:///w/app/src/legacy.js","lineNumber":0,"columnNumber":0},"hitCount":1,"children":[3]},
+    {"id":3,"callFrame":{"functionName":"parse","scriptId":"21","url":"file:///w/app/src/legacy.js","lineNumber":2,"columnNumber":20},"hitCount":1,"positionTicks":[{"line":4,"ticks":1}]},
+    {"id":4,"callFrame":{"functionName":"total","scriptId":"11","url":"file:///w/app/src/orders.ts?t=1","lineNumber":24,"columnNumber":14},"hitCount":1},
+    {"id":5,"callFrame":{"functionName":"add","scriptId":"13","url":"file:///w/app/node_modules/lib/index.js","lineNumber":3,"columnNumber":10},"hitCount":1},
+    {"id":6,"callFrame":{"functionName":"listOnTimeout","scriptId":"5","url":"node:internal/timers","lineNumber":500,"columnNumber":24},"hitCount":1},
+    {"id":7,"callFrame":{"functionName":"(program)","scriptId":"0","url":"","lineNumber":-1,"columnNumber":-1},"hitCount":1},
+    {"id":8,"callFrame":{"functionName":"run","scriptId":"31","url":"file:///w/app-tools/run.js","lineNumber":3,"columnNumber":12},"hitCount":1},
+    {"id":9,"callFrame":{"functionName":"","scriptId":"41","url":"file:///w/app/src/start%20up.js","lineNumber":1,"columnNumber":10},"hitCount":1}
+  ],
+  "startTime": 1000000,
+  "endTime": 1012000,
+  "samples": [3,2,4,5,6,8,9,7],
+  "timeDeltas": [1000,1000,1000,1000,1000,1000,1000,1000]
+}

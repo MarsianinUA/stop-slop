@@ -1,6 +1,6 @@
 # Rules
 
-All 115 rules stop-slop checks. `stop-slop rules` prints the same list, and each rule lives in its own folder under `rules/`.
+All 116 rules stop-slop checks. `stop-slop rules` prints the same list, and each rule lives in its own folder under `rules/`.
 
 - **error.** The rule is sure. After a fix, none of these may remain.
 - **candidate.** A hunch. The program flags it, the agent decides if it's a real problem, and a false one goes to the ignore list with a reason.
@@ -108,6 +108,7 @@ Objects that travel through functions that barely use them.
 |---|---|---|---|
 | [`no-loose-constant`](../rules/config/no-loose-constant/rule.toml) | A literal constant loose at the top of a runtime file without a class | candidate |  |
 | [`no-process-env`](../rules/config/no-process-env/rule.toml) | `process.env` read outside a `*.config.ts` file or an env helper | error |  |
+| [`no-stand-special-case`](../rules/config/no-stand-special-case/rule.toml) | Code that mentions `/stand`, `STOP_SLOP`, `stand-guest`, `microsandbox` or `preload.cjs`, so the app behaves otherwise on the stand | error |  |
 
 ## Errors and async
 

@@ -1,0 +1,13 @@
+services:
+  db:
+    image: postgres:17
+    volumes: ["pgdata:/var/lib/postgresql/data"]
+    deploy: { resources: { limits: { cpus: "1", memory: 512m } } }
+  load:
+    image: node:22
+    volumes: ["PGData:/data"]
+    deploy: { resources: { limits: { cpus: "1", memory: 512m } } }
+volumes:
+  pgdata: {}
+  PGData: {}
+x-stand: { workload: load }

@@ -1,0 +1,12 @@
+services:
+  api:
+    image: node:22
+    volumes: ["${STAND_REPO}:/w/app"]
+    expose: [3000]
+    deploy: { resources: { limits: { cpus: "1", memory: 512m } } }
+  load:
+    image: node:24
+    volumes: ["${STAND_REPO}:/w/app"]
+    depends_on: [api]
+    deploy: { resources: { limits: { cpus: "1", memory: 512m } } }
+x-stand: { workload: load }

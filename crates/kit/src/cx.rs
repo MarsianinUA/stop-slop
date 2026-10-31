@@ -2,6 +2,7 @@ use std::fmt::Display;
 
 use oxc_span::Span;
 
+use crate::file::path_span;
 use crate::{Facts, File};
 
 pub struct Cx<'s, 'a> {
@@ -26,11 +27,23 @@ impl<'s, 'a> Cx<'s, 'a> {
     /// Records the finding at once: `cx.report(span);` alone is a finding,
     /// `.arg` and `.fix` only add to it.
     pub fn report(&mut self, span: Span) -> Reported<'_> {
+        self.push(span, false)
+    }
+
+    /// A finding about the file's path rather than its code, at an empty span where the code
+    /// starts: it belongs to no function, and a diff touches it only by adding or renaming the
+    /// file. The one way to make one, so no rule reports the path as code.
+    pub fn report_path(&mut self) -> Reported<'_> {
+        self.push(path_span(self.file), true)
+    }
+
+    fn push(&mut self, span: Span, on_path: bool) -> Reported<'_> {
         Reported {
             report: self.out.push_mut(Report {
                 span,
                 args: Vec::new(),
                 edits: Vec::new(),
+                on_path,
             }),
         }
     }
@@ -65,4 +78,6 @@ pub struct Report {
     pub span: Span,
     pub args: Vec<(&'static str, String)>,
     pub edits: Vec<Edit>,
+    /// Made by [`Cx::report_path`].
+    pub on_path: bool,
 }

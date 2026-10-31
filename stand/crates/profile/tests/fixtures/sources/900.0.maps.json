@@ -1,0 +1,25 @@
+{
+  "file:///w/app/dist/a.js": {
+    "map": {
+      "version": 3,
+      "sourceRoot": "../src",
+      "sources": [
+        "a.ts"
+      ],
+      "names": [],
+      "mappings": "AAAA"
+    },
+    "base": "/w/app/dist/a.js.map"
+  },
+  "file:///w/app/dist/c.js": {
+    "map": {
+      "version": 3,
+      "sources": [
+        "C:/src/c.ts"
+      ],
+      "names": [],
+      "mappings": "AAAA"
+    },
+    "base": "/w/app/dist/c.js.map"
+  }
+}

@@ -1,0 +1,6 @@
+services:
+  load:
+    image: node:22
+    healthcheck: curl -f http://localhost:3000/health
+    deploy: { resources: { limits: { cpus: "1", memory: 512m } } }
+x-stand: { workload: load }

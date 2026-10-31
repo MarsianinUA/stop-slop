@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 
 use camino::{Utf8Path, Utf8PathBuf};
 use repo::{
-    BranchDistance, BranchTip, Change, ChangedFile, LineRange, Oid, Repo, RepoError, Snapshot,
+    BranchDistance, BranchTip, Change, ChangedFile, Cut, LineRange, Oid, Repo, RepoError, Snapshot,
 };
 use testkit::TempRepo;
 
@@ -540,14 +540,122 @@ fn write_leaves_a_read_only_file_alone() {
 #[test]
 fn a_git_error_carries_the_command_and_stderr() {
     let t = TempRepo::new();
-    t.write("a.ts", "a\n").commit("init");
 
-    match open(&t).at_rev("no-such") {
+    // Without a commit, `HEAD` names none.
+    match open(&t).worktree().head() {
         Err(RepoError::Git { command, stderr }) => {
             assert!(command.contains("rev-parse"), "{command}");
-            assert!(command.contains("no-such"), "{command}");
+            assert!(command.contains("HEAD"), "{command}");
             assert!(!stderr.is_empty());
         }
+        other => panic!("{other:?}"),
+    }
+}
+
+#[test]
+fn at_rev_of_a_name_that_is_not_a_commit_is_unknown_rev() {
+    let t = TempRepo::new();
+    t.write("a.ts", "a\n").commit("init");
+    let tree = t.git(&["rev-parse", "HEAD^{tree}"]);
+
+    for rev in ["no-such", "-x", tree.as_str()] {
+        match open(&t).at_rev(rev) {
+            Err(RepoError::UnknownRev(name)) => assert_eq!(name, rev),
+            other => panic!("{rev}: {other:?}"),
+        }
+    }
+}
+
+#[test]
+fn has_tree_takes_only_the_full_oid_of_a_tree_of_the_repo() {
+    let t = TempRepo::new();
+    t.write("a.ts", "a\n").commit("init");
+    let (tree, commit) = (
+        t.git(&["rev-parse", "HEAD^{tree}"]),
+        t.git(&["rev-parse", "HEAD"]),
+    );
+    let repo = open(&t);
+
+    assert!(repo.has_tree(&tree).unwrap());
+    let foreign = "0123456789abcdef0123456789abcdef01234567";
+    for other in [
+        commit.as_str(),
+        &tree[..7],
+        foreign,
+        "HEAD",
+        "no such",
+        "-x",
+        "",
+    ] {
+        assert!(!repo.has_tree(other).unwrap(), "{other}");
+    }
+}
+
+#[test]
+fn changed_since_compares_each_file_on_disk_with_its_blob_in_the_tree() {
+    let t = TempRepo::new();
+    t.write("src/same.ts", "same\n")
+        .write("src/edited.ts", "old\n")
+        .write("src/gone.ts", "gone\n")
+        .write("src/crlf.ts", "a\n")
+        .commit("init");
+    // As the stand takes the work tree: an untracked file goes in, the index stays.
+    t.write("src/untracked.ts", "new\n");
+    t.git(&["add", "-A"]);
+    let tree = t.git(&["write-tree"]);
+    t.git(&["reset", "-q"]);
+
+    t.write("src/edited.ts", "new\n")
+        .write("src/added.ts", "added\n");
+    fs::remove_file(t.path().join("src/gone.ts")).unwrap();
+    // `git add` would store this file as it is in the tree.
+    t.git(&["config", "core.autocrlf", "true"]);
+    t.write("src/crlf.ts", "a\r\n");
+
+    let asked = paths(&[
+        "src/same.ts",
+        "src/edited.ts",
+        "src/gone.ts",
+        "src/untracked.ts",
+        "src/added.ts",
+        "src/crlf.ts",
+        "src/never.ts",
+    ]);
+    let changed = open(&t).changed_since(&tree, &asked).unwrap();
+    let expected: BTreeSet<Utf8PathBuf> = paths(&["src/added.ts", "src/edited.ts", "src/gone.ts"])
+        .into_iter()
+        .collect();
+    assert_eq!(changed, expected);
+}
+
+#[test]
+fn fetch_pr_takes_the_head_and_the_base_from_origin() {
+    let t = TempRepo::new();
+    t.write("a.ts", "a\n").commit("main");
+    t.branch("pr").write("a.ts", "pr\n").commit("pr");
+    let (main, head) = (t.git(&["rev-parse", "main"]), t.git(&["rev-parse", "pr"]));
+    let origin = tempfile::tempdir().unwrap();
+    let url = origin.path().to_str().expect("a UTF-8 temp path");
+    t.git(&["init", "-q", "--bare", url]);
+    // By URL: no `origin/*` refs exist before the fetch.
+    t.git(&[
+        "push",
+        "-q",
+        url,
+        "main",
+        "pr:refs/pull/1/head",
+        "pr:refs/tags/v1",
+    ]);
+    t.git(&["remote", "add", "origin", url]);
+
+    open(&t).fetch_pr(1, "main", &head).unwrap();
+    assert_eq!(t.git(&["rev-parse", "refs/stop-slop/pr-1"]), head);
+    assert_eq!(t.git(&["rev-parse", "refs/remotes/origin/main"]), main);
+    // A plain fetch would bring `v1` along, as it sits on the head.
+    assert_eq!(t.git(&["tag", "--list"]), "");
+
+    match open(&t).fetch_pr(1, "main", &main) {
+        Err(RepoError::PrMoved { number: 1 }) => {}
         other => panic!("{other:?}"),
     }
 }
@@ -561,13 +669,18 @@ fn repo_and_snapshot_can_be_shared_between_threads() {
 
 const GLOBS: &[&str] = &["*.ts", "*.tsx", "*.mts", "*.cts"];
 
-fn changed(path: &str, change: Change, ranges: &[(u32, u32)]) -> ChangedFile {
+/// `cuts` are `(start, count)`.
+fn changed(path: &str, change: Change, ranges: &[(u32, u32)], cuts: &[(u32, u32)]) -> ChangedFile {
     ChangedFile {
         path: path.into(),
         change,
         lines: ranges
             .iter()
             .map(|&(start, end)| LineRange { start, end })
+            .collect(),
+        cuts: cuts
+            .iter()
+            .map(|&(start, count)| Cut { start, count })
             .collect(),
     }
 }
@@ -603,13 +716,18 @@ fn changes_of_the_worktree_take_commits_edits_and_untracked_files() {
     assert_eq!(
         repo.worktree().changes(&base(&repo), GLOBS).unwrap(),
         [
-            changed("src/dirty.ts", Change::Modified, &[(1, 1)]),
-            changed("src/dropped.ts", Change::Untracked, &[(1, u32::MAX)]),
-            changed("src/gone.ts", Change::Deleted, &[]),
-            changed("src/keep.ts", Change::Modified, &[(2, 2), (4, 4)]),
-            changed("src/loose.ts", Change::Untracked, &[(1, u32::MAX)]),
-            changed("src/new.ts", Change::Added, &[(1, 3)]),
-            changed("src/staged.ts", Change::Added, &[(1, 1)]),
+            changed("src/dirty.ts", Change::Modified, &[(1, 1)], &[(1, 1)]),
+            changed("src/dropped.ts", Change::Untracked, &[(1, u32::MAX)], &[]),
+            changed("src/gone.ts", Change::Deleted, &[], &[(0, 0)]),
+            changed(
+                "src/keep.ts",
+                Change::Modified,
+                &[(2, 2), (4, 4)],
+                &[(2, 1), (4, 1), (5, 0)],
+            ),
+            changed("src/loose.ts", Change::Untracked, &[(1, u32::MAX)], &[]),
+            changed("src/new.ts", Change::Added, &[(1, 3)], &[]),
+            changed("src/staged.ts", Change::Added, &[(1, 1)], &[]),
         ]
     );
 }
@@ -667,7 +785,7 @@ fn changes_show_a_renamed_file_under_its_new_path_with_the_edit_only() {
 
     assert_eq!(
         repo.worktree().changes(&base(&repo), GLOBS).unwrap(),
-        [changed("src/new.ts", Change::Modified, &[(4, 4)])]
+        [changed("src/new.ts", Change::Renamed, &[(4, 4)], &[(4, 1)])]
     );
 }
 
@@ -689,11 +807,11 @@ fn changes_read_odd_names_and_bodies() {
     assert_eq!(
         repo.worktree().changes(&base(&repo), GLOBS).unwrap(),
         [
-            changed("src/body.ts", Change::Modified, &[(3, 3)]),
-            changed("src/bytes.ts", Change::Modified, &[(2, 2)]),
-            changed("src/empty.ts", Change::Added, &[]),
-            changed("src/my file.ts", Change::Added, &[(1, 1)]),
-            changed("src/файл ё.ts", Change::Added, &[(1, 1)]),
+            changed("src/body.ts", Change::Modified, &[(3, 3)], &[(1, 0)]),
+            changed("src/bytes.ts", Change::Modified, &[(2, 2)], &[(2, 1)]),
+            changed("src/empty.ts", Change::Added, &[], &[]),
+            changed("src/my file.ts", Change::Added, &[(1, 1)], &[]),
+            changed("src/файл ё.ts", Change::Added, &[(1, 1)], &[]),
         ]
     );
 }
@@ -711,7 +829,7 @@ fn changes_of_a_revision_skip_the_disk() {
             .unwrap()
             .changes(&base(&repo), GLOBS)
             .unwrap(),
-        [changed("a.ts", Change::Modified, &[(1, 1)])]
+        [changed("a.ts", Change::Modified, &[(1, 1)], &[(1, 1)])]
     );
 }
 
@@ -773,9 +891,14 @@ fn the_users_diff_config_changes_nothing() {
     assert_eq!(
         plain.0,
         [
-            changed("src/a.ts", Change::Modified, &[(2, 2), (4, 4)]),
-            changed("src/e.ts", Change::Added, &[(1, 1)]),
-            changed("src/new.ts", Change::Modified, &[(4, 4)]),
+            changed(
+                "src/a.ts",
+                Change::Modified,
+                &[(2, 2), (4, 4)],
+                &[(2, 1), (4, 1)]
+            ),
+            changed("src/e.ts", Change::Added, &[(1, 1)], &[]),
+            changed("src/new.ts", Change::Renamed, &[(4, 4)], &[(4, 1)]),
         ]
     );
 

@@ -1,0 +1,14 @@
+services:
+  prepare:
+    image: node:22
+    volumes: ["${STAND_REPO}:/w/app"]
+    deploy:
+      resources: { limits: { cpus: "1", memory: 512m } }
+      replicas: 2
+  load:
+    image: node:22
+    volumes: ["${STAND_REPO}:/w/app"]
+    depends_on:
+      prepare: { condition: service_completed_successfully }
+    deploy: { resources: { limits: { cpus: "1", memory: 512m } } }
+x-stand: { workload: load }

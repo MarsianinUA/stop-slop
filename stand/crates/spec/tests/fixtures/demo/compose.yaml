@@ -1,0 +1,57 @@
+# The recipe of the stand's demo repository, built outside git: `demand` reads its limits.
+services:
+  db:
+    image: postgres:17-alpine
+    environment: { POSTGRES_PASSWORD: stand }
+    volumes: ["pgdata:/var/lib/postgresql/data"]
+    expose: [5432]
+    healthcheck: { test: ["CMD", "pg_isready", "-U", "postgres"], interval: 1s, retries: 60 }
+    deploy: { resources: { limits: { cpus: "1", memory: 512m } } }
+  prepare:
+    image: node:22-slim
+    working_dir: /w/app
+    volumes: ["${STAND_REPO}:/w/app"]
+    command: ["sh", "-c", "npm install --no-audit --no-fund --cache /w/.npm && npm run build"]
+    deploy: { resources: { limits: { cpus: "2", memory: 1g } } }
+    x-stand: { network: public }
+  migrate:
+    image: node:22-slim
+    working_dir: /w/app
+    volumes: ["${STAND_REPO}:/w/app"]
+    command: ["npm", "run", "migrate"]
+    depends_on:
+      prepare: { condition: service_completed_successfully }
+      db: { condition: service_healthy }
+    deploy: { resources: { limits: { cpus: "1", memory: 256m } } }
+  api:
+    image: node:22-slim
+    working_dir: /w/app
+    volumes: ["${STAND_REPO}:/w/app", ".:/harness:ro"]
+    command: ["node", "dist/main.js"]
+    expose: [3000]
+    depends_on:
+      migrate: { condition: service_completed_successfully }
+      db: { condition: service_healthy }
+    healthcheck: { test: ["CMD", "node", "/harness/ping.js"], interval: 1s, retries: 30 }
+    deploy: { resources: { limits: { cpus: "1", memory: 512m } } }
+    x-stand: { profile: node }
+  load:
+    image: node:22-slim
+    working_dir: /harness
+    volumes: [".:/harness:ro"]
+    command: ["node", "load.mjs", "http://api:3000"]
+    depends_on: { api: { condition: service_healthy } }
+    deploy: { resources: { limits: { cpus: "1", memory: 256m } } }
+volumes: { pgdata: {} }
+x-stand:
+  workload: load
+  repeat: 3
+  setup_timeout: 5m
+  timeout: 2m
+  probes:
+    orders:
+      in: db
+      at: after-workload
+      run: ["psql", "-U", "postgres", "-At", "-c", "select row_to_json(o) from orders o order by id"]
+      key: /id
+      ignore: [/at]

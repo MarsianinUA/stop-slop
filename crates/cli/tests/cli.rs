@@ -160,7 +160,7 @@ fn rules_fails_when_stdout_cannot_be_written() {
         .stdout(full)
         .output()
         .expect("start stop-slop");
-    assert_eq!(code(&out), 2);
+    assert_eq!(code(&out), 3);
     assert!(stderr(&out).contains("stdout: "), "{}", stderr(&out));
 }
 
@@ -318,8 +318,12 @@ fn check(dir: &Path, args: &[&str], expected: i32) -> Value {
     json(&out)
 }
 
+fn sha(t: &TempRepo, rev: &str) -> String {
+    t.git(&["rev-parse", rev])
+}
+
 fn sha7(t: &TempRepo, rev: &str) -> String {
-    t.git(&["rev-parse", rev])[..7].to_owned()
+    sha(t, rev)[..7].to_owned()
 }
 
 fn is_fingerprint(value: &Value, rule: &str) -> bool {
@@ -387,11 +391,14 @@ fn check_reports_findings_of_the_branch_as_json() {
         .collect();
     assert_eq!(
         keys,
-        BTreeSet::from(["base", "files", "skipped", "findings", "fixed"])
+        BTreeSet::from([
+            "pr", "base", "files", "skipped", "findings", "fixed", "rules"
+        ])
     );
+    assert_eq!(report["pr"], Value::Null);
     assert_eq!(
         report["base"],
-        json!({"ref": "main", "sha": sha7(&t, "main"), "reason": "flag"})
+        json!({"ref": "main", "sha": sha(&t, "main"), "reason": "flag"})
     );
     assert_eq!(
         report["files"],
@@ -415,8 +422,9 @@ fn check_reports_findings_of_the_branch_as_json() {
             "column": 20,
             "endLine": 2,
             "endColumn": 23,
-            "message": meta("no-any").message,
+            "function": "BETA",
             "inHunk": false,
+            "touched": false,
             "fixable": false,
             "fingerprint": any["fingerprint"],
         })
@@ -431,11 +439,114 @@ fn check_reports_findings_of_the_branch_as_json() {
             "column": 4,
             "endLine": 1,
             "endColumn": 12,
-            "message": meta("todo-owner").message,
+            "function": "FRESH",
             "inHunk": true,
+            "touched": true,
             "fixable": false,
             "fingerprint": todo["fingerprint"],
         })
+    );
+
+    // The entries of `rules --json` for the rules of the findings and the active agent rules.
+    let all = json(&run(t.path(), &["rules", "--json"]));
+    let expected: Vec<&Value> = list(&all)
+        .iter()
+        .filter(|rule| {
+            ["no-any", "todo-owner"].contains(&rule["id"].as_str().unwrap())
+                || (rule["kind"] == "agent" && rule["active"] == true)
+        })
+        .collect();
+    let carried: Vec<&Value> = list(&report["rules"]).iter().collect();
+    assert_eq!(carried, expected);
+    assert!(
+        carried.iter().any(|rule| rule["kind"] == "agent"),
+        "{report}"
+    );
+}
+
+#[test]
+fn check_names_the_function_a_finding_sits_in_and_whether_the_branch_touched_it() {
+    let service = "export class OrdersService {\n  \
+                   cached(input: any): number {\n    \
+                     // a note\n    \
+                     return input;\n  \
+                   }\n\n  \
+                   counted(input: any): number {\n    \
+                     return input;\n  \
+                   }\n\
+                   }\n";
+    let t = TempRepo::new();
+    t.write("src/orders.service.ts", service)
+        .write("src/money.ts", "export const cents = 1;\n")
+        .commit("main");
+    let edited = service
+        .replace("// a note", "// a longer note")
+        .replace("return input;\n  }\n}", "return input + 1;\n  }\n}");
+    t.branch("feat")
+        .write("src/orders.service.ts", &edited)
+        .commit("edit");
+    t.git(&["mv", "src/money.ts", "src/moneyBag.ts"]);
+    t.commit("rename");
+
+    let report = check(t.path(), &["check", "--base", "main", "--json"], 1);
+    let of = |rule: &str, file: &str| -> Vec<(Value, Value)> {
+        findings(&report)
+            .iter()
+            .filter(|finding| finding["rule"] == rule && finding["file"] == file)
+            .map(|finding| (finding["function"].clone(), finding["touched"].clone()))
+            .collect()
+    };
+    assert_eq!(
+        of("no-any", "src/orders.service.ts"),
+        [
+            (json!("OrdersService.cached"), json!(false)),
+            (json!("OrdersService.counted"), json!(true)),
+        ],
+        "a comment is no change of the code"
+    );
+    assert_eq!(
+        of("file-name-pattern", "src/moneyBag.ts"),
+        [(Value::Null, json!(true))],
+        "the branch renamed the file"
+    );
+    assert_eq!(
+        of("file-name-pattern", "src/orders.service.ts"),
+        [],
+        "{report}"
+    );
+}
+
+#[test]
+fn check_suggests_a_file_name_made_of_the_files_own() {
+    let t = TempRepo::new();
+    let files = [
+        "src/moneyBag.ts",
+        "src/order_Totals.Service.tsx",
+        "src/Index.ts",
+    ];
+    for file in files {
+        t.write(file, "export const LIMIT = 1;\n");
+    }
+    t.commit("main");
+
+    let mut args = vec!["check", "--json", "--files"];
+    args.extend(files);
+    let report = check(t.path(), &args, 1);
+    let examples: Vec<(&str, &str)> = findings(&report)
+        .iter()
+        .filter(|finding| finding["rule"] == "file-name-pattern")
+        .map(|finding| {
+            let example = finding["detail"]["example"].as_str().expect("an example");
+            (finding["file"].as_str().expect("file"), example)
+        })
+        .collect();
+    assert_eq!(
+        examples,
+        [
+            ("src/Index.ts", "index.ts"),
+            ("src/moneyBag.ts", "money-bag.<role>.ts"),
+            ("src/order_Totals.Service.tsx", "order-totals.service.tsx"),
+        ]
     );
 }
 
@@ -452,7 +563,7 @@ fn check_json_is_one_line_and_pretty_indents_it() {
     assert_eq!(code(&pretty), 1, "{}", stderr(&pretty));
     let text = stdout(&pretty);
     assert!(
-        text.starts_with("{\n  \"base\": {\n    \"ref\": \"main\","),
+        text.starts_with("{\n  \"pr\": null,\n  \"base\": {\n    \"ref\": \"main\","),
         "{text}"
     );
     assert!(text.ends_with("\n}\n"), "{text}");
@@ -504,10 +615,20 @@ fn check_rejects_flags_that_do_not_go_together() {
         &["check", "--base", "main", "--files", "src/new.constants.ts"],
         &["check", "--base", "main", "--all"],
         &["check", "--pretty"],
+        &["check", "--pr", "1", "--rev", "feat"],
+        &["check", "--pr", "1", "--base", "main"],
+        &["check", "--pr", "1", "--files", "src/new.constants.ts"],
+        &["check", "--pr", "1", "--all"],
+        &["check", "--pr", "1", "--fix"],
     ] {
         let out = run(t.path(), args);
         assert_eq!(code(&out), 2, "{args:?}");
-        assert!(!stderr(&out).is_empty(), "{args:?}");
+        // clap's error, so `--pr` did not get as far as `gh`.
+        assert!(
+            stderr(&out).starts_with("error: "),
+            "{args:?}: {}",
+            stderr(&out)
+        );
     }
 }
 
@@ -687,6 +808,294 @@ fn check_fails_with_the_cause() {
     }
 }
 
+/// The whole failure line of `--json`, with a `cause` that holds `cause`, and stderr that ends
+/// with the `next` commands.
+fn assert_failure(out: &Output, exit: i32, phase: &str, cause: &str, next: &[&str]) {
+    let (text, errors) = (stdout(out), stderr(out));
+    assert_eq!(code(out), exit, "{errors}");
+    assert_eq!(text.lines().count(), 1, "{text}");
+    let line = json(out);
+    let found = line["failure"]["cause"].as_str().unwrap_or_default();
+    assert!(found.contains(cause), "{line}");
+    assert_eq!(
+        line,
+        json!({"failure": {"phase": phase, "cause": found}, "next": next})
+    );
+    let tail: String = next
+        .iter()
+        .map(|command| format!("next: {command}\n"))
+        .collect();
+    assert!(errors.ends_with(&tail), "{errors}");
+    assert_eq!(errors.matches("\nnext: ").count(), next.len(), "{errors}");
+}
+
+#[test]
+fn json_prints_one_failure_line_with_the_phase_and_next_on_2_and_3() {
+    let base = ["stop-slop check --base <ref> --json"];
+    let t = branch_repo();
+    for (args, phase, cause, next) in [
+        (
+            &["check", "--base", "no-such", "--json"][..],
+            "base",
+            "base `no-such` is not a commit",
+            &base[..],
+        ),
+        (
+            &["check", "--rev", "no-such", "--base", "main", "--json"],
+            "repo",
+            "`no-such` is not a commit",
+            &[],
+        ),
+        (
+            &["check", "--files", "src/missing.constants.ts", "--json"],
+            "files",
+            "missing.constants.ts",
+            &[],
+        ),
+        (
+            &["check", "--json", "--bogus"],
+            "args",
+            "unexpected argument '--bogus' found",
+            &[],
+        ),
+        (
+            &["check", "--rev", "HEAD", "--json"],
+            "args",
+            "not provided: --base <BASE>",
+            &[],
+        ),
+    ] {
+        assert_failure(&run(t.path(), args), 2, phase, cause, next);
+    }
+    let out = run(t.path(), &["enable", "--json"]);
+    assert_eq!(
+        (code(&out), stdout(&out)),
+        (2, String::new()),
+        "no `--json`"
+    );
+
+    // On the only branch, without `origin`, no base is found.
+    let lone = TempRepo::new();
+    lone.write("src/a.constants.ts", ANY).commit("main");
+    let out = run(lone.path(), &["check", "--json"]);
+    assert_failure(&out, 2, "base", "no base branch", &base);
+    // `ignore` and `hot` name themselves again.
+    let out = run(lone.path(), &["ignore", "no-any:000000", "--reason", "r"]);
+    assert_eq!(code(&out), 2, "{}", stderr(&out));
+    let next = "next: stop-slop ignore <fingerprint> --reason \"<reason>\" --base <ref>\n";
+    assert!(stderr(&out).ends_with(next), "{}", stderr(&out));
+    let (_dir, report) = report_of(&lone, |_| {});
+    let report = report.to_str().expect("a UTF-8 temp path");
+    let out = run(lone.path(), &["hot", report, "--json"]);
+    let next = ["stop-slop hot <report.json> --base <ref> --json"];
+    assert_failure(&out, 2, "base", "no base branch", &next);
+
+    write_config(&t, "disabled = [\"no-such\"]\n");
+    for command in ["check", "rules"] {
+        let out = run(t.path(), &[command, "--json"]);
+        assert_failure(&out, 2, "config", "disabled[0]", &[]);
+    }
+    write_config(&t, "disabled = [");
+    let out = run(t.path(), &["check", "--json"]);
+    assert_failure(&out, 2, "state", "config.toml:1:", &[]);
+
+    let out = run_outside(&["rules", "--json"]);
+    assert_failure(&out, 2, "repo", "not inside a git repository", &[]);
+
+    let empty = tempfile::tempdir().expect("create a temp folder");
+    let out = exe(t.path())
+        .env("PATH", empty.path())
+        .args(["check", "--json"])
+        .output()
+        .expect("start stop-slop");
+    assert_failure(&out, 3, "repo", "git: ", &[]);
+}
+
+/// Windows has no way to send Ctrl+C to one child process.
+#[cfg(unix)]
+#[test]
+fn ctrl_c_exits_with_130() {
+    use std::os::unix::process::ExitStatusExt;
+    use std::thread;
+    use std::time::{Duration, Instant};
+
+    let t = TempRepo::new();
+    // `SIGINT` before the handler is set ends the process by the signal, so a slow start gets
+    // a longer wait.
+    for wait in [100, 500, 2000] {
+        let mut child = exe(t.path())
+            .arg("hook")
+            .stdin(Stdio::piped())
+            .spawn()
+            .expect("start stop-slop");
+        thread::sleep(Duration::from_millis(wait));
+        let kill = Command::new("kill")
+            .args(["-INT", &child.id().to_string()])
+            .status()
+            .expect("start kill");
+        assert!(kill.success());
+        // `try_wait` keeps the piped stdin open, so the hook waits for its input; `wait` would
+        // close it. A `SIGINT` the process inherited as ignored, before the handler, would leave
+        // the hook waiting forever: the panic drops `child` with its stdin, and the hook ends.
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let status = loop {
+            if let Some(status) = child.try_wait().expect("wait for stop-slop") {
+                break status;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "stop-slop outlived SIGINT by 10 s"
+            );
+            thread::sleep(Duration::from_millis(10));
+        };
+        if status.signal().is_none() {
+            assert_eq!(status.code(), Some(130));
+            return;
+        }
+    }
+    panic!("stop-slop did not set its Ctrl+C handler within 2 s");
+}
+
+/// A script stands in for `gh` on Linux and macOS only: `Command` on Windows looks only for
+/// `gh.exe`.
+#[cfg(unix)]
+mod pr {
+    use std::env;
+    use std::ffi::{OsStr, OsString};
+    use std::iter;
+    use std::os::unix::fs::{PermissionsExt, symlink};
+
+    use tempfile::TempDir;
+
+    use super::*;
+
+    const TITLE: &str = "Cache market prices";
+
+    /// The reviewer is on `main`. A bare `origin` holds `main` and, as `refs/pull/1/head`, the
+    /// `feat` of `branch_repo`, which the reviewer's repo no longer has as a branch.
+    fn pr_repo() -> (TempRepo, TempDir, String) {
+        let t = branch_repo();
+        let origin = tempfile::tempdir().expect("create a temp folder");
+        let url = origin.path().to_str().expect("a UTF-8 temp path");
+        t.git(&["init", "-q", "--bare", url]);
+        t.git(&["push", "-q", url, "main", "feat:refs/pull/1/head"]);
+        t.git(&["remote", "add", "origin", url]);
+        let head = t.git(&["rev-parse", "feat"]);
+        t.checkout("main");
+        t.git(&["branch", "-q", "-D", "feat"]);
+        (t, origin, head)
+    }
+
+    /// A folder with a `gh` that answers `gh pr view 1` with `head`, `main` and `TITLE`, one per
+    /// line as `--jq` prints them, and fails for any other pull request.
+    fn gh_for_pr_1(head: &str) -> TempDir {
+        let bin = tempfile::tempdir().expect("create a temp folder");
+        let gh = bin.path().join("gh");
+        let script = format!(
+            "#!/bin/sh\n\
+             [ \"$1 $2 $3\" = 'pr view 1' ] || {{ echo \"no pull request $3\" >&2; exit 1; }}\n\
+             printf '%s\\n' {head} main '{TITLE}'\n"
+        );
+        fs::write(&gh, script).expect("write gh");
+        fs::set_permissions(&gh, fs::Permissions::from_mode(0o755)).expect("make gh runnable");
+        bin
+    }
+
+    fn path_with(bin: &Path) -> OsString {
+        let path = env::var_os("PATH").unwrap_or_default();
+        env::join_paths(iter::once(bin.to_owned()).chain(env::split_paths(&path))).expect("a PATH")
+    }
+
+    fn run_with_path(dir: &Path, path: impl AsRef<OsStr>, args: &[&str]) -> Output {
+        exe(dir)
+            .env("PATH", path)
+            .args(args)
+            .output()
+            .expect("start stop-slop")
+    }
+
+    #[test]
+    fn check_pr_checks_the_head_of_the_pull_request_against_its_base() {
+        let (t, _origin, head) = pr_repo();
+        let gh = gh_for_pr_1(&head);
+        let args = ["check", "--pr", "1", "--json"];
+        let out = run_with_path(t.path(), path_with(gh.path()), &args);
+        assert_eq!(code(&out), 1, "{}", stderr(&out));
+        let report = json(&out);
+        assert_eq!(
+            report["pr"],
+            json!({"number": 1, "head": head, "base": "main", "title": TITLE})
+        );
+        assert_eq!(
+            report["base"],
+            json!({"ref": "origin/main", "sha": sha(&t, "main"), "reason": "pr"})
+        );
+        assert_eq!(
+            finding_files(&report),
+            ["src/keep.constants.ts", "src/new.constants.ts"]
+        );
+
+        // The three steps `review.md` ran before `--pr` find the same.
+        assert_eq!(t.git(&["rev-parse", "refs/stop-slop/pr-1"]), head);
+        let args = [
+            "check",
+            "--rev",
+            "refs/stop-slop/pr-1",
+            "--base",
+            "origin/main",
+            "--json",
+        ];
+        let by_hand = check(t.path(), &args, 1);
+        assert_eq!(report["files"], by_hand["files"]);
+        assert_eq!(report["findings"], by_hand["findings"]);
+        // The working tree stays as it is.
+        assert_eq!(t.git(&["symbolic-ref", "--short", "HEAD"]), "main");
+        assert_eq!(t.git(&["status", "--porcelain"]), "");
+
+        let out = run_with_path(t.path(), path_with(gh.path()), &["check", "--pr", "1"]);
+        assert_eq!(code(&out), 1, "{}", stderr(&out));
+        let text = stdout(&out);
+        let lines: Vec<&str> = text.lines().take(2).collect();
+        assert_eq!(
+            lines,
+            [
+                format!("pr 1 {} into main", &head[..7]),
+                format!("base origin/main {} (pr)", sha7(&t, "main")),
+            ]
+        );
+    }
+
+    #[test]
+    fn check_pr_fails_with_phase_pr() {
+        let (t, _origin, head) = pr_repo();
+        let args = ["check", "--pr", "1", "--json"];
+        // `gh` names a head the fetch does not bring: a push came in between.
+        let moved = gh_for_pr_1(&t.git(&["rev-parse", "main"]));
+        let out = run_with_path(t.path(), path_with(moved.path()), &args);
+        let again = ["stop-slop check --pr 1 --json"];
+        assert_failure(&out, 2, "pr", "pull request 1 moved", &again);
+
+        let gh = gh_for_pr_1(&head);
+        let out = run_with_path(
+            t.path(),
+            path_with(gh.path()),
+            &["check", "--pr", "2", "--json"],
+        );
+        assert_failure(&out, 2, "pr", "pull request 2: gh: no pull request 2", &[]);
+
+        // On the Ubuntu runner `gh` sits beside `git` in `/usr/bin`: `PATH` gets only a link to
+        // `git`.
+        let git = env::split_paths(&env::var_os("PATH").unwrap_or_default())
+            .map(|dir| dir.join("git"))
+            .find(|git| git.is_file())
+            .expect("git on PATH");
+        let bin = tempfile::tempdir().expect("create a temp folder");
+        symlink(git, bin.path().join("git")).expect("link git");
+        let out = run_with_path(t.path(), bin.path(), &args);
+        assert_failure(&out, 2, "pr", "pull request 1: gh: ", &[]);
+    }
+}
+
 #[test]
 fn check_reports_a_file_that_does_not_parse() {
     let t = TempRepo::new();
@@ -773,7 +1182,7 @@ fn check_finds_a_raw_value_of_an_enum_from_outside_the_diff() {
     );
     let finding = &findings(&report)[0];
     assert_eq!(finding["kind"], "candidate");
-    let message = finding["message"].as_str().expect("a message");
+    let message = message(&report, finding);
     assert!(message.contains("`Source.Dashboard`"), "{message}");
 }
 
@@ -901,12 +1310,42 @@ fn check_holds_cognitive_complexity_to_the_max_of_config_toml() {
 
 fn messages(t: &TempRepo, file: &str, rule: &str) -> Vec<String> {
     let out = run(t.path(), &["check", "--files", file, "--json"]);
-    assert_ne!(code(&out), 2, "{}", stderr(&out));
-    findings(&json(&out))
+    assert!(code(&out) <= 1, "{}", stderr(&out));
+    let report = json(&out);
+    findings(&report)
         .iter()
         .filter(|finding| finding["rule"] == rule)
-        .map(|finding| finding["message"].as_str().expect("a message").to_owned())
+        .map(|finding| message(&report, finding))
         .collect()
+}
+
+/// The rule's message from `rules` with the finding's `detail` in its placeholders, as an
+/// agent reads it.
+fn message(report: &Value, finding: &Value) -> String {
+    let message = rule(&report["rules"], finding["rule"].as_str().expect("rule"))["message"]
+        .as_str()
+        .expect("a message");
+    let detail = finding["detail"].as_object().cloned().unwrap_or_default();
+    let mut filled = String::new();
+    let mut rest = message;
+    while let Some(open) = rest.find('{') {
+        filled.push_str(&rest[..open]);
+        let after = &rest[open + 1..];
+        let value = after
+            .find('}')
+            .and_then(|close| Some((close, detail.get(&after[..close])?)));
+        match value {
+            Some((close, value)) => {
+                filled.push_str(value.as_str().expect("a string"));
+                rest = &after[close + 1..];
+            }
+            None => {
+                filled.push('{');
+                rest = after;
+            }
+        }
+    }
+    filled + rest
 }
 
 const IO_FEAT: &str = "import { readFileSync } from 'fs'; export const read: any = readFileSync;\n\
@@ -990,7 +1429,7 @@ fn check_fix_writes_the_fixes_and_checks_the_new_text() {
     );
     assert_eq!(
         report["base"],
-        json!({"ref": "main", "sha": sha7(&t, "main"), "reason": "flag"})
+        json!({"ref": "main", "sha": sha(&t, "main"), "reason": "flag"})
     );
     assert_eq!(
         report["files"],
@@ -1357,7 +1796,7 @@ fn hook_passes_a_folder_git_refuses_but_fails_without_git() {
         .args(["check", "--all"])
         .output()
         .expect("start stop-slop");
-    assert_eq!(code(&out), 2);
+    assert_eq!(code(&out), 3);
     assert!(
         stderr(&out).contains("dubious ownership"),
         "{}",
@@ -1366,10 +1805,18 @@ fn hook_passes_a_folder_git_refuses_but_fails_without_git() {
     let out = feed(foreign(), &hook_input(&t.path().join("src/a.constants.ts")));
     assert_eq!((code(&out), stderr(&out)), (0, String::new()), "foreign");
 
-    let mut no_git = exe(t.path());
-    no_git.env("PATH", empty.path());
-    let out = feed(no_git, &hook_input(&t.path().join("src/a.constants.ts")));
-    assert_eq!(code(&out), 2, "no git");
+    let no_git = || {
+        let mut command = exe(t.path());
+        command.env("PATH", empty.path());
+        command
+    };
+    let out = no_git()
+        .args(["check", "--all"])
+        .output()
+        .expect("start stop-slop");
+    assert_eq!(code(&out), 3, "check without git");
+    let out = feed(no_git(), &hook_input(&t.path().join("src/a.constants.ts")));
+    assert_eq!(code(&out), 2, "hook without git");
     assert!(stderr(&out).contains("git"), "{}", stderr(&out));
 }
 
@@ -1586,7 +2033,13 @@ fn ignore_of_an_unknown_fingerprint_fails() {
     let t = branch_repo();
     let out = run(t.path(), &["ignore", "no-any:000000", "--reason", "r"]);
     assert_eq!(code(&out), 2);
+    assert_eq!(stdout(&out), "");
     assert!(stderr(&out).contains("no-any:000000"), "{}", stderr(&out));
+    assert!(
+        stderr(&out).ends_with("\nnext: stop-slop check --json\n"),
+        "{}",
+        stderr(&out)
+    );
     assert!(!t.path().join(".git/info/stop-slop/ignore.json").exists());
 
     let t = old_repo();
@@ -1665,4 +2118,269 @@ fn ignore_with_a_base_checks_the_files_from_it() {
         .map(|entry| entry.file.into_string())
         .collect();
     assert_eq!(files, ["src/old.constants.ts"]);
+}
+
+const REPORT: &str = include_str!("../../../shared/fixtures/report.json");
+
+/// `main` has `src/util/money.ts` with `formatMoney` where the fixture's report starts it, at
+/// 3:28. `feat` adds `src/orders/orders.service.ts`: `total` on lines 1-3, and `buildReport` with
+/// an `any` on lines 40-42, around the fixture's 40:21.
+fn hot_repo() -> TempRepo {
+    let t = TempRepo::new();
+    t.write(
+        "src/util/money.ts",
+        "\n\nexport const formatMoney = (cents: number): string => `${cents / 100}`;\n",
+    )
+    .commit("main");
+    let service = format!(
+        "export function total(prices: number[]): number {{\n  return prices.length;\n}}\n{}\
+         export function buildReport(rows: any[]): number {{\n  return rows.length;\n}}\n",
+        "\n".repeat(36)
+    );
+    t.branch("feat")
+        .write("src/orders/orders.service.ts", &service)
+        .commit("feat");
+    t
+}
+
+/// The fixture with the head tree of `t`, changed by `edit`, in a folder of its own.
+fn report_of(t: &TempRepo, edit: impl FnOnce(&mut Value)) -> (tempfile::TempDir, PathBuf) {
+    let mut report: Value = serde_json::from_str(REPORT).expect("the fixture is JSON");
+    report["head"]["tree"] = json!(t.git(&["rev-parse", "HEAD^{tree}"]));
+    edit(&mut report);
+    let dir = tempfile::tempdir().expect("create a temp folder");
+    let path = dir.path().join("report.json");
+    fs::write(&path, report.to_string()).expect("write the report");
+    (dir, path)
+}
+
+fn hot(t: &TempRepo, report: &Path, args: &[&str]) -> Output {
+    let report = report.to_str().expect("a UTF-8 temp path");
+    let mut all = vec!["hot", report, "--base", "main"];
+    all.extend(args);
+    run(t.path(), &all)
+}
+
+fn line_of(finding: &Value) -> u64 {
+    finding["line"].as_u64().expect("line")
+}
+
+#[test]
+fn hot_lists_the_hot_functions_of_the_branch_with_the_findings_inside() {
+    let t = hot_repo();
+    let (_dir, report) = report_of(&t, |_| {});
+    let out = hot(&t, &report, &["--json"]);
+    assert_eq!(code(&out), 1, "{}", stderr(&out));
+    let found = json(&out);
+
+    assert_eq!(
+        found["base"],
+        json!({"ref": "main", "sha": sha(&t, "main"), "reason": "flag"})
+    );
+    // `formatMoney` is hot too, but its file is not of the branch.
+    let [row] = found["hot"].as_array().expect("hot").as_slice() else {
+        panic!("one hot function: {found}");
+    };
+    let inside = row["findings"].as_array().expect("findings");
+    assert!(
+        inside
+            .iter()
+            .any(|finding| finding["rule"] == "no-any" && finding["line"] == 40),
+        "{row}"
+    );
+    // In the form of `check`, and only those on the lines of the function.
+    let checked = check(t.path(), &["check", "--base", "main", "--json"], 1);
+    let on_its_lines: Vec<Value> = findings(&checked)
+        .iter()
+        .filter(|finding| (40..=42).contains(&line_of(finding)))
+        .cloned()
+        .collect();
+    assert_eq!(*inside, on_its_lines);
+    // The rules of those findings, without the agent rules of `check`.
+    let ids: BTreeSet<&str> = inside
+        .iter()
+        .map(|finding| finding["rule"].as_str().unwrap())
+        .collect();
+    let carried: Vec<&Value> = list(&found["rules"]).iter().collect();
+    let expected: Vec<&Value> = list(&checked["rules"])
+        .iter()
+        .filter(|rule| ids.contains(rule["id"].as_str().unwrap()))
+        .collect();
+    assert_eq!(carried, expected);
+
+    let mut row = row.clone();
+    row["findings"] = json!([]);
+    assert_eq!(
+        row,
+        json!({
+            "service": "api",
+            "file": "src/orders/orders.service.ts",
+            "function": "buildReport",
+            "line": 40,
+            "endLine": 42,
+            "selfMs": 812.0,
+            "totalMs": 2100.0,
+            "entries": 1200,
+            "stale": false,
+            "findings": [],
+        })
+    );
+    assert_eq!(
+        found["unexercised"],
+        json!([{
+            "file": "src/orders/orders.service.ts",
+            "function": "total",
+            "line": 1,
+            "endLine": 3,
+            "stale": false,
+        }])
+    );
+    assert_eq!(found["coverage"], "collected");
+
+    let out = hot(&t, &report, &[]);
+    assert_eq!(code(&out), 1, "{}", stderr(&out));
+    let text = stdout(&out);
+    let lines: Vec<&str> = text.lines().collect();
+    let [base, row, unexercised] = lines.as_slice() else {
+        panic!("three lines: {text}");
+    };
+    assert_eq!(*base, format!("base main {} (flag)", sha7(&t, "main")));
+    assert!(
+        row.starts_with("812ms src/orders/orders.service.ts:40 buildReport api (")
+            && row.ends_with(", 1200 entries)"),
+        "{text}"
+    );
+    assert_eq!(
+        *unexercised,
+        "unexercised src/orders/orders.service.ts:1 total"
+    );
+}
+
+#[test]
+fn hot_without_coverage_names_no_function_unexercised_and_exits_with_1() {
+    let t = hot_repo();
+    let (_dir, bare) = report_of(&t, |report| {
+        report["coverage"] = Value::Null;
+        report["flags"] = json!([{"kind": "unprofiled"}]);
+    });
+    let out = hot(&t, &bare, &["--json"]);
+    assert_eq!(code(&out), 1, "{}", stderr(&out));
+    let found = json(&out);
+    assert_eq!(found["unexercised"], Value::Null);
+    assert_eq!(found["coverage"], "not-collected");
+    assert_eq!(found["hot"][0]["entries"], Value::Null);
+    let text = stdout(&hot(&t, &bare, &[]));
+    assert!(text.ends_with("\ncoverage: not collected\n"), "{text}");
+    assert!(!text.contains("unexercised"), "{text}");
+
+    // Without a hot function either, the missing coverage alone gives 1.
+    let (_dir, unknown) = report_of(&t, |report| {
+        report["hot"] = json!([]);
+        report["coverage"] = Value::Null;
+        report["flags"] = json!([
+            {"kind": "coverage-unknown", "stage": null, "service": "api"}
+        ]);
+    });
+    let out = hot(&t, &unknown, &["--json"]);
+    assert_eq!(code(&out), 1, "{}", stderr(&out));
+    assert_eq!(
+        json(&out),
+        json!({
+            "base": {"ref": "main", "sha": sha(&t, "main"), "reason": "flag"},
+            "hot": [],
+            "unexercised": null,
+            "coverage": "unknown",
+            "rules": [],
+        })
+    );
+    let out = hot(&t, &unknown, &[]);
+    assert_eq!(code(&out), 1, "{}", stderr(&out));
+    assert_eq!(
+        stdout(&out),
+        format!(
+            "base main {} (flag)\ncoverage: unknown: api left no coverage\n",
+            sha7(&t, "main")
+        )
+    );
+}
+
+#[test]
+fn hot_marks_a_function_of_a_file_edited_since_the_run_stale() {
+    let t = hot_repo();
+    let (_dir, report) = report_of(&t, |_| {});
+    let path = t.path().join("src/orders/orders.service.ts");
+    let text = fs::read_to_string(&path).expect("read the service");
+    fs::write(&path, format!("{text}\n")).expect("edit the service");
+
+    let found = json(&hot(&t, &report, &["--json"]));
+    assert_eq!(found["hot"][0]["stale"], true, "{found}");
+    assert_eq!(found["unexercised"][0]["stale"], true, "{found}");
+    let text = stdout(&hot(&t, &report, &[]));
+    assert!(
+        text.lines()
+            .nth(1)
+            .is_some_and(|line| line.ends_with(" stale")),
+        "{text}"
+    );
+}
+
+#[test]
+fn hot_of_a_branch_without_files_outside_tests_finds_nothing() {
+    let t = hot_repo();
+    t.git(&["checkout", "-q", "-b", "empty", "main"]);
+    let (_dir, report) = report_of(&t, |_| {});
+    let out = hot(&t, &report, &["--json"]);
+    assert_eq!(code(&out), 0, "{}", stderr(&out));
+    assert_eq!(
+        json(&out),
+        json!({
+            "base": {"ref": "main", "sha": sha(&t, "main"), "reason": "flag"},
+            "hot": [],
+            "unexercised": [],
+            "coverage": "collected",
+            "rules": [],
+        })
+    );
+
+    let (_dir, bare) = report_of(&t, |report| report["coverage"] = Value::Null);
+    let out = hot(&t, &bare, &[]);
+    assert_eq!(code(&out), 0, "{}", stderr(&out));
+    assert_eq!(
+        stdout(&out),
+        format!("base main {} (flag)\n", sha7(&t, "main"))
+    );
+
+    // The stand never runs a test file, so missing coverage leaves nothing unknown in it.
+    t.write("src/util/money.spec.ts", "export const cents = 100;\n")
+        .commit("tests");
+    let (_dir, bare) = report_of(&t, |report| report["coverage"] = Value::Null);
+    let out = hot(&t, &bare, &[]);
+    assert_eq!(code(&out), 0, "{}", stderr(&out));
+    assert_eq!(
+        stdout(&out),
+        format!("base main {} (flag)\n", sha7(&t, "main"))
+    );
+}
+
+#[test]
+fn hot_refuses_a_report_it_cannot_read_with_the_phase_report() {
+    let t = hot_repo();
+    let dir = tempfile::tempdir().expect("create a temp folder");
+    let broken = dir.path().join("broken.json");
+    fs::write(&broken, "{\"schemaVersion\": 1,").expect("write the report");
+    let missing = dir.path().join("missing.json");
+    let (_newer_dir, newer) = report_of(&t, |report| report["schemaVersion"] = json!(2));
+    let (_foreign_dir, foreign) = report_of(&t, |report| {
+        report["head"]["tree"] = json!("0123456789abcdef0123456789abcdef01234567");
+    });
+    for (report, cause) in [
+        (&broken, "EOF while parsing"),
+        (&missing, "missing.json"),
+        (&newer, "schemaVersion 2 is not 1"),
+        (&foreign, "is not a tree of this repository"),
+    ] {
+        assert_failure(&hot(&t, report, &["--json"]), 2, "report", cause, &[]);
+    }
+    let out = run(t.path(), &["hot", "--json"]);
+    assert_failure(&out, 2, "args", "not provided: <REPORT>", &[]);
 }

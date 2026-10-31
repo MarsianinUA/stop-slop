@@ -1,7 +1,7 @@
 use camino::{Utf8Path, Utf8PathBuf};
 use repo::{Change, Oid, RepoError, Snapshot};
 
-use crate::{ScopedFile, SkipReason, Skipped};
+use crate::{Changed, ScopedFile, SkipReason, Skipped};
 
 /// A `*` of a pathspec also matches `/`, so these reach every folder. They let `x.d.ts`
 /// through: `checked` drops it.
@@ -31,9 +31,17 @@ pub(crate) fn of_branch(
                 reason: SkipReason::AlreadyInBase,
             });
         } else {
+            let new_path = matches!(
+                file.change,
+                Change::Added | Change::Renamed | Change::Untracked
+            );
             files.push(ScopedFile {
                 path: file.path,
-                changed: Some(file.lines),
+                changed: Some(Changed {
+                    lines: file.lines,
+                    cuts: file.cuts,
+                    new_path,
+                }),
             });
         }
     }

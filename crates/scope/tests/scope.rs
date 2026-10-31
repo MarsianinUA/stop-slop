@@ -3,10 +3,10 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
-use repo::{LineRange, Oid, Repo, RepoError};
+use repo::{Cut, LineRange, Oid, Repo, RepoError};
 use scope::{
-    Base, BaseReason, PrBase, Scope, ScopeError, ScopeRequest, ScopedFile, SkipReason, Skipped,
-    is_checked, resolve,
+    Base, BaseReason, Changed, PrBase, Scope, ScopeError, ScopeRequest, ScopedFile, SkipReason,
+    Skipped, is_checked, resolve,
 };
 use testkit::TempRepo;
 
@@ -91,13 +91,22 @@ fn oid(t: &TempRepo, rev: &str) -> Oid {
     repo.resolve(rev).unwrap().expect("a commit")
 }
 
-fn lines(ranges: &[(u32, u32)]) -> Option<Vec<LineRange>> {
-    Some(
-        ranges
+/// Each range one changed line of code, in place of an old one, in a file with the same path.
+fn lines(ranges: &[(u32, u32)]) -> Option<Changed> {
+    Some(Changed {
+        lines: ranges
             .iter()
             .map(|&(start, end)| LineRange { start, end })
             .collect(),
-    )
+        cuts: ranges
+            .iter()
+            .map(|&(start, end)| Cut {
+                start,
+                count: end - start + 1,
+            })
+            .collect(),
+        new_path: false,
+    })
 }
 
 #[test]
@@ -338,10 +347,24 @@ fn files_and_all_give_repo_paths_without_a_base() {
     assert!(scope.files.iter().all(|file| file.changed.is_none()));
 
     let outside = tempfile::tempdir().unwrap();
-    fs::write(outside.path().join("x.ts"), "x\n").unwrap();
-    let error = files(&at_root, vec![outside.path().join("x.ts")]).unwrap_err();
+    let stranger = outside.path().join("x.ts");
+    fs::write(&stranger, "x\n").unwrap();
+    let error = files(&at_root, vec![stranger.clone()]).unwrap_err();
     assert!(
-        matches!(error, ScopeError::Repo(RepoError::OutsideRepo(_))),
+        matches!(
+            &error,
+            ScopeError::BadFile { path, source: RepoError::OutsideRepo(_) } if *path == stranger
+        ),
+        "{error:?}"
+    );
+
+    let error = files(&at_root, vec!["src/a.ts".into(), "src/missing.ts".into()]).unwrap_err();
+    assert!(
+        matches!(
+            &error,
+            ScopeError::BadFile { path, source: RepoError::Io { source, .. } }
+                if path == Path::new("src/missing.ts") && source.kind() == io::ErrorKind::NotFound
+        ),
         "{error:?}"
     );
 
@@ -350,7 +373,7 @@ fn files_and_all_give_repo_paths_without_a_base() {
         assert!(
             matches!(
                 &error,
-                ScopeError::Repo(RepoError::Io { path, source })
+                ScopeError::BadFile { path, source: RepoError::Io { source, .. } }
                     if path == Path::new(folder) && source.kind() == io::ErrorKind::IsADirectory
             ),
             "{error:?}"
@@ -386,6 +409,35 @@ fn on_a_revision_the_changes_come_from_the_revision() {
     let scope = resolve(&repo, &repo.worktree(), &pr, branch(Some("main"))).unwrap();
     assert_eq!(paths(&scope.files), ["a.ts", "b.ts", "c.ts"]);
     assert_eq!(scope.files[0].changed, lines(&[(2, 2), (4, 4)]));
+}
+
+#[test]
+fn a_file_has_a_new_path_when_the_branch_adds_or_renames_it() {
+    let t = TempRepo::new();
+    t.write("edit.ts", "1\n")
+        .write("old.ts", "1\n2\n3\n4\n5\n")
+        .commit("main");
+    t.branch("feat")
+        .write("edit.ts", "2\n")
+        .write("added.ts", "a\n");
+    t.git(&["mv", "old.ts", "moved.ts"]);
+    t.commit("feat").write("loose.ts", "x\n");
+
+    let scope = on_branch(&t, &Answer::new(None), Some("main"));
+    let new_paths: Vec<(&str, bool)> = scope
+        .files
+        .iter()
+        .map(|file| (file.path.as_str(), file.changed.as_ref().unwrap().new_path))
+        .collect();
+    assert_eq!(
+        new_paths,
+        [
+            ("added.ts", true),
+            ("edit.ts", false),
+            ("loose.ts", true),
+            ("moved.ts", true),
+        ]
+    );
 }
 
 #[test]

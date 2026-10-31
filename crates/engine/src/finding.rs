@@ -6,7 +6,7 @@ use kit::oxc::ast::ast::Expression;
 use kit::prelude::{AstKind, Span};
 use kit::{FindingKind, Position};
 
-use crate::{Finding, Fingerprint, LineRange};
+use crate::{Changed, Finding, Fingerprint};
 
 pub(crate) const PARSE_ERROR: &str = "parse-error";
 
@@ -15,6 +15,7 @@ pub(crate) struct Draft<'t> {
     pub rule: &'static str,
     pub kind: FindingKind,
     pub message: String,
+    pub args: Vec<(&'static str, String)>,
     pub start: Position,
     pub end: Position,
     pub fixable: bool,
@@ -22,11 +23,23 @@ pub(crate) struct Draft<'t> {
     pub place: &'t str,
     /// The named function the finding starts in, or `""`.
     pub function: &'t str,
+    pub owner: Owner,
+}
+
+/// What a finding is about, for `Finding::function` and `Finding::touched`.
+pub(crate) enum Owner {
+    /// The file's path: only adding or renaming the file touches it.
+    Path,
+    /// A text that does not parse: none of its lines is known to be a comment, so a change of
+    /// any of them touches it, the line of the error among them.
+    Text,
+    /// `touched` is `None` without a base.
+    Code { name: String, touched: Option<bool> },
 }
 
 pub(crate) struct FileFindings<'f> {
     pub path: &'f Utf8Path,
-    pub changed: Option<&'f [LineRange]>,
+    pub changed: Option<&'f Changed>,
     pub ignored: &'f BTreeSet<(Utf8PathBuf, String)>,
     pub findings: Vec<Finding>,
 }
@@ -39,6 +52,16 @@ impl FileFindings<'_> {
             return;
         }
         let line = draft.start.line;
+        let (function, touched) = match draft.owner {
+            Owner::Path => (None, self.changed.map(|changed| changed.new_path)),
+            Owner::Text => (
+                None,
+                self.changed.map(|changed| {
+                    changed.new_path || !changed.lines.is_empty() || !changed.cuts.is_empty()
+                }),
+            ),
+            Owner::Code { name, touched } => (Some(name), touched),
+        };
         self.findings.push(Finding {
             rule: draft.rule,
             kind: draft.kind,
@@ -46,11 +69,15 @@ impl FileFindings<'_> {
             start: draft.start,
             end: draft.end,
             message: draft.message,
-            in_hunk: self.changed.map(|ranges| {
-                ranges
+            args: draft.args,
+            in_hunk: self.changed.map(|changed| {
+                changed
+                    .lines
                     .iter()
                     .any(|range| (range.start..=range.end).contains(&line))
             }),
+            function,
+            touched,
             fixable: draft.fixable,
             fingerprint: Fingerprint(key.1),
         });
@@ -103,6 +130,20 @@ pub(crate) fn fill(message: &str, args: &[(&'static str, String)]) -> String {
     }
     filled.push_str(rest);
     filled
+}
+
+/// The args that fill a `{key}` of `message`, each key once, as `fill` takes them.
+pub(crate) fn named(
+    message: &str,
+    args: Vec<(&'static str, String)>,
+) -> Vec<(&'static str, String)> {
+    let mut named: Vec<(&'static str, String)> = Vec::with_capacity(args.len());
+    for (key, value) in args {
+        if message.contains(&format!("{{{key}}}")) && !named.iter().any(|(seen, _)| *seen == key) {
+            named.push((key, value));
+        }
+    }
+    named
 }
 
 /// The name for findings inside `kind`: a named function, or a method, class field, object
