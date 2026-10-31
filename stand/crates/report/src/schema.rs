@@ -2,6 +2,7 @@
 //! camelCase, values kebab-case, every path with `/`, oids in full. `write` and `load` are the only
 //! I/O of the report after `read_outputs`.
 
+use std::collections::BTreeSet;
 use std::fs;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
@@ -62,6 +63,10 @@ pub struct Report {
     /// This run's records for `records.json`; a loaded report has none.
     #[serde(skip)]
     pub(crate) records: Arc<Records>,
+    /// The measures `expect.cost` names; a loaded report has none, and its line would leave
+    /// them out.
+    #[serde(skip)]
+    pub(crate) declared: BTreeSet<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

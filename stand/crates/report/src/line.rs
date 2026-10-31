@@ -1,5 +1,6 @@
-//! The quiet `--json` line (architecture plan, row 76): only the exceptions of a report, the count
-//! of the rest, and the next steps as `Next`. No I/O: `dir` only builds the paths.
+//! The quiet `--json` line (architecture plan, row 76): only the exceptions of a report and the
+//! declared measures, the count of the rest, and the next steps as `Next`. No I/O: `dir` only builds
+//! the paths.
 
 use std::collections::BTreeSet;
 
@@ -20,8 +21,10 @@ const SAMPLE: usize = 3;
 
 impl Report {
     pub fn line(&self, dir: &Utf8Path) -> Line {
-        let (shown, quiet): (Vec<&Measure>, Vec<&Measure>) =
-            self.measures.iter().partition(|measure| exception(measure));
+        let (shown, quiet): (Vec<&Measure>, Vec<&Measure>) = self
+            .measures
+            .iter()
+            .partition(|measure| shown(measure, &self.declared));
         let unmeasurable = quiet
             .iter()
             .filter(|measure| graded(measure) == Some(Grade::Unmeasurable))
@@ -87,10 +90,9 @@ impl Report {
             })
         });
         let mut next: Vec<Next> = accepts.collect();
-        if shown
-            .iter()
-            .any(|measure| graded(measure) == Some(Grade::Unmeasurable))
-        {
+        if shown.iter().any(|measure| {
+            graded(measure) == Some(Grade::Unmeasurable) && !grade::new_code(measure)
+        }) {
             next.push(Next::Guide(Some(Topic::Expect)));
         }
         next
@@ -136,6 +138,12 @@ fn on_failure(flag: &Flag, failure: &Failure) -> bool {
     in_run
         && matches!(flag, Flag::ProbeFailed { side, repeat, .. }
             if *side == Side::Head && *repeat == failure.repeat)
+}
+
+/// Whether the line shows `measure`: an entry of `expect.cost` names it, so the agent's report gets its
+/// numbers whatever the grade, or it is an exception.
+pub(crate) fn shown(measure: &Measure, declared: &BTreeSet<String>) -> bool {
+    declared.contains(&measure.name) || exception(measure)
 }
 
 /// Optional Assumptions, «Исключение строки». An `unmeasurable` stays quiet without an entry (the

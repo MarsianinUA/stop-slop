@@ -1,6 +1,7 @@
 //! The raw outputs of a stand run into `report.json`, the `--json` line and the summary. `run`
 //! returns `Raw`, so this crate sits below `run` (plan, row 85); `cli` adds the `Context`.
 
+use std::collections::BTreeSet;
 use std::sync::Arc;
 use std::{fmt, io};
 
@@ -62,7 +63,16 @@ impl<'r> Previous<'r> {
 /// the run) count once: they are one measurement (plan, row 88).
 pub fn make(raw: &Raw, outputs: &Outputs, context: &Context<'_>) -> Report {
     let before = Before::of(raw);
+    let declared: BTreeSet<String> = context
+        .declared
+        .iter()
+        .map(|entry| entry.measure.clone())
+        .collect();
     let (measures, mut flags) = measures::of(raw, outputs, context, before);
+    // Without `--before` the noise of every measure sizes the workload before the seal.
+    if context.before.is_some() {
+        flags::drop_quiet_noise(&mut flags, &measures, &declared);
+    }
     flags.extend(grade::unknown_expect(&measures, context));
     flags.extend(flags::facts(raw));
     flags.extend(flags::of_context(raw, context));
@@ -116,6 +126,7 @@ pub fn make(raw: &Raw, outputs: &Outputs, context: &Context<'_>) -> Report {
         fault: modes::fault(raw, context),
         second_pass,
         records: Arc::clone(&outputs.records),
+        declared,
     }
 }
 

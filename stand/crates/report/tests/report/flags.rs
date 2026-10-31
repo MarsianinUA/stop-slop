@@ -1,16 +1,17 @@
 //! The flags that the raw outputs and the context give.
 
+use camino::Utf8Path;
 use profile::{ModuleTime, Samples};
 use report::{
-    BeforeOutcome, Cause, CoverageOutcome, DeadReason, Failure, FaultOutcome, FaultRepeat, Flag,
-    Phase, Previous, ProfileOutcome, Role, Side,
+    BeforeOutcome, Bound, Cause, CoverageOutcome, DeadReason, Declared, Failure, FaultOutcome,
+    FaultRepeat, Flag, Phase, Previous, ProfileOutcome, Role, Side,
 };
 use sandbox::{ExecOutcome, Unexposed};
 use serde_json::json;
 
 use super::{
-    Folder, GIB, context, instance, killed, metrics, port, probe_ran, raw, raw_of, read, repeats,
-    report, report_of, sampled, setup_side,
+    Folder, GIB, context, declared, instance, killed, metrics, port, probe_ran, raw, raw_of, read,
+    repeats, report, report_of, sampled, setup_side,
 };
 
 #[test]
@@ -290,6 +291,49 @@ fn a_wide_spread_is_high_noise_and_a_far_first_repeat_an_outlier() {
             .contains(&Flag::FirstRepeatOutlier { measure: wall() })
     );
     assert!(!warm.flags.contains(&Flag::HighNoise { measure: wall() }));
+}
+
+#[test]
+fn with_before_high_noise_is_only_of_a_measure_the_line_shows() {
+    let folder = Folder::new();
+    let wall = Flag::HighNoise {
+        measure: "stand.wall".to_owned(),
+    };
+    let compared = |name: &str, head: &[u64], declared: Vec<Declared>| {
+        let before = Some(repeats(
+            &folder,
+            &format!("{name}-before"),
+            &[100, 100, 100],
+        ));
+        let raw = raw(
+            &folder,
+            repeats(&folder, &format!("{name}-head"), head),
+            before,
+        );
+        let mut context = context(&raw, Previous::None, &[]);
+        context.declared = declared;
+        let report = report_of(&raw, &context, &[]);
+        let line = report.line(Utf8Path::new("run"));
+        let shown = line.measures.iter().any(|known| known.name == "stand.wall");
+        (
+            shown,
+            report.flags.contains(&wall),
+            line.flags.contains(&wall),
+        )
+    };
+
+    // A spread of 45% hides the shift, and without an entry the line leaves it quiet.
+    let noisy = [100, 125, 80];
+    assert_eq!(compared("quiet", &noisy, Vec::new()), (false, false, false));
+    // Within a bound of +50% it is `met`, and its entry puts it in the line.
+    let entry = vec![declared("stand.wall", Bound::UpTo(50))];
+    assert_eq!(compared("declared", &noisy, entry), (true, true, true));
+    // A doubling shows through the noise: a `surprise` the line shows.
+    let doubled = [200, 250, 160];
+    assert_eq!(
+        compared("shifted", &doubled, Vec::new()),
+        (true, true, true)
+    );
 }
 
 #[test]

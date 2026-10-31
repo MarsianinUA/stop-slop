@@ -11,9 +11,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::outputs::Outputs;
 use crate::raw::{Phase, ProfileOutcome, Raw, RepeatOutput, SetupSide};
-use crate::schema::time;
+use crate::schema::{Measure, time};
 use crate::stats::{self, Sample};
-use crate::{Before, Context, Previous, Side, hot, sides};
+use crate::{Before, Context, Previous, Side, hot, line, sides};
 
 /// A spread above it hides any shift under it, and most declared costs are smaller.
 const HIGH_NOISE: f64 = 0.2;
@@ -504,6 +504,21 @@ pub(crate) fn high_noise(measure: &str, head: Sample, before: Option<Sample>) ->
     noisy.then(|| Flag::HighNoise {
         measure: measure.to_owned(),
     })
+}
+
+/// On a comparison, `high-noise` only of a measure the line shows: a quiet one asks for nothing,
+/// and `unmeasurable` already counts the quiet ones its noise hides a shift of.
+pub(crate) fn drop_quiet_noise(
+    flags: &mut Vec<Flag>,
+    measures: &[Measure],
+    declared: &BTreeSet<String>,
+) {
+    flags.retain(|flag| match flag {
+        Flag::HighNoise { measure } => measures
+            .iter()
+            .any(|known| known.name == *measure && line::shown(known, declared)),
+        _ => true,
+    });
 }
 
 /// The first repeat of this run lies outside the others by more than their threshold: a warm-up

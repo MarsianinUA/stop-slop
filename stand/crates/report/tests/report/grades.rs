@@ -196,7 +196,11 @@ fn the_own_hot_time_of_new_code_is_a_quiet_unmeasurable_and_a_rise_from_more_gra
         (owned.change.as_str(), owned.reason.as_deref(), owned.grade),
         ("+10%", Some("new-code"), Some(Grade::Unmeasurable))
     );
-    assert!(names_of(&bounded.line(Utf8Path::new("run"))).is_empty());
+    // The entry puts it in the line; new code asks for no `guide expect`.
+    let line = bounded.line(Utf8Path::new("run"));
+    assert_eq!(names_of(&line), ["stand.hot-owned"]);
+    assert_eq!(line.unmeasurable, 0);
+    assert!(line.next.is_empty(), "{:?}", line.next);
     let asked = graded(&[util], "src/orders.ts", Some(Bound::Unknown));
     assert_eq!(expect(&asked, "stand.hot-owned").grade, None);
     assert_eq!(asked.needs.len(), 1, "{:?}", asked.needs);
@@ -452,5 +456,40 @@ fn a_failed_before_grades_nothing() {
     );
     assert!(report.needs.is_empty());
     let line = report.line(Utf8Path::new("run"));
-    assert!(line.measures.is_empty() && line.next.is_empty());
+    assert_eq!(names_of(&line), ["stand.wall"]);
+    assert!(line.measures[0].expect.is_none() && line.next.is_empty());
+}
+
+#[test]
+fn a_declared_measure_is_in_the_line_whatever_its_grade() {
+    // +2% within a threshold of 5%: `met`.
+    let report = compared_wall(&[1020, 1020, 1020], |context| {
+        context.declared = vec![declared("stand.wall", Bound::UpTo(10))];
+    });
+    let line = report.line(Utf8Path::new("run"));
+
+    assert_eq!(names_of(&line), ["stand.wall"]);
+    assert_eq!(line.quiet as usize, report.measures.len() - 1);
+    assert!(line.next.is_empty(), "{:?}", line.next);
+    let json = serde_json::to_value(&line).unwrap();
+    let wall = &json["measures"][0];
+    assert_eq!(wall["median"], json!(1020.0));
+    assert_eq!(
+        wall["before"],
+        json!({"median": 1000.0, "verdict": "within-noise"})
+    );
+    assert_eq!(wall["previous"]["verdict"], "no-baseline");
+    assert_eq!(
+        (&wall["expect"]["change"], &wall["expect"]["grade"]),
+        (&json!("+10%"), &json!("met"))
+    );
+
+    // Without `--before` nothing is graded, and the line still gives its numbers.
+    let folder = Folder::new();
+    let raw = raw(&folder, repeats(&folder, "head", &[1000, 1000, 1000]), None);
+    let mut plain = context(&raw, Previous::None, &[]);
+    plain.declared = vec![declared("stand.wall", Bound::UpTo(10))];
+    let line = report_of(&raw, &plain, &[]).line(Utf8Path::new("run"));
+    assert_eq!(names_of(&line), ["stand.wall"]);
+    assert!(line.measures[0].before.is_none() && line.measures[0].expect.is_none());
 }
