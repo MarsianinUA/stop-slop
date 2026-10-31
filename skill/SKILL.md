@@ -25,7 +25,7 @@ Run `stop-slop` inside the repository. If the command is missing, tell the user 
   - `inHunk: true` puts the finding on a line the branch changed; `false` is old code in a touched file.
   - `message` says why the code is a problem and how to fix it.
   - `fixable: true` means `--fix` applies the rule's fix at this place. Every other finding you fix by hand, even when the rule has `fix: true`: there the program judged its fix unsafe.
-- `stop-slop rules --json` lists the rules: `id`, `group`, `description`, `kind` (`error`, `candidate` or `agent`), `fix`, `files` (`code`, `tests` or `all`), `source`, `message`, `agent` (how to judge, fix or check the rule; `null` when the `message` says enough) and `active` (on in this repository). It is the only list of rules: read it once per run.
+- `stop-slop rules --json` lists the rules: `id`, `group`, `description`, `kind` (`error`, `candidate` or `agent`), `fix`, `files` (`code`, `tests` or `all`), `source`, `message`, `agent` (how to judge, fix or check the rule; `null` when the `message` says enough) and `active` (on in this repository).
   - An `agent` rule has no code in the program. You check it yourself, as its `agent` text says, in the branch files its `files` covers.
   - Test files end in `.spec`, `.test` or `.e2e-spec` before the extension, or sit under `__tests__/`. Every other file is code.
   - `enabled` in `<common>/info/stop-slop/config.toml` turns opt-in groups on for this repository, such as `performance` and `branching`; a rule `disabled` names stays off even then. `disabled` is the one key you change, as [Project conventions win](#project-conventions-win) says.
@@ -34,8 +34,8 @@ Run `stop-slop` inside the repository. If the command is missing, tell the user 
 
 `stop-slop-stand` runs the app in microsandbox VMs; only [stand.md](stand.md) calls it. If the command is missing, tell the user to install it with `cargo install --path stand/crates/cli --locked` from the stop-slop repository; it needs a hypervisor (WHP on Windows, KVM on Linux, Apple silicon on a Mac). Then a fix goes on without the stand, and a measure stops.
 
-- Its exit codes are `0` passed, `1` the head failed, `2` refused, `3` broke and `130` Ctrl+C, as stop-slop's, but they ask other steps: [stand.md](stand.md#exit-codes).
-- `stop-slop-stand --help` lists its commands and flags, and `stop-slop-stand guide <topic>` explains one part of the stand: `recipe`, `probes`, `expect`, `line` or `inspect`. The topics are [references/guide.md](references/guide.md) and [references/probes.md](references/probes.md).
+- Its exit codes ask other steps than stop-slop's: [stand.md](stand.md#exit-codes).
+- `stop-slop-stand --help` lists its commands and flags, and `stop-slop-stand guide <topic>` explains one part of the stand: `recipe`, `probes`, `expect`, `line` or `inspect`. The files in `references/` hold these topics: read them only through `guide`, a topic when a step names it, and never a whole file.
 - `stop-slop hot <report.json> --json` lays the report of a stand run over the branch: its hot functions with the findings inside, and its changed functions that never ran ([stand.md](stand.md), step 7).
 
 ## Project conventions win

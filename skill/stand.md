@@ -4,7 +4,7 @@
 
 `run` prints nothing until its line, which takes 1-3 minutes, more with a bigger workload. Run it in the foreground with a 10-minute timeout: never in the background, and never poll it. If the 10 minutes run out anyway, something hangs or runs too long, and the run counts as failed. The next `run` sweeps what the stopped one left: lower `timeout` and `setup_timeout` of `x-stand` (`guide recipe`) so that a whole run fits in 10 minutes, and run again. Then the stand stops a step that hangs itself, and the line's `failure` names it.
 
-The stand file `compose.yaml` and the harness beside it, such as the workload, are the recipe. They live in `<common>/info/stop-slop-stand/`, outside the repository, and every work tree of the repository shares them. `stop-slop-stand guide <topic>` explains one part of it: run the topic a step names before you do that step. It prints the text of `references/guide.md` and `references/probes.md`, so a file you have read already needs no run.
+The stand file `compose.yaml` and the harness beside it, such as the workload, are the recipe. They live in `<common>/info/stop-slop-stand/`, outside the repository, and every work tree of the repository shares them. `stop-slop-stand guide <topic>` explains one part of it: run the topic a step names before you do that step. A topic you have run needs no second run.
 
 Two flows use these steps:
 
@@ -46,7 +46,7 @@ Measure once the code differs from the snapshot. With no edit, go to [Clean](#cl
    - a measure graded `unmeasurable`: the noise hides the declared change. Give each repeat more work, which narrows the spread (more `repeat` does not), or declare a bound the change allows (`guide expect`).
    - `needs`: measures the user judges; they go to the report.
    - a file in `behaviour`, a category in `fault.changed`, a file in `secondPass`: the app now answers, writes or recovers otherwise. A change the diff intends goes to the report with why; any other is a regression: fix the code.
-   - a flag: `guide line` says what it means and what to do, such as `low-repeats` (run again: runs of the same head, "before" and recipe pool their samples, and a new head measures "before" anew) or `dead-probe` (fix the probe). In the fix flow, `recipe-changed` on the first runs with `--before` says only that `expect` came after the run it compares with; after a reseal, so do `recipe-changed` and `measured-before-seal`.
+   - a flag: `guide line` says what it means and what to do, such as `low-repeats` (run again) or `dead-probe` (fix the probe). In the fix flow, `recipe-changed` on the first runs with `--before` says only that `expect` came after the run it compares with; after a reseal, so do `recipe-changed` and `measured-before-seal`.
 
    After an edit of the code, check it before the next run: in the fix flow steps 7-9 of fix.md again; in the branch flow `stop-slop check --json`, so the edit adds no finding, then steps 8 and 9 of fix.md. A test the edit breaks takes the edit back. Then run again. Done when every exception of the last line has its outcome: fixed, accepted with a reason, or in the report. After the third run with `--before`, stop and report what is still open.
 7. `stop-slop hot <report> --json`, with `report` of the last line that passed, and the `--base` of `check` when it needed one. After a fix of a regression, its `hot` of step 6 goes to the report too. For the files of the branch it lists:

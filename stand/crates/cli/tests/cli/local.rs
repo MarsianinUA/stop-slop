@@ -43,11 +43,10 @@ fn guide_prints_the_contents_and_each_topic_and_refuses_another() {
     let contents = world.run_at(outside, &fake, &["guide"], &roomy, &Cancel::new());
     assert_eq!(contents.exit, Exit::Passed, "{}", contents.err);
     assert!(
-        contents.out.contains("The shortest path"),
+        contents.out.starts_with("`stop-slop-stand` runs your app"),
         "{}",
         contents.out
     );
-    assert!(contents.out.contains("- `130`: "), "{}", contents.out);
     assert!(!contents.out.contains("## "), "{}", contents.out);
     let last = contents.out.lines().last();
     let topics = "Topics: recipe, probes, expect, line, inspect. `stop-slop-stand guide <topic>` prints one.";

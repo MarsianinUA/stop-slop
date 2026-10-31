@@ -54,7 +54,7 @@ pub(crate) fn run(topic: Option<Topic>, out: &mut dyn Write) -> Result<Exit, Sta
     Ok(Exit::Passed)
 }
 
-/// `guide.md` cut at its `## ` lines: the shortest path before the first, then each section with
+/// `guide.md` cut at its `## ` lines: the intro before the first, then each section with
 /// its heading. A line may end in `\r\n`: git checks text out so on Windows.
 fn parts(text: &str) -> (&str, Vec<(&str, &str)>) {
     let mut starts = Vec::new();

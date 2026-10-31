@@ -1,23 +1,5 @@
 `stop-slop-stand` runs your app in microsandbox VMs from a Compose file, measures it, and prints one line of JSON with only what needs a look. It measures only your own branch.
 
-The shortest path, in the fix flow:
-
-1. Before the first edit: `stop-slop-stand snapshot`. It records the work tree as "before" of this session.
-2. No stand file yet: `stop-slop-stand init`, then edit `<git common>/info/stop-slop-stand/compose.yaml` and write the harness beside it (`guide recipe`, `guide probes`). `stop-slop-stand run --dry-run` checks them without a VM and drops nothing: it says what the run will download, build and drop. Then `stop-slop-stand run --json` once, before any edit: a failure then is the recipe's.
-3. While editing: `stop-slop-stand run --json` measures the head against the previous run. Nothing is sealed or graded yet.
-4. After the tests pass: declare the cost of the change in `x-stand.expect` (`guide expect`), then `stop-slop-stand run --before session --json`. The first such run seals the recipe.
-5. Read the line (`guide line`). On an exception: `inspect` the kept state (`guide inspect`), fix the code, `accept` a shift you can explain, or hand `needs` to the user.
-6. `stop-slop hot <report> --json` for the hot functions of the branch and the changed code that never ran.
-7. `stop-slop-stand clean` once, as the last step of the task, unless the user says another task uses the stand now, also when the stand did not measure: it drops the snapshots, seals, caches and run folders of every work tree, not only this one's. Copy the numbers you report first, and take the task's `cost` out of `x-stand.expect`.
-
-The exit code says what to do:
-
-- `0`: the head passed every repeat. Flags and diffs are facts, not failures: read the line.
-- `1`: the head failed. Read `failure` (phase, service, cause, logs, the `on-failure` probes), run what `next` names (an `inspect` of the failed state, or `guide recipe`), then fix the code or the recipe.
-- `2`: the stand refused its input and measured nothing. stderr says why and ends with `next:` commands; follow them. What only the user can change, such as the disk, `host_share` in `stand.toml` or another run that holds the stand, goes to the user. A missing snapshot after the first edit is the one `next` to pass over: compare with `--before <ref>` instead.
-- `3`: the stand itself broke. Show stderr and the line to the user and stop measuring: no retry, and no change to the recipe or the code for it. The task goes on, and its summary says the stand did not measure, and why.
-- `130`: Ctrl+C stopped it; the VMs are gone and what it collected is in the run folder. Run it again only when the user asks.
-
 ## recipe
 
 The recipe is the folder `<git common>/info/stop-slop-stand/`: the stand file `compose.yaml` and the harness beside it. It lives outside the repository, so nothing of it lands in the diff, and both versions mount the same harness.
@@ -108,7 +90,7 @@ createServer(async (request, response) => {
 - A `surprise` or an `exceeded` comes with an `accept` command in `next`, its bound the shift rounded up to 5%. Accept only a shift you can explain: `stop-slop-stand accept <measure> --allow <bound> --reason "<why>"`.
   - `--allow` takes the grammar of `change` but `unknown`, and the measure must be in the last passed run of this work tree.
   - An acceptance holds for this head tree only: the line shows it as `postHoc`, and as `stale` after the next edit.
-- An `unmeasurable` entry: give each repeat more work, which narrows the spread (more `repeat` does not), or declare a wider bound if the change allows it.
+- An `unmeasurable` entry: give each repeat more work, or declare a wider bound if the change allows it.
 - `unchanged` (with `second_pass: true`) lists `{file, reason}`, one entry per file: what must come out the same after both passes. A file is a `*.jsonl` of `/stand/out` by its path there, such as `orders.jsonl`, or `probe.<name>.jsonl` of an `after-workload` probe.
 
 ## line
@@ -157,9 +139,9 @@ createServer(async (request, response) => {
   - `phase` is where it stopped: `setup`, `ready` or `workload` when the app failed (exit 1), another step on a refusal or a breakage. `cause` is `exit-<code>`, `setup-timeout`, `timeout`, `died`, `unhealthy` or `cancelled`, or the error of a refusal or a breakage.
   - `logs` is the folder with the logs of the failed setup or repeat; `probes` are the outputs of the `on-failure` probes.
 - A flag has `kind` and the facts of its kind. No flag is a failure; each says what to know before trusting the numbers:
-  - `high-noise` (`measure`): a version's samples spread more than 20% between repeats, so a smaller shift does not show. Give each repeat more work: that narrows the spread, more `repeat` does not. On the head alone, for a measure graded `met` whose shift is far wider than the spread, it asks for nothing.
+  - `high-noise` (`measure`): a version's samples spread more than 20% between repeats, so a smaller shift does not show. Give each repeat more work. On the head alone, for a measure graded `met` whose shift is far wider than the spread, it asks for nothing.
   - `first-repeat-outlier` (`measure`): the first repeat lies far from the others, as a warm-up does; the median already sets it aside.
-  - `low-repeats` (`samples`): a version has fewer than 3 samples. Run again: runs of the same trees and recipe pool their samples.
+  - `low-repeats` (`samples`): a version has fewer than 3 samples. Run again.
   - `no-profile` (`service`): a repeat of this profiled service wrote no profile; it needs Node 20 or later.
   - `unprofiled`: no service has `x-stand.profile`, so the report has no hot function and no coverage.
   - `lost-processes` (`service`, `count`): Node processes killed before they wrote their first profile chunk.
