@@ -417,7 +417,9 @@ fn check_reports_findings_of_the_branch_as_json() {
             "endLine": 2,
             "endColumn": 23,
             "message": meta("no-any").message,
+            "function": "BETA",
             "inHunk": false,
+            "touched": false,
             "fixable": false,
             "fingerprint": any["fingerprint"],
         })
@@ -433,10 +435,64 @@ fn check_reports_findings_of_the_branch_as_json() {
             "endLine": 1,
             "endColumn": 12,
             "message": meta("todo-owner").message,
+            "function": "FRESH",
             "inHunk": true,
+            "touched": true,
             "fixable": false,
             "fingerprint": todo["fingerprint"],
         })
+    );
+}
+
+#[test]
+fn check_names_the_function_a_finding_sits_in_and_whether_the_branch_touched_it() {
+    let service = "export class OrdersService {\n  \
+                   cached(input: any): number {\n    \
+                     // a note\n    \
+                     return input;\n  \
+                   }\n\n  \
+                   counted(input: any): number {\n    \
+                     return input;\n  \
+                   }\n\
+                   }\n";
+    let t = TempRepo::new();
+    t.write("src/orders.service.ts", service)
+        .write("src/money.ts", "export const cents = 1;\n")
+        .commit("main");
+    let edited = service
+        .replace("// a note", "// a longer note")
+        .replace("return input;\n  }\n}", "return input + 1;\n  }\n}");
+    t.branch("feat")
+        .write("src/orders.service.ts", &edited)
+        .commit("edit");
+    t.git(&["mv", "src/money.ts", "src/moneyBag.ts"]);
+    t.commit("rename");
+
+    let report = check(t.path(), &["check", "--base", "main", "--json"], 1);
+    let of = |rule: &str, file: &str| -> Vec<(Value, Value)> {
+        findings(&report)
+            .iter()
+            .filter(|finding| finding["rule"] == rule && finding["file"] == file)
+            .map(|finding| (finding["function"].clone(), finding["touched"].clone()))
+            .collect()
+    };
+    assert_eq!(
+        of("no-any", "src/orders.service.ts"),
+        [
+            (json!("OrdersService.cached"), json!(false)),
+            (json!("OrdersService.counted"), json!(true)),
+        ],
+        "a comment is no change of the code"
+    );
+    assert_eq!(
+        of("file-name-pattern", "src/moneyBag.ts"),
+        [(Value::Null, json!(true))],
+        "the branch renamed the file"
+    );
+    assert_eq!(
+        of("file-name-pattern", "src/orders.service.ts"),
+        [],
+        "{report}"
     );
 }
 

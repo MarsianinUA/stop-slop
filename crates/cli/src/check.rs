@@ -3,7 +3,7 @@ use std::panic::resume_unwind;
 use std::thread;
 
 use camino::{Utf8Path, Utf8PathBuf};
-use engine::{Engine, Finding, FixCount, LineRange, Mode, SourceFile};
+use engine::{Changed, Cut, Engine, Finding, FixCount, LineRange, Mode, SourceFile};
 use kit::{EnumIndex, Fact, Facts, Package};
 use project::ProjectFacts;
 use repo::{Repo, Snapshot, WorkTree};
@@ -111,7 +111,7 @@ pub(crate) fn scan(repo: &Repo, engine: &Engine, mut args: CheckArgs) -> Result<
     let files = sources.iter().map(|source| source.path.clone()).collect();
     let changed = sources
         .iter()
-        .filter_map(|source| Some((source.path.clone(), source.changed.clone()?)))
+        .filter_map(|source| Some((source.path.clone(), source.changed.as_ref()?.lines.clone())))
         .collect();
     let report = engine.run(sources, &joined, Mode::Check);
     Ok(Checked {
@@ -183,7 +183,7 @@ fn rescope(
     // A file that became as in the base drops out; `Fix` creates no files, so none comes in.
     sources.retain_mut(|source| match changed.remove(&source.path) {
         Some(lines) => {
-            source.changed = lines.map(engine_lines);
+            source.changed = lines.map(engine_changed);
             true
         }
         None => false,
@@ -225,20 +225,32 @@ fn sources(files: Vec<ScopedFile>, bytes: Vec<Option<Vec<u8>>>) -> Vec<SourceFil
             Some(SourceFile {
                 path: file.path,
                 bytes: bytes?,
-                changed: file.changed.map(engine_lines),
+                changed: file.changed.map(engine_changed),
             })
         })
         .collect()
 }
 
-fn engine_lines(lines: Vec<repo::LineRange>) -> Vec<LineRange> {
-    lines
-        .into_iter()
-        .map(|line| LineRange {
-            start: line.start,
-            end: line.end,
-        })
-        .collect()
+fn engine_changed(changed: scope::Changed) -> Changed {
+    Changed {
+        lines: changed
+            .lines
+            .into_iter()
+            .map(|line| LineRange {
+                start: line.start,
+                end: line.end,
+            })
+            .collect(),
+        cuts: changed
+            .cuts
+            .into_iter()
+            .map(|cut| Cut {
+                start: cut.start,
+                count: cut.count,
+            })
+            .collect(),
+        new_path: changed.new_path,
+    }
 }
 
 struct Joined<'f> {

@@ -78,7 +78,7 @@ The working tree stays as it is. The run ends on a draft that the user edits.
 3. The agent drops:
    - false positives: a candidate its hint clears, or an error the code proves wrong;
    - what the project's conventions allow;
-   - what is not the author's: an old finding with `inHunk: false` in a function the PR left alone, unless the PR made it worse. The PR touched a function when its diff changes a line of the function's code, not only a comment.
+   - what is not the author's: an old finding with `inHunk: false` and `touched: false`, in code the PR left alone, unless the PR made it worse. A finding about the file itself, such as its name, is the author's only when the PR adds or renames the file, which is what its `touched` says.
 
    When most of the codebase follows a habit a rule flags and no convention mentions it, the agent keeps the finding and points it out to the user.
 4. The agent checks each active `agent` rule in what the PR adds or changes.
@@ -182,7 +182,7 @@ The files:
 - **Squash protection.** When the parent PR was squash-merged into the base, its files show up in the diff too. A file whose content equals the file at the tip of the base has no change of the branch's own, so the program leaves it out and lists it in `skipped` as `already-in-base`.
 - The output always names the base and why the program picked it, so a wrong base shows at once.
 
-Each finding gets `inHunk`, which says whether the branch changed its first line.
+Each finding gets `inHunk`, which says whether the branch changed its first line, and `touched`, which says whether the branch changed the code around it, see [JSON output of `check`](#json-output-of-check).
 
 ## The program
 
@@ -249,7 +249,9 @@ A finding is `file:line:column rule message`. Lines and columns start at 1, and 
       "file": "src/modules/markets/markets.service.ts",
       "line": 42, "column": 18, "endLine": 42, "endColumn": 33,
       "message": "`process.env.API_URL` reads the environment outside a config file: ...",
-      "inHunk": true,
+      "function": "MarketsService.fetchPrices",
+      "inHunk": false,
+      "touched": true,
       "fixable": false,
       "fingerprint": "no-process-env:3f9a1c"
     }
@@ -261,11 +263,13 @@ A finding is `file:line:column rule message`. Lines and columns start at 1, and 
 The program prints it on one line, because indents cost an agent tokens. `--pretty` indents it by 2 spaces for a person. I laid out the example here by hand.
 
 - `pr` is `null` without `--pr`. With it, `pr` has the `number` of the pull request, its full `head` sha, its `base` branch without `origin/` and its `title`.
-- `base` has `ref`, a 7-character `sha` and `reason`, which is `flag`, `pr`, `ancestor` or `default`. With `--pr` it is `origin/<base>` with `reason` `pr`. It is `null` for `--files` and `--all`, and then every `inHunk` is `null` as well.
+- `base` has `ref`, a 7-character `sha` and `reason`, which is `flag`, `pr`, `ancestor` or `default`. With `--pr` it is `origin/<base>` with `reason` `pr`. It is `null` for `--files` and `--all`, and then every `inHunk` and `touched` is `null` as well.
 - `files` lists the files the program checked, and `skipped` the ones it left out and why.
 - `findings` go in order of file, line, column and rule.
   - `kind` is `error` when the rule is sure, `candidate` for a heuristic the agent judges, and `parse-error` when the file did not parse, so no rule ran on it. A `parse-error` finding has `parse-error` as its `rule` too.
   - `message` says why the code is a problem and what to do, not only what the rule found.
+  - `function` names the code the finding belongs to: the innermost function or arrow around it, a parameter's function among them, else the class member, else the top-level statement it sits in. It is written as the code names it: `Class.method` (`Class.#field`, `Class.[key]`), an arrow or function expression by its variable, property or assignment target, `(anonymous)` for a function without one, a declaration by its name, and `(top level)` for code outside any declaration, such as an import. A finding in a comment belongs to the code the comment is about: the code before it on its line, else the code after it, such as the method under a doc comment. `function` is `null` for a finding about the file itself: its path (`file-name-pattern`, `kebab-case-dirs`) or a `parse-error`.
+  - `touched` is true when the diff changes a line of that code, not counting lines that hold only comments or spaces, or takes out a line of code inside it. A removed line counts as a comment when it starts with `//`, `/*` or `*`. For a finding about the file itself, `touched` is true when the branch adds the file, untracked files too, or renames it.
   - `fixable` is true when `--fix` applies the rule's fix at this place. A rule with a fix still leaves a finding without one where it cannot prove the fix is safe; the agent fixes those by hand.
   - `fingerprint`: see [Exceptions](#exceptions).
 - `fixed` counts the fixes `--fix` applied, per rule and file.

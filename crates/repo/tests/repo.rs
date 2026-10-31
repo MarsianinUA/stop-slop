@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 
 use camino::{Utf8Path, Utf8PathBuf};
 use repo::{
-    BranchDistance, BranchTip, Change, ChangedFile, LineRange, Oid, Repo, RepoError, Snapshot,
+    BranchDistance, BranchTip, Change, ChangedFile, Cut, LineRange, Oid, Repo, RepoError, Snapshot,
 };
 use testkit::TempRepo;
 
@@ -669,13 +669,18 @@ fn repo_and_snapshot_can_be_shared_between_threads() {
 
 const GLOBS: &[&str] = &["*.ts", "*.tsx", "*.mts", "*.cts"];
 
-fn changed(path: &str, change: Change, ranges: &[(u32, u32)]) -> ChangedFile {
+/// `cuts` are `(start, count)`.
+fn changed(path: &str, change: Change, ranges: &[(u32, u32)], cuts: &[(u32, u32)]) -> ChangedFile {
     ChangedFile {
         path: path.into(),
         change,
         lines: ranges
             .iter()
             .map(|&(start, end)| LineRange { start, end })
+            .collect(),
+        cuts: cuts
+            .iter()
+            .map(|&(start, count)| Cut { start, count })
             .collect(),
     }
 }
@@ -711,13 +716,18 @@ fn changes_of_the_worktree_take_commits_edits_and_untracked_files() {
     assert_eq!(
         repo.worktree().changes(&base(&repo), GLOBS).unwrap(),
         [
-            changed("src/dirty.ts", Change::Modified, &[(1, 1)]),
-            changed("src/dropped.ts", Change::Untracked, &[(1, u32::MAX)]),
-            changed("src/gone.ts", Change::Deleted, &[]),
-            changed("src/keep.ts", Change::Modified, &[(2, 2), (4, 4)]),
-            changed("src/loose.ts", Change::Untracked, &[(1, u32::MAX)]),
-            changed("src/new.ts", Change::Added, &[(1, 3)]),
-            changed("src/staged.ts", Change::Added, &[(1, 1)]),
+            changed("src/dirty.ts", Change::Modified, &[(1, 1)], &[(1, 1)]),
+            changed("src/dropped.ts", Change::Untracked, &[(1, u32::MAX)], &[]),
+            changed("src/gone.ts", Change::Deleted, &[], &[(0, 0)]),
+            changed(
+                "src/keep.ts",
+                Change::Modified,
+                &[(2, 2), (4, 4)],
+                &[(2, 1), (4, 1), (5, 0)],
+            ),
+            changed("src/loose.ts", Change::Untracked, &[(1, u32::MAX)], &[]),
+            changed("src/new.ts", Change::Added, &[(1, 3)], &[]),
+            changed("src/staged.ts", Change::Added, &[(1, 1)], &[]),
         ]
     );
 }
@@ -775,7 +785,7 @@ fn changes_show_a_renamed_file_under_its_new_path_with_the_edit_only() {
 
     assert_eq!(
         repo.worktree().changes(&base(&repo), GLOBS).unwrap(),
-        [changed("src/new.ts", Change::Modified, &[(4, 4)])]
+        [changed("src/new.ts", Change::Renamed, &[(4, 4)], &[(4, 1)])]
     );
 }
 
@@ -797,11 +807,11 @@ fn changes_read_odd_names_and_bodies() {
     assert_eq!(
         repo.worktree().changes(&base(&repo), GLOBS).unwrap(),
         [
-            changed("src/body.ts", Change::Modified, &[(3, 3)]),
-            changed("src/bytes.ts", Change::Modified, &[(2, 2)]),
-            changed("src/empty.ts", Change::Added, &[]),
-            changed("src/my file.ts", Change::Added, &[(1, 1)]),
-            changed("src/файл ё.ts", Change::Added, &[(1, 1)]),
+            changed("src/body.ts", Change::Modified, &[(3, 3)], &[(1, 0)]),
+            changed("src/bytes.ts", Change::Modified, &[(2, 2)], &[(2, 1)]),
+            changed("src/empty.ts", Change::Added, &[], &[]),
+            changed("src/my file.ts", Change::Added, &[(1, 1)], &[]),
+            changed("src/файл ё.ts", Change::Added, &[(1, 1)], &[]),
         ]
     );
 }
@@ -819,7 +829,7 @@ fn changes_of_a_revision_skip_the_disk() {
             .unwrap()
             .changes(&base(&repo), GLOBS)
             .unwrap(),
-        [changed("a.ts", Change::Modified, &[(1, 1)])]
+        [changed("a.ts", Change::Modified, &[(1, 1)], &[(1, 1)])]
     );
 }
 
@@ -881,9 +891,14 @@ fn the_users_diff_config_changes_nothing() {
     assert_eq!(
         plain.0,
         [
-            changed("src/a.ts", Change::Modified, &[(2, 2), (4, 4)]),
-            changed("src/e.ts", Change::Added, &[(1, 1)]),
-            changed("src/new.ts", Change::Modified, &[(4, 4)]),
+            changed(
+                "src/a.ts",
+                Change::Modified,
+                &[(2, 2), (4, 4)],
+                &[(2, 1), (4, 1)]
+            ),
+            changed("src/e.ts", Change::Added, &[(1, 1)], &[]),
+            changed("src/new.ts", Change::Renamed, &[(4, 4)], &[(4, 1)]),
         ]
     );
 

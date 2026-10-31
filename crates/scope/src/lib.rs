@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use std::thread;
 
 use camino::{Utf8Path, Utf8PathBuf};
-use repo::{LineRange, Oid, Repo, RepoError, Snapshot};
+use repo::{Cut, LineRange, Oid, Repo, RepoError, Snapshot};
 
 mod base;
 mod files;
@@ -50,7 +50,16 @@ pub enum BaseReason {
 #[derive(Debug, PartialEq, Eq)]
 pub struct ScopedFile {
     pub path: Utf8PathBuf,
-    pub changed: Option<Vec<LineRange>>,
+    pub changed: Option<Changed>,
+}
+
+/// What the diff of the branch did to a file.
+#[derive(Debug, PartialEq, Eq)]
+pub struct Changed {
+    pub lines: Vec<LineRange>,
+    pub cuts: Vec<Cut>,
+    /// The diff adds the file, untracked too, or renames it.
+    pub new_path: bool,
 }
 
 #[derive(Debug, PartialEq, Eq)]

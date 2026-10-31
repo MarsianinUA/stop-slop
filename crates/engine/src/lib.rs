@@ -3,6 +3,7 @@ mod dispatch;
 mod finding;
 mod fix;
 mod functions;
+mod place;
 mod run;
 mod text;
 
@@ -67,7 +68,17 @@ pub struct SourceFile {
     pub path: Utf8PathBuf,
     pub bytes: Vec<u8>,
     /// `None` when there is no base to compare with.
-    pub changed: Option<Vec<LineRange>>,
+    pub changed: Option<Changed>,
+}
+
+/// What the diff did to a file.
+#[derive(Debug, Clone, Default)]
+pub struct Changed {
+    pub lines: Vec<LineRange>,
+    /// The hunks that took out a line of code.
+    pub cuts: Vec<Cut>,
+    /// The diff adds the file or renames it.
+    pub new_path: bool,
 }
 
 /// Lines from 1, both ends included.
@@ -75,6 +86,14 @@ pub struct SourceFile {
 pub struct LineRange {
     pub start: u32,
     pub end: u32,
+}
+
+/// A hunk on its new side: `count` lines from `start` stand where the old lines were, or with
+/// `count = 0` the old lines went out after line `start`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Cut {
+    pub start: u32,
+    pub count: u32,
 }
 
 #[derive(Debug)]
@@ -98,6 +117,15 @@ pub struct Finding {
     pub message: String,
     /// `None` when there is no base; otherwise whether the first line of the finding changed.
     pub in_hunk: Option<bool>,
+    /// The innermost function or class member around the finding, else its top-level
+    /// statement, as the code names it: `Class.method`, an arrow by its variable,
+    /// `(anonymous)`, `(top level)` outside any declaration. `None` for a finding about the
+    /// file itself: its path, or a text that does not parse.
+    pub function: Option<String>,
+    /// `None` when there is no base. Otherwise whether the diff changed a line of code of
+    /// `function`, a comment or a blank line not counted, or took code out of it; for a
+    /// finding about the file, whether it added or renamed the file.
+    pub touched: Option<bool>,
     pub fixable: bool,
     pub fingerprint: Fingerprint,
 }

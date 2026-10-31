@@ -91,7 +91,9 @@ struct FindingJson<'c> {
     end_line: u32,
     end_column: u32,
     message: &'c str,
+    function: Option<&'c str>,
     in_hunk: Option<bool>,
+    touched: Option<bool>,
     fixable: bool,
     fingerprint: String,
 }
@@ -428,7 +430,9 @@ fn finding_json(finding: &Finding) -> FindingJson<'_> {
         end_line: finding.end.line,
         end_column: finding.end.column,
         message: &finding.message,
+        function: finding.function.as_deref(),
         in_hunk: finding.in_hunk,
+        touched: finding.touched,
         fixable: finding.fixable,
         fingerprint: finding.fingerprint.to_string(),
     }

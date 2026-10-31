@@ -8,7 +8,8 @@ use kit::{Cx, Facts, File, FindingKind, LineIndex, Position, Report, Role, RuleK
 use rayon::prelude::*;
 
 use crate::dispatch::Profile;
-use crate::finding::{self, Draft, FileFindings, PARSE_ERROR};
+use crate::finding::{self, Draft, FileFindings, Owner, PARSE_ERROR};
+use crate::place::Places;
 use crate::{Engine, Finding, Mode, RunReport, SourceFile, fix, text};
 
 impl Engine {
@@ -54,9 +55,10 @@ impl Engine {
         facts: &dyn Facts,
         mode: Mode,
     ) -> Vec<Finding> {
+        let changed = file.changed.as_ref();
         let mut out = FileFindings {
             path: &file.path,
-            changed: file.changed.as_deref(),
+            changed,
             ignored: &self.ignored,
             findings: Vec::new(),
         };
@@ -90,6 +92,8 @@ impl Engine {
         if profile.rules.is_empty() {
             return out.findings;
         }
+        // Built at the first report: most files have none.
+        let mut places: Option<Places> = None;
         self.run_rules(
             &program,
             &file.path,
@@ -102,10 +106,20 @@ impl Engine {
                     RuleKind::Candidate => FindingKind::Candidate,
                     RuleKind::Agent => unreachable!("agent rules are never built"),
                 };
+                let owner = if report.on_path {
+                    Owner::File
+                } else {
+                    let places = places.get_or_insert_with(|| {
+                        Places::new(source.semantic, text, changed.is_some())
+                    });
+                    let (name, touched) = places.locate(report.span, source.lines, changed);
+                    Owner::Code { name, touched }
+                };
                 out.push(Draft {
                     rule: meta.id,
                     kind,
                     message: finding::fill(meta.message, &report.args),
+                    owner,
                     start: source.lines.position(report.span.start),
                     end: source.lines.position(report.span.end),
                     fixable: fix::sound_edits(
@@ -216,6 +230,7 @@ fn parse_error(message: String) -> Draft<'static> {
         rule: PARSE_ERROR,
         kind: FindingKind::ParseError,
         message,
+        owner: Owner::File,
         start: start(),
         end: start(),
         fixable: false,

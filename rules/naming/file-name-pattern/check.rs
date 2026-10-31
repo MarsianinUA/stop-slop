@@ -23,7 +23,7 @@ impl Rule for Check {
         }
         let no_role = !stem.contains('.') && !self.names.iter().any(|n| n == stem);
         if no_role || !stem.split('.').all(|part| Case::Kebab.matches(part)) {
-            cx.report(path_span(file)).arg("name", name);
+            cx.report_path().arg("name", name);
         }
     }
 }

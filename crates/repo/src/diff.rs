@@ -1,12 +1,15 @@
 use camino::Utf8PathBuf;
 
-use crate::{Change, ChangedFile, LineRange, RepoError, git};
+use crate::{Change, ChangedFile, Cut, LineRange, RepoError, git};
 
 /// One `diff --git` section; `path` is raw bytes until the whole section is read.
 struct Section {
     path: Option<Vec<u8>>,
     change: Change,
     lines: Vec<LineRange>,
+    cuts: Vec<Cut>,
+    /// The hunk being read, until a line of code it takes out moves it to `cuts`.
+    open: Option<Cut>,
 }
 
 /// The output format `parse` relies on. The user's config could drop or swap the `a/` `b/`
@@ -26,10 +29,10 @@ pub(crate) const ARGS: &[&str] = &[
 ];
 
 /// Reads `git diff` made with `ARGS`. Only lines that start with `diff --git `,
-/// `new file mode `, `deleted file mode `, `rename to ` and `@@ ` count. A line of a body
-/// starts with `+`, `-`, a space or `\`, so it never matches one of them; `---` and `+++`
-/// are not read at all, so a removed line `-- x` (printed `--- x`) cannot pass for a
-/// header. A path that is not UTF-8 is skipped.
+/// `new file mode `, `deleted file mode `, `rename to ` and `@@ ` count, and the removed lines
+/// of a hunk. A line of a body starts with `+`, `-`, a space or `\`, so it never matches one of
+/// them; `---` and `+++` come before the first hunk and are not read at all, so a removed line
+/// `-- x` (printed `--- x`) cannot pass for a header. A path that is not UTF-8 is skipped.
 pub(crate) fn parse(out: &[u8]) -> Result<Vec<ChangedFile>, RepoError> {
     let unexpected = || git::unexpected("diff -U0");
     let mut sections: Vec<Section> = Vec::new();
@@ -39,6 +42,8 @@ pub(crate) fn parse(out: &[u8]) -> Result<Vec<ChangedFile>, RepoError> {
                 path: header_path(header),
                 change: Change::Modified,
                 lines: Vec::new(),
+                cuts: Vec::new(),
+                open: None,
             });
             continue;
         }
@@ -50,6 +55,7 @@ pub(crate) fn parse(out: &[u8]) -> Result<Vec<ChangedFile>, RepoError> {
         } else if line.starts_with(b"deleted file mode ") {
             section.change = Change::Deleted;
         } else if let Some(name) = line.strip_prefix(b"rename to ") {
+            section.change = Change::Renamed;
             section.path = match name.first() {
                 Some(b'"') => unquote(name),
                 _ => Some(name.to_vec()),
@@ -63,6 +69,12 @@ pub(crate) fn parse(out: &[u8]) -> Result<Vec<ChangedFile>, RepoError> {
                     end: start + count - 1,
                 });
             }
+            section.open = Some(Cut { start, count });
+        } else if let Some(removed) = line.strip_prefix(b"-")
+            && holds_code(removed)
+            && let Some(cut) = section.open.take()
+        {
+            section.cuts.push(cut);
         }
     }
     let mut files = Vec::with_capacity(sections.len());
@@ -73,6 +85,7 @@ pub(crate) fn parse(out: &[u8]) -> Result<Vec<ChangedFile>, RepoError> {
                 path: Utf8PathBuf::from(path),
                 change: section.change,
                 lines: section.lines,
+                cuts: section.cuts,
             });
         }
     }
@@ -124,6 +137,16 @@ fn unquote(text: &[u8]) -> Option<Vec<u8>> {
     }
 }
 
+/// The old file is not parsed, so a removed line counts as a comment when it starts with `//`,
+/// `/*` or `*` (inside a block comment) after its indent.
+fn holds_code(line: &[u8]) -> bool {
+    let line = line.trim_ascii();
+    !(line.is_empty()
+        || line.starts_with(b"//")
+        || line.starts_with(b"/*")
+        || line.starts_with(b"*"))
+}
+
 /// `(c, d)` from `-a[,b] +c[,d] @@ ...`; without `,d` one line.
 fn new_side(hunk: &[u8]) -> Option<(u32, u32)> {
     let new = hunk.split(|&byte| byte == b' ').nth(1)?;
@@ -136,13 +159,18 @@ fn new_side(hunk: &[u8]) -> Option<(u32, u32)> {
 mod tests {
     use super::*;
 
-    fn file(path: &str, change: Change, ranges: &[(u32, u32)]) -> ChangedFile {
+    /// `cuts` are `(start, count)`.
+    fn file(path: &str, change: Change, ranges: &[(u32, u32)], cuts: &[(u32, u32)]) -> ChangedFile {
         ChangedFile {
             path: path.into(),
             change,
             lines: ranges
                 .iter()
                 .map(|&(start, end)| LineRange { start, end })
+                .collect(),
+            cuts: cuts
+                .iter()
+                .map(|&(start, count)| Cut { start, count })
                 .collect(),
         }
     }
@@ -164,8 +192,8 @@ mod tests {
         assert_eq!(
             parse(out.as_bytes()).unwrap(),
             [
-                file("src/ф \"q\"\\\t.ts", Change::Modified, &[(1, 1)]),
-                file("x y.ts", Change::Modified, &[(1, 1)]),
+                file("src/ф \"q\"\\\t.ts", Change::Modified, &[(1, 1)], &[(1, 1)]),
+                file("x y.ts", Change::Modified, &[(1, 1)], &[(1, 1)]),
             ]
         );
     }
@@ -191,9 +219,44 @@ mod tests {
         assert_eq!(
             parse(out.as_bytes()).unwrap(),
             [
-                file("a.ts", Change::Modified, &[(3, 3)]),
-                file("b.ts", Change::Added, &[(1, 5)]),
+                file(
+                    "a.ts",
+                    Change::Modified,
+                    &[(3, 3)],
+                    &[(3, 1), (3, 0), (3, 0)]
+                ),
+                file("b.ts", Change::Added, &[(1, 5)], &[]),
             ]
+        );
+    }
+
+    #[test]
+    fn a_cut_is_a_hunk_that_takes_out_a_line_of_code() {
+        let out = concat!(
+            "diff --git a/a.ts b/a.ts\n",
+            "@@ -2,3 +2 @@\n",
+            "-  // a note\n",
+            "-\n",
+            "-   * of a block\n",
+            "+  /** a block */\n",
+            "@@ -8 +6,0 @@\n",
+            "-  /* gone */\n",
+            "@@ -10,2 +8,0 @@\n",
+            "-\t\r\n",
+            "-  return x;\r\n",
+            "@@ -20 +18 @@\n",
+            "-  a(); // why\n",
+            "+  // a();\n",
+        );
+
+        assert_eq!(
+            parse(out.as_bytes()).unwrap(),
+            [file(
+                "a.ts",
+                Change::Modified,
+                &[(2, 2), (18, 18)],
+                &[(8, 0), (18, 1)]
+            )]
         );
     }
 
@@ -228,10 +291,10 @@ mod tests {
         assert_eq!(
             parse(out.as_bytes()).unwrap(),
             [
-                file("bin.ts", Change::Modified, &[]),
-                file("run.ts", Change::Modified, &[]),
-                file("gone.ts", Change::Deleted, &[]),
-                file("нов.ts", Change::Modified, &[(4, 4)]),
+                file("bin.ts", Change::Modified, &[], &[]),
+                file("run.ts", Change::Modified, &[], &[]),
+                file("gone.ts", Change::Deleted, &[], &[(0, 0)]),
+                file("нов.ts", Change::Renamed, &[(4, 4)], &[(4, 1)]),
             ]
         );
     }

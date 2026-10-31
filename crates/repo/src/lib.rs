@@ -39,9 +39,10 @@ pub struct BranchDistance {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Change {
     Added,
-    /// Also a rename (under the new path, with the lines of the edit only), a mode change
-    /// and a binary file (no lines).
+    /// Also a mode change and a binary file (no lines).
     Modified,
+    /// Under the new path, with the lines of the edit only.
+    Renamed,
     Deleted,
     Untracked,
 }
@@ -52,6 +53,16 @@ pub struct ChangedFile {
     pub path: Utf8PathBuf,
     pub change: Change,
     pub lines: Vec<LineRange>,
+    /// The hunks that took out a line of code, in order.
+    pub cuts: Vec<Cut>,
+}
+
+/// A hunk on its new side: `count` lines from `start` stand where the old lines were, or with
+/// `count = 0` the old lines went out after line `start`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Cut {
+    pub start: u32,
+    pub count: u32,
 }
 
 /// From 1, inclusive.

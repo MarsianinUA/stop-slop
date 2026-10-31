@@ -6,7 +6,7 @@ use kit::oxc::ast::ast::Expression;
 use kit::prelude::{AstKind, Span};
 use kit::{FindingKind, Position};
 
-use crate::{Finding, Fingerprint, LineRange};
+use crate::{Changed, Finding, Fingerprint};
 
 pub(crate) const PARSE_ERROR: &str = "parse-error";
 
@@ -22,11 +22,20 @@ pub(crate) struct Draft<'t> {
     pub place: &'t str,
     /// The named function the finding starts in, or `""`.
     pub function: &'t str,
+    pub owner: Owner,
+}
+
+/// What a finding is about, for `Finding::function` and `Finding::touched`.
+pub(crate) enum Owner {
+    /// The file itself: its path, or a text that does not parse.
+    File,
+    /// `touched` is `None` without a base.
+    Code { name: String, touched: Option<bool> },
 }
 
 pub(crate) struct FileFindings<'f> {
     pub path: &'f Utf8Path,
-    pub changed: Option<&'f [LineRange]>,
+    pub changed: Option<&'f Changed>,
     pub ignored: &'f BTreeSet<(Utf8PathBuf, String)>,
     pub findings: Vec<Finding>,
 }
@@ -39,6 +48,10 @@ impl FileFindings<'_> {
             return;
         }
         let line = draft.start.line;
+        let (function, touched) = match draft.owner {
+            Owner::File => (None, self.changed.map(|changed| changed.new_path)),
+            Owner::Code { name, touched } => (Some(name), touched),
+        };
         self.findings.push(Finding {
             rule: draft.rule,
             kind: draft.kind,
@@ -46,11 +59,14 @@ impl FileFindings<'_> {
             start: draft.start,
             end: draft.end,
             message: draft.message,
-            in_hunk: self.changed.map(|ranges| {
-                ranges
+            in_hunk: self.changed.map(|changed| {
+                changed
+                    .lines
                     .iter()
                     .any(|range| (range.start..=range.end).contains(&line))
             }),
+            function,
+            touched,
             fixable: draft.fixable,
             fingerprint: Fingerprint(key.1),
         });
