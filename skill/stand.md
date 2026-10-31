@@ -2,6 +2,8 @@
 
 `stop-slop-stand` runs the app of the repository in microsandbox VMs from a Compose file: the version before a change and the version after it, a few repeats each. It measures both and prints one line of JSON with only what needs a look.
 
+`run` prints nothing until its line, which takes 1-3 minutes, more with a bigger workload. Run it in the foreground with a 10-minute timeout: never in the background, and never poll it. If the 10 minutes run out anyway, something hangs or runs too long, and the run counts as failed. The next `run` sweeps what the stopped one left: lower `timeout` and `setup_timeout` of `x-stand` (`guide recipe`) so that a whole run fits in 10 minutes, and run again. Then the stand stops a step that hangs itself, and the line's `failure` names it.
+
 The stand file `compose.yaml` and the harness beside it, such as the workload, are the recipe. They live in `<common>/info/stop-slop-stand/`, outside the repository, and every work tree of the repository shares them. `stop-slop-stand guide <topic>` explains one part of it: run the topic a step names before you do that step. It prints the text of `references/guide.md` and `references/probes.md`, so a file you have read already needs no run.
 
 Two flows use these steps:
