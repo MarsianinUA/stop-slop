@@ -71,18 +71,23 @@ fn sweep(sandbox: &Microsandbox) -> Result<(), SandboxError> {
 /// check that it left nothing.
 struct Case {
     sandbox: &'static Microsandbox,
-    out: TempDir,
+    _temp: TempDir,
+    out: Utf8PathBuf,
 }
 
 impl Case {
     fn start() -> Option<Case> {
         let sandbox = live()?;
-        let out = tempfile::tempdir().unwrap();
-        Some(Case { sandbox, out })
+        let (_temp, out) = folder();
+        Some(Case {
+            sandbox,
+            _temp,
+            out,
+        })
     }
 
     fn out(&self) -> &Utf8Path {
-        Utf8Path::from_path(self.out.path()).unwrap()
+        &self.out
     }
 
     fn write(&self, name: &str, text: &str) {
