@@ -488,26 +488,26 @@ pub(super) async fn wait_for_file(
     job: &Job,
     file: &Utf8Path,
 ) -> Result<Option<JobInfo>, SandboxError> {
-    let inspect = || async move {
+    let look = || async move {
         within(GUEST_CALL, "inspect a job", job.inspect())
             .await?
             .map_err(backend)
+            .map(|info| (!info.state.is_active()).then_some(info))
     };
-    wait_for(file, inspect, |info: &JobInfo| !info.state.is_active()).await
+    wait_for(file, look).await
 }
 
-async fn wait_for<T, F: Future<Output = Result<T, SandboxError>>>(
+/// `look` gives the job's state once the job has ended.
+async fn wait_for<T, F: Future<Output = Result<Option<T>, SandboxError>>>(
     file: &Utf8Path,
     mut look: impl FnMut() -> F,
-    ended: impl Fn(&T) -> bool,
 ) -> Result<Option<T>, SandboxError> {
     let deadline = Instant::now() + GUEST_CALL;
     loop {
         if file.exists() {
             return Ok(None);
         }
-        let state = look().await?;
-        if ended(&state) {
+        if let Some(state) = look().await? {
             // A quick job can write the file and end between the two looks; the guest renames it
             // into place on the host, so a job seen ended has its file there if it wrote one.
             return Ok((!file.exists()).then_some(state));
@@ -621,23 +621,20 @@ mod tests {
     #[test]
     fn a_job_that_writes_its_file_and_ends_between_two_looks_started() {
         let temp = tempfile::tempdir().unwrap();
-        let file = Utf8PathBuf::from_path_buf(temp.path().join(STATUS)).unwrap();
-        let path = file.as_path();
+        let file = &Utf8PathBuf::from_path_buf(temp.path().join(STATUS)).unwrap();
         let rt = tokio::runtime::Builder::new_current_thread()
-            .enable_time()
             .build()
             .unwrap();
         let wait = |write: bool| {
             let look = move || async move {
                 if write {
-                    std::fs::write(path, "{}").unwrap();
+                    std::fs::write(file, "{}").unwrap();
                 }
-                Ok::<_, SandboxError>(true)
+                Ok(Some(()))
             };
-            rt.block_on(wait_for(path, look, |ended: &bool| *ended))
-                .unwrap()
+            rt.block_on(wait_for(file, look)).unwrap()
         };
-        assert_eq!(wait(false), Some(true));
+        assert_eq!(wait(false), Some(()));
         assert_eq!(wait(true), None);
     }
 
