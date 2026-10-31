@@ -17,7 +17,7 @@ Draft review comments for a colleague's PR `<n>`. The run ends when the draft fi
 ## Comment
 
 - In English: short (two or three sentences, and a code sample when it helps), plain words, gentle, written for someone who does not know the whole codebase.
-- Says what to change and why. The rule's `message` gives the why; the rule id stays in the draft's `Rule:` line.
+- Says what to change and why. The rule's `message`, filled with the finding's `detail`, gives the why; the rule id stays in the draft's `Rule:` line.
 - On old code (`inHunk: false`), says the line is older than the PR and asks for the change while the function is open anyway, or, when the PR made it worse, names the new uses.
 - When the project's conventions have the rule, links that section at the PR head: `[CONVENTIONS.md → Config Access](https://github.com/<owner>/<repo>/blob/<pr.head>/<path>#<anchor>)`, where `<owner>/<repo>` is the `nameWithOwner` of `gh repo view --json nameWithOwner`.
 - Goes through the `unslop` skill; where it pulls against the points above, they win.
