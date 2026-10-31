@@ -24,4 +24,4 @@ I ported some rules from [anti-slop](https://github.com/dmmulroy/anti-slop). Its
 
 When an agent changes my code, I want to know what the change costs the running app, not what the agent guesses. So there's a second tool, `stop-slop-stand`. It runs my app from a plain Compose file in [microsandbox](https://github.com/superradcompany/microsandbox) VMs, the version before the change and after it, a few times each, and hands the agent one line of JSON: what got slower or heavier, what now answers or writes differently, and which changed code never ran. It only ever runs my own branch, never a colleague's PR: their code would run on my machine.
 
-Windows: the live tests pass on my machine. Linux: CI runs them on every PR. Mac: not checked yet; on Apple silicon this one runs them: `STOP_SLOP_STAND_LIVE=1 cargo test --locked --manifest-path stand/Cargo.toml --workspace -- --test-threads=1`.
+Windows and Mac (Apple silicon): the live tests pass on my machines. Linux: CI runs them on every PR. This one runs them: `STOP_SLOP_STAND_LIVE=1 cargo test --locked --manifest-path stand/Cargo.toml --workspace -- --test-threads=1`.
