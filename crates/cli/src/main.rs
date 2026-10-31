@@ -36,6 +36,13 @@ fn main() -> ExitCode {
 fn run(command: Command) -> Exit {
     let json = wants_json(&command);
     let is_hook = matches!(command, Command::Hook);
+    let with_base = match &command {
+        Command::Ignore { .. } => {
+            "stop-slop ignore <fingerprint> --reason \"<reason>\" --base <ref>"
+        }
+        Command::Hot(_) => "stop-slop hot <report.json> --base <ref> --json",
+        _ => "stop-slop check --base <ref> --json",
+    };
     let result = match command {
         Command::Check(args) => check::run(args),
         Command::Hook => hook::run(),
@@ -51,7 +58,7 @@ fn run(command: Command) -> Exit {
     };
     result.unwrap_or_else(|error| {
         let cause = error.to_string();
-        let next = error.next();
+        let next = error.next(with_base);
         output::print_err(&output::failure_text(&cause, &next));
         if json {
             print_failure(error.phase(), &cause, &next);

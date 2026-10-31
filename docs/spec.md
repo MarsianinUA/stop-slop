@@ -219,7 +219,7 @@ Exit codes:
 - `3`: the program itself broke: git failed in a way the program does not expect or did not start, or reading or writing a file failed;
 - `130`: Ctrl+C stopped it.
 
-On 2 and 3, stderr says why and ends with a `next: <command>` line for each command that helps, such as `next: stop-slop check --base <ref> --json` when there is no base. With `--json`, `check`, `hot` and `rules` print a [failure line](#json-output-of-check) instead of their JSON.
+On 2 and 3, stderr says why and ends with a `next: <command>` line for each command that helps, such as `next: stop-slop check --base <ref> --json` when there is no base. Without a base, `ignore` names `stop-slop ignore <fingerprint> --reason "<reason>" --base <ref>` and `hot` names `stop-slop hot <report.json> --base <ref> --json`. With `--json`, `check`, `hot` and `rules` print a [failure line](#json-output-of-check) instead of their JSON.
 
 The hook is the exception. It exits with 2 on errors found and on any failure, because the agent reads a hook's stderr only on 2.
 

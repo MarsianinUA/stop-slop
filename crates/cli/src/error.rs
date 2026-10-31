@@ -89,10 +89,11 @@ impl CliError {
     }
 
     /// The commands of the `next:` lines and of `next`; empty when no command helps.
-    pub(crate) fn next(&self) -> Vec<String> {
+    /// `with_base` is the failed command again with `--base <ref>`.
+    pub(crate) fn next(&self, with_base: &str) -> Vec<String> {
         match self {
             CliError::Scope(ScopeError::UnknownBase(_) | ScopeError::NoBase) => {
-                vec!["stop-slop check --base <ref> --json".to_owned()]
+                vec![with_base.to_owned()]
             }
             CliError::UnknownFingerprint(_) => vec!["stop-slop check --json".to_owned()],
             CliError::Repo(error) | CliError::Scope(ScopeError::Repo(error)) => match error {

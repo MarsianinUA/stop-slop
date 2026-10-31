@@ -845,6 +845,16 @@ fn json_prints_one_failure_line_with_the_phase_and_next_on_2_and_3() {
     lone.write("src/a.constants.ts", ANY).commit("main");
     let out = run(lone.path(), &["check", "--json"]);
     assert_failure(&out, 2, "base", "no base branch", &base);
+    // `ignore` and `hot` name themselves again.
+    let out = run(lone.path(), &["ignore", "no-any:000000", "--reason", "r"]);
+    assert_eq!(code(&out), 2, "{}", stderr(&out));
+    let next = "next: stop-slop ignore <fingerprint> --reason \"<reason>\" --base <ref>\n";
+    assert!(stderr(&out).ends_with(next), "{}", stderr(&out));
+    let (_dir, report) = report_of(&lone, |_| {});
+    let report = report.to_str().expect("a UTF-8 temp path");
+    let out = run(lone.path(), &["hot", report, "--json"]);
+    let next = ["stop-slop hot <report.json> --base <ref> --json"];
+    assert_failure(&out, 2, "base", "no base branch", &next);
 
     write_config(&t, "disabled = [\"no-such\"]\n");
     for command in ["check", "rules"] {
