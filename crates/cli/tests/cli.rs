@@ -517,6 +517,40 @@ fn check_names_the_function_a_finding_sits_in_and_whether_the_branch_touched_it(
 }
 
 #[test]
+fn check_suggests_a_file_name_made_of_the_files_own() {
+    let t = TempRepo::new();
+    let files = [
+        "src/moneyBag.ts",
+        "src/order_Totals.Service.tsx",
+        "src/Index.ts",
+    ];
+    for file in files {
+        t.write(file, "export const LIMIT = 1;\n");
+    }
+    t.commit("main");
+
+    let mut args = vec!["check", "--json", "--files"];
+    args.extend(files);
+    let report = check(t.path(), &args, 1);
+    let examples: Vec<(&str, &str)> = findings(&report)
+        .iter()
+        .filter(|finding| finding["rule"] == "file-name-pattern")
+        .map(|finding| {
+            let example = finding["detail"]["example"].as_str().expect("an example");
+            (finding["file"].as_str().expect("file"), example)
+        })
+        .collect();
+    assert_eq!(
+        examples,
+        [
+            ("src/Index.ts", "index.ts"),
+            ("src/moneyBag.ts", "money-bag.<role>.ts"),
+            ("src/order_Totals.Service.tsx", "order-totals.service.tsx"),
+        ]
+    );
+}
+
+#[test]
 fn check_json_is_one_line_and_pretty_indents_it() {
     let t = branch_repo();
     let line = run(t.path(), &["check", "--base", "main", "--json"]);

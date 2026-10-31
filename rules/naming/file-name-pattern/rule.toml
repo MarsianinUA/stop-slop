@@ -1,7 +1,7 @@
 description = "A file name that is not `<feature>.<role>.ts` in kebab-case"
 kind = "error"
 source = ["personal"]
-message = "`{name}` does not follow `<feature>.<role>.ts` in kebab-case: the role suffix tells a reader what the file holds and lets a search like `*.service.ts` find every file of a kind, and one spelling of words keeps import paths guessable. Rename it, for example to `order-totals.service.ts`, and update its imports."
+message = "`{name}` does not follow `<feature>.<role>.ts` in kebab-case: the role suffix tells a reader what the file holds and lets a search like `*.service.ts` find every file of a kind, and one spelling of words keeps import paths guessable. Rename it, for example to `{example}`, and update its imports."
 
 [options]
 names = ["index", "main"]
