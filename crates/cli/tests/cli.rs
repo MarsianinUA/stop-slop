@@ -318,8 +318,12 @@ fn check(dir: &Path, args: &[&str], expected: i32) -> Value {
     json(&out)
 }
 
+fn sha(t: &TempRepo, rev: &str) -> String {
+    t.git(&["rev-parse", rev])
+}
+
 fn sha7(t: &TempRepo, rev: &str) -> String {
-    t.git(&["rev-parse", rev])[..7].to_owned()
+    sha(t, rev)[..7].to_owned()
 }
 
 fn is_fingerprint(value: &Value, rule: &str) -> bool {
@@ -394,7 +398,7 @@ fn check_reports_findings_of_the_branch_as_json() {
     assert_eq!(report["pr"], Value::Null);
     assert_eq!(
         report["base"],
-        json!({"ref": "main", "sha": sha7(&t, "main"), "reason": "flag"})
+        json!({"ref": "main", "sha": sha(&t, "main"), "reason": "flag"})
     );
     assert_eq!(
         report["files"],
@@ -980,7 +984,7 @@ mod pr {
         );
         assert_eq!(
             report["base"],
-            json!({"ref": "origin/main", "sha": sha7(&t, "main"), "reason": "pr"})
+            json!({"ref": "origin/main", "sha": sha(&t, "main"), "reason": "pr"})
         );
         assert_eq!(
             finding_files(&report),
@@ -1381,7 +1385,7 @@ fn check_fix_writes_the_fixes_and_checks_the_new_text() {
     );
     assert_eq!(
         report["base"],
-        json!({"ref": "main", "sha": sha7(&t, "main"), "reason": "flag"})
+        json!({"ref": "main", "sha": sha(&t, "main"), "reason": "flag"})
     );
     assert_eq!(
         report["files"],
@@ -2127,7 +2131,7 @@ fn hot_lists_the_hot_functions_of_the_branch_with_the_findings_inside() {
 
     assert_eq!(
         found["base"],
-        json!({"ref": "main", "sha": sha7(&t, "main"), "reason": "flag"})
+        json!({"ref": "main", "sha": sha(&t, "main"), "reason": "flag"})
     );
     // `formatMoney` is hot too, but its file is not of the branch.
     let [row] = found["hot"].as_array().expect("hot").as_slice() else {
@@ -2238,7 +2242,7 @@ fn hot_without_coverage_names_no_function_unexercised_and_exits_with_1() {
     assert_eq!(
         json(&out),
         json!({
-            "base": {"ref": "main", "sha": sha7(&t, "main"), "reason": "flag"},
+            "base": {"ref": "main", "sha": sha(&t, "main"), "reason": "flag"},
             "hot": [],
             "unexercised": null,
             "coverage": "unknown",
@@ -2286,7 +2290,7 @@ fn hot_of_a_branch_without_files_outside_tests_finds_nothing() {
     assert_eq!(
         json(&out),
         json!({
-            "base": {"ref": "main", "sha": sha7(&t, "main"), "reason": "flag"},
+            "base": {"ref": "main", "sha": sha(&t, "main"), "reason": "flag"},
             "hot": [],
             "unexercised": [],
             "coverage": "collected",

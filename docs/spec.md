@@ -239,7 +239,7 @@ A finding is `file:line:column rule message`. Lines and columns start at 1, and 
 ```json
 {
   "pr": null,
-  "base": { "ref": "origin/feat/markets-cache", "sha": "a1b2c3d", "reason": "pr" },
+  "base": { "ref": "origin/feat/markets-cache", "sha": "a1b2c3d4e5f60718293a4b5c6d7e8f9012345678", "reason": "pr" },
   "files": ["src/modules/markets/markets.service.ts"],
   "skipped": [{ "file": "src/a.ts", "reason": "already-in-base" }],
   "findings": [
@@ -266,7 +266,7 @@ A finding is `file:line:column rule message`. Lines and columns start at 1, and 
 The program prints it on one line, because indents cost an agent tokens. `--pretty` indents it by 2 spaces for a person. I laid out the example here by hand.
 
 - `pr` is `null` without `--pr`. With it, `pr` has the `number` of the pull request, its full `head` sha, its `base` branch without `origin/` and its `title`.
-- `base` has `ref`, a 7-character `sha` and `reason`, which is `flag`, `pr`, `ancestor` or `default`. With `--pr` it is `origin/<base>` with `reason` `pr`. It is `null` for `--files` and `--all`, and then every `inHunk` and `touched` is `null` as well.
+- `base` has `ref`, the full `sha` and `reason`, which is `flag`, `pr`, `ancestor` or `default`. With `--pr` it is `origin/<base>` with `reason` `pr`. It is `null` for `--files` and `--all`, and then every `inHunk` and `touched` is `null` as well.
 - `files` lists the files the program checked, and `skipped` the ones it left out and why.
 - `findings` go in order of file, line, column and rule.
   - `kind` is `error` when the rule is sure, `candidate` for a heuristic the agent judges, and `parse-error` when the file did not parse, so no rule ran on it. A `parse-error` finding has `parse-error` as its `rule` too.
@@ -294,7 +294,7 @@ On exit 2 and 3, `check --json` prints one line instead, even with `--pretty`, a
 
 ```json
 {
-  "base": { "ref": "main", "sha": "76bde5d", "reason": "ancestor" },
+  "base": { "ref": "main", "sha": "76bde5da1c2b3e4f5061728394a5b6c7d8e9f012", "reason": "ancestor" },
   "hot": [
     {
       "service": "api", "file": "src/orders/orders.service.ts", "function": "summarize",

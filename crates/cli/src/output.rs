@@ -458,7 +458,7 @@ pub(crate) fn print_err(text: &str) {
 fn base_json(base: &Base) -> BaseJson<'_> {
     BaseJson {
         reference: &base.reference,
-        sha: sha7(&base.oid),
+        sha: base.oid.to_string(),
         reason: base_reason(base.reason),
     }
 }
