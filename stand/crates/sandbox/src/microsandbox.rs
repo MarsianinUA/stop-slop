@@ -78,6 +78,7 @@ impl Microsandbox {
     /// Cheap: the runtime of microsandbox and `stand-guest` are installed on the first `pull` or
     /// `create`, which the stand always calls under its lock.
     pub fn new(home: &Utf8Path) -> Result<Microsandbox, SandboxError> {
+        let home = resolved(home)?;
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .enable_all()
             .thread_stack_size(16 << 20)
@@ -86,7 +87,7 @@ impl Microsandbox {
         Ok(Microsandbox {
             runtime,
             inner: Arc::new(Inner {
-                home: home.to_owned(),
+                home,
                 local: OnceCell::new(),
                 installed: OnceCell::new(),
                 live: Mutex::new(BTreeMap::new()),
@@ -767,6 +768,33 @@ async fn within<T>(
     timeout(limit, call)
         .await
         .map_err(|_| guest_error(format!("{what}: no answer within {} s", limit.as_secs())))
+}
+
+/// The home without links on Unix: the SDK refuses a bind whose host path goes through one, and
+/// the adapter binds `guest/<version>` and the folders of each VM from the home (`/tmp` is a link
+/// on macOS). The part not made yet stays as written, so `new` makes nothing. Not on Windows:
+/// there `canonicalize` gives a `\\?\` path, and the SDK checks no links.
+fn resolved(home: &Utf8Path) -> Result<Utf8PathBuf, SandboxError> {
+    if !cfg!(unix) {
+        return Ok(home.to_owned());
+    }
+    let mut made = home;
+    let mut rest = Vec::new();
+    loop {
+        match made.canonicalize_utf8() {
+            Ok(real) => return Ok(rest.iter().rev().fold(real, |path, name| path.join(name))),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                match (made.parent(), made.file_name()) {
+                    (Some(parent), Some(name)) => {
+                        rest.push(name);
+                        made = parent;
+                    }
+                    _ => return Ok(home.to_owned()),
+                }
+            }
+            Err(error) => return Err(backend(format!("resolve {home}: {error}"))),
+        }
+    }
 }
 
 fn backend(error: impl Display) -> SandboxError {

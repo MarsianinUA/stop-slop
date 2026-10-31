@@ -922,8 +922,18 @@ fn volume(name: &VolumeName, guest: &str) -> Mount {
 
 fn folder() -> (TempDir, Utf8PathBuf) {
     let temp = tempfile::tempdir().unwrap();
-    let path = Utf8Path::from_path(temp.path()).unwrap().to_owned();
+    let path = resolved(Utf8Path::from_path(temp.path()).unwrap());
     (temp, path)
+}
+
+/// microsandbox refuses a bind through a link on Unix, and the temp folder of macOS lies behind
+/// `/var`. Not on Windows, where `canonicalize` gives a `\\?\` path.
+fn resolved(path: &Utf8Path) -> Utf8PathBuf {
+    if cfg!(unix) {
+        path.canonicalize_utf8().unwrap()
+    } else {
+        path.to_owned()
+    }
 }
 
 fn create(sandbox: &impl Sandbox, launch: Launch) -> SandboxId {
